@@ -4288,7 +4288,7 @@ private enum NativeDependencyInventory {
 /// Mirrors the Python `security_scanner.web` header/cookie/CORS/redirect checks.
 /// It only reads what the server already returns -- no payloads, no fuzzing.
 private enum NativeWebScanner {
-    private static let userAgent = "KODA-web-scanner (+https://github.com/jhny-kor)"
+    private static let userAgent = "KODA-web-scanner (+https://gitlab.aigov.go.kr/y2kthr/koda)"
     private static let severityOrder = ["critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0]
 
     /// Options controlling crawl breadth and authentication. Mirrors the Python
@@ -5971,7 +5971,7 @@ private final class WebPageRenderer: NSObject, WKNavigationDelegate {
         await setCookies(from: cookieHeader, url: url)
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
-        request.setValue("KODA-web-scanner (+https://github.com/jhny-kor)", forHTTPHeaderField: "User-Agent")
+        request.setValue("KODA-web-scanner (+https://gitlab.aigov.go.kr/y2kthr/koda)", forHTTPHeaderField: "User-Agent")
         for (name, value) in extraHeaders where name.lowercased() != "cookie" {
             request.setValue(value, forHTTPHeaderField: name)
         }
@@ -7377,7 +7377,7 @@ private enum SecurityPreventionToolkit {
                 with:
                   python-version: "3.12"
               - name: Install KODA scanner
-                run: python -m pip install "git+https://github.com/jhny-kor/KODA.git"
+                run: python -m pip install "git+https://gitlab.aigov.go.kr/y2kthr/koda.git"
               - name: Run KODA local scan
                 run: |
                   python -m security_scanner scan --target . --format sarif --output koda-results.sarif --enable-osv --enable-vuln-intel

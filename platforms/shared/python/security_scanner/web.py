@@ -44,7 +44,7 @@ from pathlib import Path
 
 from .models import Finding
 
-_USER_AGENT = "KODA-web-scanner (+https://github.com/jhny-kor/KODA)"
+_USER_AGENT = "KODA-web-scanner (+https://gitlab.aigov.go.kr/y2kthr/koda)"
 # Certificates expiring within this window are surfaced before they break TLS.
 _CERT_EXPIRY_WARN_DAYS = 21
 _WEAK_TLS_VERSIONS = {"SSLv2", "SSLv3", "TLSv1", "TLSv1.1"}

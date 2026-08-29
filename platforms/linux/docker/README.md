@@ -92,7 +92,7 @@ capability 제거, CPU/메모리/PID 제한이 적용됩니다. `--target`/`--sb
 
 ## 인증 Linux 포털
 
-운영 화면은 [KODA + KODA SBOM Tracker 통합본](../suite/README.ko.md)의 동일
+운영 화면은 [KODA + KODA SBOM Tracker 통합본](../suite/README.md)의 동일
 오리진 `/koda/` 경로를 사용합니다. 통합본에서는 `KODA_PUBLISH_DASHBOARD=0`으로
 8765 포트를 게시하지 않고 gateway가 전용 Docker 네트워크로만 접근합니다.
 완료된 분석 회차에서는 **SBOM 다운로드**에서
@@ -133,7 +133,7 @@ masquerade를 비활성화해 컨테이너 발신 트래픽을 차단합니다. 
 (`--internal` 네트워크는 포트 공개까지 차단하므로 사용하지 않습니다.)
 
 GitLab 서비스 계정으로 접근 가능한 저장소를 포털에서 선택해 점검하려면
-[GitLab 저장소 연동 지침](../../../docs/gitlab-integration-ko.md)에 따라 관리자 화면에서
+[GitLab 저장소 연동 지침](../../../docs/gitlab-integration.md)에 따라 관리자 화면에서
 URL·조회용 PAT·결과 저장용 PAT·선택적 CA를 저장합니다. 운영자가 웹 변경을 잠글 때만
 `read_api` 조회 토큰과 같은 계정의 `api` 쓰기 토큰 파일, CA 파일을 읽기 전용으로
 마운트합니다. KODA는 Tracker가 발급한

@@ -3107,7 +3107,7 @@ def _perform_authentication(
     user_field = str(auth.get("user_field") or "username")
     pass_field = str(auth.get("pass_field") or "password")
     body = json.dumps({user_field: username, pass_field: password}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    headers = {"User-Agent": "KODA-web-scanner (+https://github.com/jhny-kor/KODA)", **extra_headers, "Content-Type": "application/json"}
+    headers = {"User-Agent": "KODA-web-scanner (+https://gitlab.aigov.go.kr/y2kthr/koda)", **extra_headers, "Content-Type": "application/json"}
     request = urllib.request.Request(request_url, data=body, headers=headers, method="POST")
     timeout = min(float(network.limits["timeout_seconds"]), network.remaining_timeout())
     if timeout <= 0:

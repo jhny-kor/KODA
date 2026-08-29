@@ -22,7 +22,6 @@ xcuserdata/
 .claude/
 .codegraph/
 .debug-journal.md
-platforms/macos/packaging/ExportOptions-app-store.plist
 KODA-release-security-package-*/
 store-assets/
 icon/

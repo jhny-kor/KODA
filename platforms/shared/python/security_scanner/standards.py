@@ -604,7 +604,7 @@ LOCAL_STANDARD = SecurityStandard(
         "로컬 휴리스틱 룰을 직접 실행합니다. 전체 SAST, DAST, CVE 인텔리전스를 대체하지는 않습니다.",
     ),
     references=(
-        _reference("KODA GitHub", "KODA GitHub", "https://github.com/jhny-kor/KODA"),
+        _reference("KODA GitLab", "KODA GitLab", "https://gitlab.aigov.go.kr/y2kthr/koda"),
     ),
     coverage_level="local",
 )

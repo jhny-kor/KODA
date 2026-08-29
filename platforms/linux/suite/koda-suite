@@ -491,7 +491,7 @@ install_suite() {
   mkdir -p "$prefix/tracker/gateway"
   install -m 0644 "$script_dir/gateway/gateway.conf.template" "$prefix/tracker/gateway/gateway.conf.template"
   install -m 0755 "$script_dir/koda-suite" "$prefix/koda-suite"
-  cp "$script_dir/README.ko.md" "$script_dir/TROUBLESHOOTING.ko.md" \
+  cp "$script_dir/README.md" "$script_dir/TROUBLESHOOTING.md" \
     "$script_dir/metadata.env" "$prefix/"
   cp "$script_dir/.env.example" "$script_dir/koda-suite.env.example" "$prefix/config/"
   start_dashboard "$prefix"

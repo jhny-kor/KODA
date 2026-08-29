@@ -1,8 +1,8 @@
 # KODA 엔드포인트(호스트) 보안 점검 로드맵
 
 > **문서 상태:** 이 문서는 호스트 점검 기능의 설계·구현 이력입니다. 현재 지원되는
-> `host-scan` 명령과 설치·운영 절차는 [CLI 및 로컬 사용법](usage.ko.md)과
-> [Linux 설치·운영](install/linux.ko.md)을 기준으로 확인하세요. 아래의 진행 상태와
+> `host-scan` 명령과 설치·운영 절차는 [CLI 및 로컬 사용법](usage.md)과
+> [Linux 설치·운영](install/linux.md)을 기준으로 확인하세요. 아래의 진행 상태와
 > 미구현 항목은 기록 시점의 계획 상태입니다.
 
 > 목적: KODA를 "소스코드/레포 스캐너"에서 **설치된 컴퓨터(엔드포인트)의 보안 상태를 점검하는 도구**로 확장한다.
@@ -157,16 +157,16 @@ Updates)에 자동 로그인·게스트 계정·화면 잠금이 추가되었습
 
 ### macOS — Swift 네이티브 앱에 host posture 추가 — ✅ (2026-06-07)
 > 방침: macOS는 **Swift 네이티브 KODA 앱**(`platforms/macos/app/KODA`)으로 구동된다. host posture는 별도 Python 앱/창이 아니라 **기존 Swift 앱의 네이티브 스캐너에 직접 추가**한다. PyInstaller/pywebview 방향은 폐기(되돌림).
-- [x] `NativeSecurityScanner.swift`에 `scanHost()` + 읽기전용 `Process` 러너 추가. 비샌드박스 실행은 macOS 점검 9종(기존 6종 + 자동 로그인·게스트 계정·화면 잠금)을 엄격한 성공 출력만으로 판정합니다. App Sandbox에서는 시스템 명령 오류를 OFF/활성으로 오인하지 않고 9개 항목을 `미확인`으로 반환합니다.
+- [x] `NativeSecurityScanner.swift`에 `scanHost()` + 읽기전용 `Process` 러너 추가. 비샌드박스 실행은 macOS 점검 9종(기존 6종 + 자동 로그인·게스트 계정·화면 잠금)을 엄격한 성공 출력만으로 판정합니다. 제한된 실행 권한에서는 시스템 명령 오류를 OFF/활성으로 오인하지 않고 9개 항목을 `미확인`으로 반환합니다.
 - [x] `category="host"` 라벨(ko/en) 추가 — 기존 리포트(HTML/MD/PDF/점수)에 그대로 통합.
 - [x] `ScannerBridge.swift`: `runHostScan(language:)` + `runHostScanCommand()` — 기존 리포트/점수 스냅샷 파이프라인 재사용(타깃 선택 불필요).
 - [x] `ContentView.swift`: 메뉴에 "이 컴퓨터 점검 (호스트 보안)" 버튼 추가(OSV 조회 옆). `AppLanguage.runHostScanTitle`(ko/en).
 - [x] 절대경로 사용(`/usr/bin/csrutil`,`/usr/bin/fdesetup`,`/usr/sbin/spctl`,`/usr/libexec/ApplicationFirewall/socketfilterfw`,`/usr/bin/defaults`).
 - [x] 2026-08-09 Release 빌드·Apple Development 서명·`/Applications/KODA.app` 설치·실행 및 deep codesign 검증 완료.
-- 주의(후속): KODA.entitlements는 App Sandbox 활성입니다. 현재 App Store 경로는 시스템 상태를 자동 확정하지 않고 `미확인`과 설정 조치 경로를 제공합니다. 앱 내부에서 실제 값을 자동 확정하려면 별도의 권한 있는 helper/XPC 경로가 필요합니다.
+- 주의(후속): KODA.entitlements는 제한된 실행 권한을 사용합니다. 시스템 상태를 자동 확정할 수 없는 경우 `미확인`과 설정 조치 경로를 제공합니다. 앱 내부에서 실제 값을 자동 확정하려면 별도의 권한 있는 helper/XPC 경로가 필요합니다.
 
 ### macOS PyInstaller 레인 — 참고만(host posture는 Swift로 이관)
-- PyInstaller 레인(`build-koda-app.command`)은 레거시 실험용. `--collect-submodules security_scanner`만 유지(지연 임포트 모듈 번들). 엔트리포인트는 `koda-browser-app.py`를 사용하며 기존 엔트리포인트는 호환성 래퍼로 유지합니다.
+- PyInstaller 레인(`build-koda-app.command`)은 레거시 실험용. `--collect-submodules security_scanner`만 유지(지연 임포트 모듈 번들). 엔트리포인트는 원복(`sec-chk-app.py`).
 
 ### Dashboard UI — 🟡 진행 (2026-06-07)
 - [x] host 카테고리 라벨(en/ko), JSON `resource` 노출(Phase 0/1).

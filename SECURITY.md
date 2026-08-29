@@ -1,26 +1,26 @@
-# Security Policy
+# KODA 보안 정책
 
-## Supported Versions
+## 지원 버전
 
-| Version | Supported |
+| 버전 | 지원 여부 |
 | --- | --- |
-| main / latest | yes |
+| main / latest | 지원 |
 
-## Reporting a Vulnerability
+## 취약점 신고
 
-Please report suspected vulnerabilities privately before opening a public issue.
+의심되는 취약점은 공개 이슈를 열기 전에 비공개로 신고하세요.
 
-- Project: security
-- Contact: security@example.com
-- Expected first response: 3 business days
-- Expected status update: 7 business days
+- 프로젝트: security
+- 연락처: security@example.com
+- 최초 응답 목표: 영업일 3일
+- 상태 업데이트 목표: 영업일 7일
 
-## Handling
+## 처리 절차
 
-1. Confirm the report and assign an owner.
-2. Reproduce the issue in a private branch or isolated environment.
-3. Patch, test, and release the fix.
-4. Rotate exposed credentials when secrets are involved.
-5. Publish an advisory or release note after users have a remediation path.
+1. 신고를 확인하고 담당자를 지정합니다.
+2. 비공개 브랜치 또는 격리 환경에서 재현합니다.
+3. 수정·테스트 후 수정 버전을 배포합니다.
+4. 비밀 값이 노출된 경우 자격 증명을 교체합니다.
+5. 사용자가 조치할 수 있는 시점에 권고 또는 릴리스 노트를 게시합니다.
 
-For the Korean version, see [SECURITY.ko.md](SECURITY.ko.md).
+- [한국어 문서 인덱스](docs/README.md)

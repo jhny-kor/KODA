@@ -1,30 +1,13 @@
-# NIST SSDF Workflow
+# NIST SSDF 워크플로
 
-This file maps KODA prevention work to NIST SP 800-218 SSDF practice groups. It is a local evidence checklist, not a certification statement.
+이 문서는 KODA 예방 작업을 NIST SP 800-218 SSDF 실천 그룹에 매핑합니다.
+인증서나 인증 결과가 아니라 프로젝트 증적 체크리스트입니다.
 
-## Prepare The Organization
+- 조직의 보안 책임자와 예외 승인 절차 정의
+- 소스·빌드·릴리스 산출물 보호
+- 자동화된 보안 점검과 결과 보관
+- 취약점 대응·수정·재검증 기록
+- 릴리스 provenance와 서명 보관
 
-- [ ] Define owners for secure development decisions.
-- [ ] Keep `SECURITY.md`, CODEOWNERS, and exception policy current.
-- [ ] Train contributors on secrets, dependency hygiene, secure defaults, and report handling.
-
-## Protect The Software
-
-- [ ] Keep repository access least-privilege.
-- [ ] Run the KODA pre-commit gate for local prevention.
-- [ ] Generate SBOMs for release builds.
-- [ ] Sign release artifacts and preserve provenance.
-
-## Produce Well-Secured Software
-
-- [ ] Run KODA, SAST, dependency, and workflow-hardening checks on pull requests.
-- [ ] Use secure defaults for auth, sessions, CORS, containers, CI tokens, and logging.
-- [ ] Keep dependency update automation enabled.
-- [ ] Review design changes for auth, data protection, and trust boundaries.
-
-## Respond To Vulnerabilities
-
-- [ ] Triage OSV/CVE findings with KEV/EPSS context.
-- [ ] Record reviewed dependency decisions in VEX.
-- [ ] Track owner, due date, remediation result, and release/advisory notes.
-- [ ] Re-run KODA and compare score history after remediation.
+- [한국어 보안 문서 인덱스](../README.md#보안-점검연동-security)
+- [English NIST SSDF workflow](NIST_SSDF_WORKFLOW.md)

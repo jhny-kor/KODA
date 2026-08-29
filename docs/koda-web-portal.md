@@ -101,7 +101,7 @@ Tracker로 전송해 분석 결과를 받은 뒤 GitLab 결과 브랜치·Merge 
 
 ## 관련 문서
 
-- [Linux 설치·운영](install/linux.ko.md)
-- [통합 폐쇄망 설치](../platforms/linux/suite/README.ko.md)
-- [GitLab 저장소 연동](gitlab-integration-ko.md)
-- [KODA 리포트 계약](report-contract.ko.md)
+- [Linux 설치·운영](install/linux.md)
+- [통합 폐쇄망 설치](../platforms/linux/suite/README.md)
+- [GitLab 저장소 연동](gitlab-integration.md)
+- [KODA 리포트 계약](report-contract.md)

@@ -1,21 +1,13 @@
-# KODA Pre-Commit Security Gate
+# KODA pre-commit 보안 게이트
 
-KODA can install a local Git pre-commit hook that runs a fast offline scan before a commit is created.
+커밋 전에 빠른 오프라인 스캔을 실행하는 로컬 Git hook을 설치합니다.
 
 ```bash
 python3 -m security_scanner install-hook --target . --fail-on high
 ```
 
-The hook blocks the commit when findings meet or exceed `KODA_PRE_COMMIT_FAIL_ON`.
+Hook 설치는 대상 저장소의 `.git/hooks`를 변경합니다. 적용 전에 현재 hook과
+백업 정책을 확인하고, CI에서는 동일한 `--fail-on` 기준을 별도로 실행하세요.
 
-Install it only where `python3 -m security_scanner` is available to Git hooks
-(for example, the KODA-installed environment or an activated source checkout).
-The hook writes its Markdown report under `TMPDIR` (or `/tmp`), so that
-location must be writable by the committing user.
-
-Useful environment variables:
-
-- `KODA_PRE_COMMIT_FAIL_ON`: `critical`, `high`, `medium`, `low`, or `info`
-- `KODA_PRE_COMMIT_TARGET`: scan target, default `.`
-
-Keep the hook local and fast. Run external OSV/KEV/EPSS lookup, ZAP DAST, SBOM upload, and release signing from the app or CI.
+- [한국어 보안 문서 인덱스](../README.md#보안-점검연동-security)
+- [English pre-commit security gate](PRE_COMMIT.md)

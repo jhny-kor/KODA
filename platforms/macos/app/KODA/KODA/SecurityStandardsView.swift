@@ -2607,7 +2607,7 @@ enum SecurityStandardCatalog {
                 category("headers-container-hardening", "헤더 및 컨테이너 하드닝", "보안 헤더 기준, directory listing/WebDAV, 컨테이너 capability와 runtime 기준을 확인합니다.")
             ],
             references: [
-                reference("KODA GitHub", "https://github.com/jhny-kor/KODA")
+                reference("KODA GitLab", "https://gitlab.aigov.go.kr/y2kthr/koda")
             ]
         ),
         AppSecurityStandard(

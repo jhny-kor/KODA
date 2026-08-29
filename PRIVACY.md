@@ -1,37 +1,22 @@
-# KODA Privacy Policy
+# KODA 개인정보 보호정책
 
-Effective date: May 17, 2026
+시행일: 2026년 5월 17일
 
-KODA is a macOS app for local project security review. The app is designed to analyze files and folders selected by the user on the user's Mac.
+KODA는 사용자가 선택한 파일과 폴더를 기기에서 분석하는 로컬 보안 점검
+도구입니다. 계정, 광고 추적, 분석 또는 데이터 판매를 요구하지 않습니다.
 
-## Data collection
+## 수집·처리 범위
 
-KODA does not require an account and does not collect personal information for advertising, tracking, analytics, or resale.
+- 보안 결과·스냅샷·내보낸 파일은 사용자가 공유하지 않는 한 로컬에 저장됩니다.
+- KODA는 사용자가 선택한 파일·폴더·아카이브만 읽습니다.
+- OSV.dev, CISA KEV, FIRST EPSS 보강을 켜면 패키지 이름·버전·CVE가 해당
+  공개 서비스로 전송될 수 있지만 소스 코드·비밀 값·보고서는 보내지 않습니다.
+- `--ai-triage`에서 로컬 Ollama를 사용하면 전송이 없고, 클라우드 백엔드를
+  명시한 경우 필요한 메타데이터와 짧은 코드 주변부가 해당 제공자로 전송될
+  수 있습니다. 원시 비밀 값은 전송하지 않습니다.
 
-Security scan results are generated on the user's device from files and folders selected by the user. Reports, snapshots, and exported artifacts are stored locally unless the user chooses to share them outside the app.
+KODA는 제3자 광고 SDK를 사용하지 않고 앱·웹사이트 간 사용자를 추적하지
+않습니다. 문의는 [KODA GitLab 프로젝트](https://gitlab.aigov.go.kr/y2kthr/koda)를
+이용하세요.
 
-## Local file access
-
-KODA reads only user-selected files, folders, or archives for security analysis. The app uses this access to identify possible secrets, dependency risks, configuration issues, code patterns, and release-preparation gaps.
-
-## Optional online vulnerability enrichment
-
-KODA can optionally enrich dependency and vulnerability findings through public security intelligence services such as OSV.dev, CISA Known Exploited Vulnerabilities, and FIRST EPSS. When this feature is used, dependency package names, package versions, or CVE identifiers may be sent to those public endpoints. KODA does not intentionally send source code, local file contents, account credentials, or scan reports to those services.
-
-Network providers may receive standard request metadata such as IP address and user agent as part of normal HTTPS requests.
-
-## Optional AI triage
-
-KODA can optionally use a large language model to label findings as likely true or false positives (`--ai-triage`). This feature is disabled by default. When a **local** backend is used (Ollama, the default), finding context stays on the user's machine and nothing is sent over the network. When the user explicitly selects a **cloud** backend (for example `anthropic/...` or `openai/...`), KODA sends finding metadata and a short surrounding source snippet to that provider in order to obtain the label; KODA surfaces a one-time warning when this external transfer happens. Raw secret values are never included in the data sent for triage: `secrets` findings are triaged from their redacted evidence only, without a source snippet. API keys for cloud backends are read from environment variables and are not stored by KODA.
-
-## Tracking and advertising
-
-KODA does not use third-party advertising SDKs, does not track users across apps or websites, and does not sell user data.
-
-## Contact
-
-For privacy questions or support requests, use the project support page:
-
-https://github.com/jhny-kor/KODA
-
-For the Korean version, see [PRIVACY.ko.md](PRIVACY.ko.md).
+- [한국어 문서 인덱스](docs/README.md)

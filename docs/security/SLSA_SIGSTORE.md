@@ -1,11 +1,10 @@
-# SLSA and Sigstore Release Guardrails
+# SLSA·Sigstore 릴리스 보호
 
-For release builds, add provenance and signing controls before publishing artifacts:
+릴리스 전에 CI에서 빌드하고, provenance 또는 동등한 attestation을 생성하며,
+Sigstore/cosign 또는 조직의 서명 시스템으로 산출물을 서명합니다.
 
-1. Build release artifacts in CI, not on a developer laptop.
-2. Generate SLSA provenance or an equivalent attestation.
-3. Sign artifacts with Sigstore/cosign or your organization's signing system.
-4. Publish checksums, signatures, and provenance next to the release.
-5. Keep GitHub Actions permissions read-only by default and grant write or OIDC permissions only at job scope.
+체크섬·서명·provenance는 릴리스 산출물과 함께 보관하고, 배포 전에 서명과
+빌드 출처를 검증하세요.
 
-KODA detects missing signing/provenance preparation from local workflow files, but actual signature verification requires the built artifact and release metadata.
+- [한국어 보안 문서 인덱스](../README.md#보안-점검연동-security)
+- [English SLSA and Sigstore guardrails](SLSA_SIGSTORE.md)

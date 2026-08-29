@@ -753,7 +753,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install KODA scanner
-        run: python -m pip install "git+https://github.com/jhny-kor/KODA.git"
+        run: python -m pip install "git+https://gitlab.aigov.go.kr/y2kthr/koda.git"
       - name: Run KODA local scan
         run: |
           python -m security_scanner scan --target . --format sarif --output koda-results.sarif --enable-osv --enable-vuln-intel

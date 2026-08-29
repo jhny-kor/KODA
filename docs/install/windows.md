@@ -1,126 +1,64 @@
-# KODA Windows Install
+# KODA Windows 설치
 
-Windows uses the shared Python engine from `platforms/shared/python/` and packages it through the Windows scripts under `platforms/windows/`.
+Windows 설치본은 공통 Python 엔진과 Inno Setup 패키지를 사용합니다. 실제
+설치본과 취약점 데이터 zip은 Windows 빌드 환경에서 생성해야 합니다.
 
-## Build Installer
-
-Run on Windows 10/11 with Python 3.10 or newer and Inno Setup 6 installed:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\platforms\windows\scripts\build-koda-windows-installer.ps1
-```
-
-The build creates:
-
-- `dist\KODA\KODA.exe`
-- `dist\Windows\KODASetup.exe`
-
-Target users install with `KODASetup.exe`. It installs to `%LOCALAPPDATA%\KODA` and creates Start Menu shortcuts for `KODA` and `KODA (Browser Mode)`.
-
-## Vulnerability Data Package
-
-The installer bundles Syft, Grype, and the Grype DB, but not the NVD and CISA
-KEV feeds. Those change daily while the application does not, so they ship as a
-separate package that is refreshed without rebuilding or redistributing the
-installer.
-
-Build it on a connected macOS/Linux host (it reuses the same download cache and
-`.meta` verification as the Linux offline bundle):
-
-```bash
-bash platforms/linux/package-offline.sh --vuln-data-only
-# → dist/Windows/koda-vuln-data-<date>.zip  (about 210 MB, NVD 2002-current + KEV)
-```
-
-You can also build the package directly on an internet-connected Windows PC.
-This does not require Python, Docker, or the KODA installer build tools; it
-uses PowerShell 5.1 or PowerShell 7:
+설치 후 `koda-vuln-data-<date>.zip`을 별도로 반입해 NVD·CISA KEV 자료를
+현행화할 수 있습니다. 애플리케이션을 다시 빌드하지 않고 데이터 패키지만
+교체할 수 있습니다.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\platforms\windows\scripts\build-koda-vuln-data.ps1
-# → dist\Windows\koda-vuln-data-<date>.zip
+python -m security_scanner jar-scan `
+  --target C:\deploy\apps `
+  --target C:\deploy\worker-apps `
+  --output-dir reports\java-scan `
+  --fail-on high --fail-on-kev
 ```
 
-The Windows script caches yearly NVD feeds under
-`.build\koda-vuln-data-cache\` and verifies each cached feed against its
-downloaded `.meta` SHA-256 before using it. The
-`recent` and `modified` NVD feeds and the CISA KEV catalog are downloaded and
-verified on every run. Add `-Refresh` to download all yearly feeds again. To
-limit the data range, use for example `-StartYear 2025 -EndYear 2026`; the
-default is the complete NVD range from 2002 through the current UTC year.
+JAR 보고서는 현재 HTML과 Markdown 모두 한국어로 생성되며 `--language`는
+`ko`만 지원합니다.
+`--target`은 반복 지정할 수 있으며, 지정한 폴더들을 하나의 라이브러리
+메인/상세 리포트와 SBOM으로 통합합니다.
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\platforms\windows\scripts\build-koda-vuln-data.ps1 `
-  -Refresh -StartYear 2025 -EndYear 2026
-```
+## NIS-SBOM 1.0 다운로드
 
-The script prints the archive SHA-256; compare it on the target machine with
-`Get-FileHash` before extracting. Extract the zip into the install directory so
-that the folders line up:
+Windows 앱에서 점검을 완료한 뒤 SBOM 생성 형식으로
+**국정원 NIS-SBOM 1.0 (CSV)**를 선택하고 **SBOM 다운로드**를 누르면
+`koda-nis-sbom-1.0.csv`가 저장됩니다. 이 CSV는 2024년 합동
+[SW 공급망 보안 가이드라인 1.0](https://www.krcert.or.kr/kr/bbs/view.do?bbsId=B0000127&menuNo=205021&nttId=71432&pageIndex=1)의
+기본 20개 필드 순서를 유지합니다. KODA가 점검 근거로 확인하지 못한 필드는
+임의로 추정하지 않고 빈 값으로 둡니다.
 
-```powershell
-Expand-Archive -Path koda-vuln-data-<date>.zip -DestinationPath $env:LOCALAPPDATA\KODA -Force
-# → %LOCALAPPDATA%\KODA\vuln-data\nvd\...
-#   %LOCALAPPDATA%\KODA\vuln-data\known_exploited_vulnerabilities.json
-#   %LOCALAPPDATA%\KODA\vuln-data\versions.txt   (feed 기준일)
-```
-
-`KODA.exe` and `KODA-CLI.exe` detect `vuln-data\` on startup and set
-`KODA_NVD_DATA` and `KODA_CISA_KEV` automatically, exactly as they already do
-for `tools\`. No path arguments are needed:
+명령줄에서는 소스 점검과 Java 아카이브 점검 모두 같은 형식을 만들 수 있습니다.
 
 ```bat
-koda jar-scan --target D:\apps ^
-  --target D:\worker-apps ^
-  --output-dir reports --fail-on high --fail-on-kev
+koda scan --target C:\src\project --format nis-sbom ^
+  --output reports\koda-nis-sbom-1.0.csv
+
+koda jar-scan --target C:\deploy\apps --sbom-format nis-1.0 ^
+  --output-dir reports\java-scan
 ```
 
-`--target` may be repeated. The supplied roots are scanned together and produce
-one combined library report pair and SBOM.
+`jar-scan`은 `server-sbom.nis.csv`를 기존 CycloneDX와 Java 보고서 옆에
+추가합니다. 이 기능은 NIS-SBOM 1.0 **형식 지원**이며 국정원 인증이나 공식
+준수 판정을 의미하지 않습니다.
 
-The installer keeps `KODA-CLI.cmd` as a compatibility alias and adds
-`%LOCALAPPDATA%\KODA` to the per-user `PATH`. Open a new Command Prompt after
-installation and type `koda --help` (existing shells must be restarted).
+설치기는 `%LOCALAPPDATA%\KODA`를 사용자 `PATH`에 추가하고 `koda.cmd`를
+설치합니다. 설치 후 새 명령 프롬프트를 열어 `koda --help`로 실행하세요.
+기존 `KODA-CLI.cmd`도 호환성을 위해 유지됩니다.
 
-For source-code static analysis, choose one configured standard explicitly. The
-HTML output path is the summary page and a `-detail.html` sibling is written for
-the complete findings table:
+소스코드 분석은 기준을 명시해서 실행할 수 있습니다. HTML은 메인 요약과
+`-detail.html` 상세 파일로 나뉩니다.
 
 ```bat
-koda scan --target D:\src\project --standard sw-dev-security-49 ^
+koda scan --target C:\src\project --standard sw-dev-security-49 ^
   --format html --output reports\source.html
 ```
 
-The supported profiles include `owasp-asvs-5`, `owasp-proactive-controls`,
-`owasp-top-10-2025`, `sw-dev-security-49`, and
-`sw-dev-security-7-types`. Use `koda scan --help` to see the complete list and
-its issuer/release date, and use `--standard-category` to narrow a profile to
-one category.
+`owasp-asvs-5`, `owasp-proactive-controls`, `sw-dev-security-49`,
+`sw-dev-security-7-types` 등을 선택할 수 있고 `--standard-category`로 범주를
+좁힐 수 있습니다. 프로파일은 KODA 정적 룰의 매핑 범위이며 전체 SAST나 공식
+준수 판정을 의미하지 않습니다.
 
-Java HTML and Markdown reports are currently generated in Korean; `--language`
-accepts only `ko`. Findings are grouped by library and installed version, with
-`Fixed` advisory candidates and a DB-verified `Final` candidate when available.
-
-Without the data package `jar-scan` still runs on Grype alone, but reports carry
-no CVSS or exploited-vulnerability detail, and `--fail-on-kev` exits `2` rather
-than passing a gate it cannot evaluate.
-
-Refresh the data by extracting a newer zip over the old one. Upgrading KODA does
-not delete `vuln-data\`; uninstalling KODA removes it with the rest of the
-install directory.
-
-## Run From Source
-
-```bat
-platforms\windows\scripts\koda.bat
-```
-
-The source-tree launcher sets `PYTHONPATH` to `platforms\shared\python` before running the scanner.
-
-## Notes
-
-- The macOS Swift app is not cross-compiled to Windows.
-- Windows installer metadata lives in `platforms/windows/packaging/KODA.iss`.
-- Windows assets live in `platforms/windows/assets/`.
+- [한국어 문서 인덱스](../README.md)
+- [English Windows install](windows.md)

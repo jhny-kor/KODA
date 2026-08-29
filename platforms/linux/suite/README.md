@@ -4,7 +4,7 @@
 Dependency-Track·PostgreSQL·포털 이미지를 함께 담았습니다. 실제 비밀번호와 API
 키는 포함하지 않습니다.
 
-설치 중 오류가 발생하면 [폐쇄망 설치 장애 대응서](TROUBLESHOOTING.ko.md)의
+설치 중 오류가 발생하면 [폐쇄망 설치 장애 대응서](TROUBLESHOOTING.md)의
 `증상 → 확인 → 조치 → 정상 기준` 순서로 확인합니다.
 
 ## 서버 조건
@@ -139,7 +139,7 @@ Tracker 장애 시 KODA 보호 화면과 API는 이전 인증 결과를 캐시�
 - `사용 가이드`: 기능·보안 용어·지원 기준을 모든 활성 KODA 사용자에게 제공합니다.
 
 실제 결과 화면, 라이브러리·소스코드·품질 탭과 기능 흐름도는
-[KODA 웹 포털 화면과 기능](../../../docs/koda-web-portal.ko.md)에서 확인합니다.
+[KODA 웹 포털 화면과 기능](../../../docs/koda-web-portal.md)에서 확인합니다.
 
 완료 회차의 보고서는 Windows/Linux 공통 CLI 렌더러를 그대로 사용합니다. 화면에서
 메인·상세 HTML 보기와 HTML ZIP, PDF, Excel, JSON, Markdown을 내려받을 수 있고,
@@ -149,7 +149,7 @@ SBOM은 CycloneDX 1.6 JSON 또는 국정원 NIS-SBOM 1.0 CSV로 내려받습니�
 웹 분석은 manifest/lockfile에서 정확한 이름·버전·PURL을 얻은 의존성을 번들된
 오프라인 Grype DB로 점검합니다. 결과에 라이브러리 취약점이 없으면 입력 파일이
 지원 manifest인지와 KODA 컨테이너의 `KODA_GRYPE_BIN`, `GRYPE_DB_CACHE_DIR`를
-[장애 대응서](TROUBLESHOOTING.ko.md#koda-웹에서-라이브러리-취약점이-0건)에서
+[장애 대응서](TROUBLESHOOTING.md#koda-웹에서-라이브러리-취약점이-0건)에서
 확인합니다. JAR/WAR/EAR 내부 라이브러리는 아래 `jar-scan` 경로를 사용합니다.
 
 ## 재기동·상태·중지
@@ -515,7 +515,7 @@ KODA가 확정한 라이브러리·소스 보안 취약점은 별도의 항목�
 Tracker 전송을 실패로 변경하지 않습니다.
 통합 Suite는 Tracker·KODA 공유 프로비저닝 토큰과 저장소별 토큰 디렉터리를 최초 시작
 시 자동 생성합니다. 설정과 네트워크 제한은
-[GitLab 저장소 연동](../../../docs/gitlab-integration-ko.md)을 따릅니다.
+[GitLab 저장소 연동](../../../docs/gitlab-integration.md)을 따릅니다.
 호스트의 `$PREFIX/config`은 `0700`으로 잠기며, 두 비루트 컨테이너에 직접 마운트되는
 공유 토큰만 읽기 전용 `0444`, KODA 전용 token 디렉터리만 `0733`입니다. 저장소별
 token 파일 자체는 KODA가 `0600`으로 생성합니다. 사용자 지정 경로를 쓰면 그 상위

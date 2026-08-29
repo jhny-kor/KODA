@@ -133,7 +133,7 @@ https://<서버주소>/dependency-track/   # Dependency-Track
 
 이후에는 설치 경로의 `koda-suite start|status|stop`으로 세 서비스를 함께
 관리합니다. 상세 절차는
-[통합 폐쇄망 설치 가이드](../../platforms/linux/suite/README.ko.md)를 따릅니다.
+[통합 폐쇄망 설치 가이드](../../platforms/linux/suite/README.md)를 따릅니다.
 
 ## 2. Linux tarball (호스트 직접 설치)
 
@@ -158,7 +158,7 @@ bash install.sh                 # 기본 prefix /home/user0/koda
 
 Syft·Grype·Grype DB·NVD·CISA·Playwright/Chromium이 모두 번들에 포함되며
 설치 시 자동으로 경로가 잡힙니다. 상세:
-[platforms/linux/README-offline.ko.md](../../platforms/linux/README-offline.ko.md)
+[platforms/linux/README-offline.md](../../platforms/linux/README-offline.md)
 
 ## 3. Windows 설치본 + 데이터 zip
 
@@ -191,7 +191,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 스크립트는 연도별 NVD 피드를 `.meta` SHA-256으로 검증하고, NVD
 `recent`/`modified`와 CISA KEV를 새로 받아 동일한 `vuln-data\` 내부 구조로
-압축합니다. 상세 옵션은 [Windows 설치](windows.ko.md)와
+압축합니다. 상세 옵션은 [Windows 설치](windows.md)와
 [데이터 현행화 절차](vuln-data-refresh.md)를 참고하십시오.
 
 ```powershell
@@ -213,7 +213,7 @@ koda jar-scan --target D:\apps ^
 리포트와 SBOM으로 통합합니다. 겹치는 아카이브 위치는 중복 제거합니다.
 
 데이터 zip 갱신 절차: [vuln-data-refresh.md](vuln-data-refresh.md) · 설치본
-상세: [windows.ko.md](windows.ko.md)
+상세: [windows.md](windows.md)
 
 ## GitLab 적재 (선택)
 
