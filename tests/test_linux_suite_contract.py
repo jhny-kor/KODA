@@ -371,8 +371,84 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
     def test_koda_has_no_direct_host_port(self) -> None:
         self.assertIn('KODA_PUBLISH_DASHBOARD=0', self.launcher)
         self.assertIn('.HostConfig.PortBindings', self.launcher)
+        self.assertIn('KODA dashboard network must be internal when GitLab egress is configured.', self.launcher)
         self.assertNotIn('ports:', self.compose)
         self.assertIn('external: true', self.compose)
+
+    def test_gitlab_network_is_the_dashboard_default_gateway(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake_bin = root / 'bin'
+            fake_bin.mkdir()
+            wrapper = root / 'koda-docker'
+            wrapper.write_text(self.docker_wrapper)
+            wrapper.chmod(0o755)
+            (root / 'image-ref.txt').write_text('local/koda:test\n')
+            docker_log = root / 'docker.log'
+            docker = fake_bin / 'docker'
+            docker.write_text(
+                '#!/usr/bin/env bash\n'
+                'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+                '[[ "$1" == container && "$2" == inspect ]] && exit 1\n'
+                '[[ "$1" == network && "$2" == inspect && "${@: -1}" == koda-dashboard ]] && exit 1\n'
+                '[[ "$1" == network && "$2" == inspect ]] && exit 0\n'
+                '[[ "$1" == network && "$2" == create ]] && exit 0\n'
+                '[[ "$1" == version ]] && { echo "${FAKE_DOCKER_VERSION:-27.5.1}"; exit 0; }\n'
+                '[[ "$1" == run ]] && exit 0\n'
+                '[[ "$1" == network && "$2" == connect ]] && exit 0\n'
+                'exit 99\n'
+            )
+            docker.chmod(0o755)
+            result = subprocess.run(
+                [str(wrapper), 'dashboard', 'start'],
+                text=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    'PATH': f'{fake_bin}:{os.environ["PATH"]}',
+                    'DOCKER_LOG': str(docker_log),
+                    'KODA_GITLAB_NETWORK': 'koda-gitlab-egress',
+                    'KODA_PUBLISH_DASHBOARD': '0',
+                    'KODA_PORTAL_DATA_DIR': str(root / 'portal'),
+                },
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            commands = docker_log.read_text().splitlines()
+            self.assertTrue(any(
+                line.startswith('run ') and '--network koda-gitlab-egress' in line
+                for line in commands
+            ))
+            self.assertIn('network connect koda-dashboard koda-dashboard', commands)
+            self.assertTrue(any(
+                line.startswith('network create ')
+                and '--internal' in line
+                and line.endswith(' koda-dashboard')
+                for line in commands
+            ))
+
+            docker_log.write_text('')
+            result = subprocess.run(
+                [str(wrapper), 'dashboard', 'start'],
+                text=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    'PATH': f'{fake_bin}:{os.environ["PATH"]}',
+                    'DOCKER_LOG': str(docker_log),
+                    'FAKE_DOCKER_VERSION': '28.0.0',
+                    'KODA_GITLAB_NETWORK': 'koda-gitlab-egress',
+                    'KODA_PUBLISH_DASHBOARD': '0',
+                    'KODA_PORTAL_DATA_DIR': str(root / 'portal'),
+                },
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(any(
+                line.startswith('run ')
+                and '--network name=koda-gitlab-egress,gw-priority=1' in line
+                for line in docker_log.read_text().splitlines()
+            ))
 
     def test_dashboard_start_and_stop_refuse_a_foreign_named_container(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

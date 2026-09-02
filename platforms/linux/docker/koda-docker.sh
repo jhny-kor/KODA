@@ -210,6 +210,7 @@ dashboard_start() {
   local bind="${KODA_DASHBOARD_BIND:-127.0.0.1}"
   local port="${KODA_PORT:-8765}"
   local portal_data="${KODA_PORTAL_DATA_DIR:-$script_dir/data/portal}"
+  local run_network="$dashboard_network" run_network_arg server_major
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --reports) reports="${2:-}"; shift 2 ;;
@@ -232,16 +233,37 @@ dashboard_start() {
     fi
     docker rm -f "$dashboard_name" >/dev/null
   fi
-  # A dedicated bridge with IP masquerade disabled: the published port keeps
-  # working (DNAT+conntrack) while container-originated egress is unroutable.
-  # A --internal network would also disable the published port, so it is not
-  # usable here.
+  # A dedicated bridge with IP masquerade disabled keeps standalone published
+  # ports working while blocking container egress. Gateway mode publishes no
+  # dashboard port, so an internal network also leaves GitLab as the only
+  # eligible external gateway on Docker versions without gw-priority.
   if ! docker network inspect "$dashboard_network" >/dev/null 2>&1; then
-    docker network create \
-      -o com.docker.network.bridge.enable_ip_masquerade=false \
-      "$dashboard_network" >/dev/null
+    local network_opts=(
+      -o com.docker.network.bridge.enable_ip_masquerade=false
+    )
+    [ "${KODA_PUBLISH_DASHBOARD:-1}" = 1 ] || network_opts+=(--internal)
+    docker network create "${network_opts[@]}" "$dashboard_network" >/dev/null
   fi
-  local run_opts=(-d --name "$dashboard_name" --network "$dashboard_network")
+  if [ -n "${KODA_GITLAB_NETWORK:-}" ]; then
+    [ "$KODA_GITLAB_NETWORK" != "$dashboard_network" ] || {
+      echo "error: KODA_GITLAB_NETWORK must differ from $dashboard_network" >&2
+      exit 2
+    }
+    docker network inspect "$KODA_GITLAB_NETWORK" >/dev/null 2>&1 || {
+      echo "error: KODA_GITLAB_NETWORK does not exist: $KODA_GITLAB_NETWORK" >&2
+      exit 2
+    }
+    run_network="$KODA_GITLAB_NETWORK"
+  fi
+  run_network_arg="$run_network"
+  if [ "$run_network" != "$dashboard_network" ]; then
+    server_major="$(docker version --format '{{.Server.Version}}' 2>/dev/null)"
+    server_major="${server_major%%.*}"
+    if [[ "$server_major" =~ ^[0-9]+$ ]] && [ "$server_major" -ge 28 ]; then
+      run_network_arg="name=$run_network,gw-priority=1"
+    fi
+  fi
+  local run_opts=(-d --name "$dashboard_name" --network "$run_network_arg")
   while IFS= read -r line; do run_opts+=("$line"); done < <(base_run_opts)
   # -d and --rm conflict with container inspection after exit; drop --rm.
   local filtered=() opt
@@ -307,9 +329,9 @@ dashboard_start() {
   fi
   docker run "${docker_opts[@]}" "$image" \
     serve --host 0.0.0.0 --port 8765 >/dev/null
-  if [ -n "${KODA_GITLAB_NETWORK:-}" ] && ! docker network connect "$KODA_GITLAB_NETWORK" "$dashboard_name"; then
+  if [ "$run_network" != "$dashboard_network" ] && ! docker network connect "$dashboard_network" "$dashboard_name"; then
     docker rm -f "$dashboard_name" >/dev/null
-    echo "error: could not connect dashboard to KODA_GITLAB_NETWORK" >&2
+    echo "error: could not connect dashboard to $dashboard_network" >&2
     exit 2
   fi
   if [ "${KODA_PUBLISH_DASHBOARD:-1}" = 1 ]; then

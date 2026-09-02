@@ -480,6 +480,34 @@ vi "$PREFIX/tracker/.env"
 # KODA_GITLAB_NETWORK=koda-gitlab-egress
 ```
 
+Docker Engine 27 이하에서도 GitLab egress가 유일한 외부 기본 경로가 되도록
+`koda-dashboard` 통신망은 `internal=true`여야 합니다. 기존 설치에서 이 값이
+`false`이면 다음과 같이 Compose 컨테이너만 제거하고 네트워크를 한 번 재생성합니다.
+`down -v`는 사용하지 않으므로 named volume과 KODA 포털 데이터는 보존됩니다.
+
+```bash
+PREFIX="${KODA_SUITE_PREFIX:-$HOME/koda-suite}"
+ENV_FILE="$PREFIX/tracker/.env"
+
+"$PREFIX/koda-suite" stop --prefix "$PREFIX"
+docker compose --project-directory "$PREFIX/tracker" --env-file "$ENV_FILE" \
+  -f "$PREFIX/tracker/compose.yaml" \
+  -f "$PREFIX/tracker/compose.airgap.yaml" \
+  -f "$PREFIX/tracker/compose.integration.yaml" \
+  down --remove-orphans
+
+docker network rm koda-dashboard
+docker network create --internal \
+  -o com.docker.network.bridge.enable_ip_masquerade=false \
+  koda-dashboard
+
+"$PREFIX/koda-suite" start --prefix "$PREFIX"
+docker network inspect koda-dashboard \
+  --format 'internal={{.Internal}} masquerade={{index .Options "com.docker.network.bridge.enable_ip_masquerade"}}'
+```
+
+마지막 출력은 `internal=true masquerade=false`여야 합니다.
+
 GitLab URL·조회 토큰·쓰기 토큰·사설 CA는 압축파일이나 `.env`에 넣지 않고 KODA
 관리자 화면 `설정 > 연동 설정`에 입력합니다. 조회 토큰은 `read_api`, 쓰기 토큰은
 `api` 범위이며 Developer 이상 계정을 사용합니다. 연결 시험을 통과한 뒤 저장소를

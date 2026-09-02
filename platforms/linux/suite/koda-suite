@@ -365,7 +365,7 @@ start_dashboard() {
 }
 
 runtime_health() {
-  local prefix="$1" env_file="$prefix/tracker/.env" masquerade port_bindings
+  local prefix="$1" env_file="$prefix/tracker/.env" internal masquerade port_bindings
   runtime_values "$env_file"
   wait_http "http://127.0.0.1:$public_port/healthz" "" 30
   wait_http "http://127.0.0.1:$public_port/koda/live" "" 30
@@ -375,6 +375,11 @@ runtime_health() {
   wait_http "http://127.0.0.1:$public_port/dependency-track/api/version" "version" 60
   masquerade="$(docker network inspect -f '{{index .Options "com.docker.network.bridge.enable_ip_masquerade"}}' koda-dashboard 2>/dev/null || true)"
   [[ "$masquerade" == false ]] || fail "KODA dashboard network egress guard is not disabled."
+  if [[ -n "$gitlab_network" ]]; then
+    internal="$(docker network inspect -f '{{.Internal}}' koda-dashboard 2>/dev/null || true)"
+    [[ "$internal" == true ]] \
+      || fail "KODA dashboard network must be internal when GitLab egress is configured."
+  fi
   port_bindings="$(docker inspect -f '{{json .HostConfig.PortBindings}}' koda-dashboard 2>/dev/null || true)"
   [[ "$port_bindings" == null || "$port_bindings" == '{}' ]] \
     || fail "KODA dashboard has a directly published host port: $port_bindings"
