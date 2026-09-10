@@ -1,0 +1,380 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "KODA 원격 경로 전일 변경분 점검",
+    "output": "dist/diagrams/koda-remote-daily-delta.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "daily-delta",
+        "label": "매일 변경분 흐름",
+        "focus": [
+          "scheduler",
+          "connector",
+          "target",
+          "delta",
+          "scan_worker",
+          "koda",
+          "tracker"
+        ],
+        "note": "스케줄러가 원격 경로의 전일 변경 파일만 수집해 KODA 점검으로 전달합니다."
+      },
+      {
+        "id": "trust-boundary",
+        "label": "연결 경계와 권한",
+        "focus": [
+          "connector",
+          "policy",
+          "target",
+          "koda",
+          "tracker",
+          "postgres"
+        ],
+        "note": "원격 서버는 읽기 전용 계정과 허용 경로로 제한하고 기존 포털 데이터는 유지합니다."
+      },
+      {
+        "id": "existing-gitlab",
+        "label": "기존 GitLab 경로",
+        "focus": [
+          "gitlab",
+          "gitlab_adapter",
+          "koda",
+          "tracker"
+        ],
+        "note": "기존 GitLab 저장소 조회 경로는 유지하고 원격 디렉터리 점검 경로를 별도로 추가합니다."
+      }
+    ]
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [
+      50,
+      70
+    ],
+    "cols": 6,
+    "gapX": 42,
+    "gapY": 58,
+    "cellW": 210,
+    "cellH": 118
+  },
+  "components": [
+    {
+      "id": "scheduler",
+      "type": "backend",
+      "label": "Daily Scheduler",
+      "sublabel": "systemd timer / 02:00",
+      "tag": "proposed",
+      "pos": [
+        60,
+        110
+      ],
+      "size": [
+        180,
+        72
+      ]
+    },
+    {
+      "id": "connector",
+      "type": "backend",
+      "label": "Remote Connector",
+      "sublabel": "SSH/SFTP read-only",
+      "tag": "proposed",
+      "pos": [
+        300,
+        110
+      ],
+      "size": [
+        190,
+        72
+      ]
+    },
+    {
+      "id": "target",
+      "type": "external",
+      "label": "Target Server",
+      "sublabel": "allowlisted directory",
+      "tag": "new server",
+      "pos": [
+        560,
+        110
+      ],
+      "size": [
+        205,
+        78
+      ]
+    },
+    {
+      "id": "policy",
+      "type": "security",
+      "label": "Path Policy",
+      "sublabel": "root + read-only account",
+      "tag": "fail closed",
+      "pos": [
+        300,
+        285
+      ],
+      "size": [
+        190,
+        72
+      ]
+    },
+    {
+      "id": "delta",
+      "type": "database",
+      "label": "Delta Manifest",
+      "sublabel": "mtime window + content hash",
+      "tag": "previous success",
+      "pos": [
+        560,
+        285
+      ],
+      "size": [
+        205,
+        78
+      ]
+    },
+    {
+      "id": "scan_worker",
+      "type": "backend",
+      "label": "Scan Worker",
+      "sublabel": "changed-file staging",
+      "tag": "proposed",
+      "pos": [
+        820,
+        110
+      ],
+      "size": [
+        190,
+        72
+      ]
+    },
+    {
+      "id": "koda",
+      "type": "backend",
+      "label": "KODA Docker",
+      "sublabel": "scanner + portal",
+      "tag": "existing AI server",
+      "pos": [
+        820,
+        285
+      ],
+      "size": [
+        190,
+        78
+      ]
+    },
+    {
+      "id": "tracker",
+      "type": "backend",
+      "label": "Tracker API",
+      "sublabel": "runs, users, results",
+      "tag": "existing portal",
+      "pos": [
+        1080,
+        285
+      ],
+      "size": [
+        195,
+        78
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "Tracker PostgreSQL",
+      "sublabel": "accounts + scan history",
+      "tag": "preserve",
+      "pos": [
+        1080,
+        455
+      ],
+      "size": [
+        195,
+        78
+      ]
+    },
+    {
+      "id": "gitlab",
+      "type": "external",
+      "label": "GitLab Server",
+      "sublabel": "existing repository source",
+      "tag": "existing",
+      "pos": [
+        60,
+        545
+      ],
+      "size": [
+        190,
+        78
+      ]
+    },
+    {
+      "id": "gitlab_adapter",
+      "type": "backend",
+      "label": "GitLab Adapter",
+      "sublabel": "repository lookup / fetch",
+      "tag": "existing path",
+      "pos": [
+        330,
+        545
+      ],
+      "size": [
+        205,
+        78
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "AI 서버 / 기존 Docker Compose",
+      "wraps": [
+        "scheduler",
+        "connector",
+        "policy",
+        "delta",
+        "scan_worker",
+        "koda",
+        "tracker",
+        "postgres",
+        "gitlab_adapter"
+      ],
+      "pad": 24
+    },
+    {
+      "kind": "security-group",
+      "label": "원격 연결은 허용 경로·읽기 전용",
+      "wraps": [
+        "connector",
+        "policy"
+      ],
+      "pad": 14
+    },
+    {
+      "kind": "region",
+      "label": "새 대상 서버",
+      "wraps": [
+        "target"
+      ],
+      "pad": 18
+    }
+  ],
+  "connections": [
+    {
+      "from": "scheduler",
+      "to": "connector",
+      "label": "02:00 trigger",
+      "variant": "emphasis",
+      "labelAt": [
+        270,
+        196
+      ]
+    },
+    {
+      "from": "connector",
+      "to": "target",
+      "label": "SSH/SFTP read-only",
+      "variant": "security",
+      "labelAt": [
+        525,
+        202
+      ]
+    },
+    {
+      "from": "connector",
+      "to": "policy",
+      "label": "discover path",
+      "variant": "security",
+      "route": "orthogonal-v",
+      "labelAt": [
+        395,
+        196
+      ]
+    },
+    {
+      "from": "policy",
+      "to": "delta",
+      "label": "allowlist + baseline",
+      "variant": "security",
+      "labelDy": -54
+    },
+    {
+      "from": "target",
+      "to": "delta",
+      "label": "mtime + hash manifest",
+      "variant": "dashed",
+      "route": "orthogonal-v"
+    },
+    {
+      "from": "delta",
+      "to": "scan_worker",
+      "label": "changed files only",
+      "variant": "emphasis",
+      "route": "orthogonal-h"
+    },
+    {
+      "from": "scan_worker",
+      "to": "koda",
+      "label": "staged input",
+      "variant": "emphasis",
+      "route": "orthogonal-v"
+    },
+    {
+      "from": "koda",
+      "to": "tracker",
+      "label": "scan result + evidence",
+      "variant": "emphasis",
+      "labelDy": -54
+    },
+    {
+      "from": "tracker",
+      "to": "postgres",
+      "label": "runs / users / findings",
+      "route": "orthogonal-v"
+    },
+    {
+      "from": "gitlab",
+      "to": "gitlab_adapter",
+      "label": "GitLab API / clone",
+      "variant": "dashed",
+      "labelDy": -60
+    },
+    {
+      "from": "gitlab_adapter",
+      "to": "koda",
+      "label": "existing repository path",
+      "variant": "dashed",
+      "route": "orthogonal-v"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Daily Delta Rule",
+      "items": [
+        "매일 한 번 실행하고 기준 시각은 마지막 성공 실행으로 기록",
+        "mtime 목록만으로 끝내지 않고 파일 해시로 실제 변경을 확인",
+        "변경 파일이 없으면 KODA 전체 점검을 실행하지 않음"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Remote Boundary",
+      "items": [
+        "대상 서버에는 읽기 전용 계정과 허용된 상위 경로만 사용",
+        "경로 발견은 allowlist 아래에서만 수행하고 / 전체 탐색은 금지",
+        "SSH 키·known_hosts·호스트 주소는 기존 비밀 관리 방식으로 보관"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Existing Portal Safety",
+      "items": [
+        "GitLab 연동과 기존 Tracker 계정·회차·결과 저장은 유지",
+        "증분 점검 결과에는 기준 실행 ID와 변경 파일 목록을 함께 저장",
+        "실패한 실행은 다음 기준선으로 승격하지 않고 재시도 대상으로 남김"
+      ]
+    }
+  ]
+}
