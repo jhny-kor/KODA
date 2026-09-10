@@ -30,7 +30,7 @@ def main():
     stage = args.output_dir / name
     stage.mkdir()  # Existing releases are never silently overwritten.
     shutil.copytree(repo / 'platforms/linux/scheduled-release', stage, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store', '._*', '.omc'))
     launchers = stage / 'launchers'
     launchers.mkdir()
     for source, dest in [('platforms/linux/suite/koda-suite', 'koda-suite'),
@@ -48,12 +48,12 @@ def main():
     (stage / 'image-inventory.json').write_text(json.dumps(inventory, indent=2) + '\n')
     sources = stage / 'source'
     shutil.copytree(repo / 'platforms/shared/python/security_scanner', sources / 'koda/security_scanner',
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store', '._*', '.omc'))
     shutil.copytree(args.tracker_repo / 'apps/api/koda_tracker', sources / 'tracker/koda_tracker',
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store', '._*', '.omc'))
     for directory in ('src', 'public'):
         shutil.copytree(args.tracker_repo / 'apps/web' / directory, sources / 'tracker/web' / directory,
-                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store', '._*', '.omc'))
     for file in ('package.json', 'package-lock.json', 'vite.config.ts', 'tsconfig.json', 'Dockerfile', 'nginx.conf'):
         path = args.tracker_repo / 'apps/web' / file
         if path.is_file():
