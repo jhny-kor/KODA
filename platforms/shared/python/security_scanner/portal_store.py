@@ -5,7 +5,9 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import sqlite3
+import shutil
 import threading
 import uuid
 from contextlib import contextmanager
@@ -104,6 +106,18 @@ class PortalStore:
                   tracker_token_ref TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                   FOREIGN KEY(project_id) REFERENCES projects(project_id));
+                CREATE TABLE IF NOT EXISTS server_connections(
+                  connection_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                  host TEXT NOT NULL, port INTEGER NOT NULL DEFAULT 22,
+                  username TEXT NOT NULL, ssh_key_ref TEXT NOT NULL,
+                  known_hosts_file TEXT NOT NULL, host_key_fingerprint TEXT NOT NULL DEFAULT '',
+                  enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS project_server_connections(
+                  project_id TEXT NOT NULL, connection_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL, PRIMARY KEY(project_id,connection_id),
+                  FOREIGN KEY(project_id) REFERENCES projects(project_id),
+                  FOREIGN KEY(connection_id) REFERENCES server_connections(connection_id));
+                CREATE INDEX IF NOT EXISTS idx_server_connections_enabled ON server_connections(enabled,name);
                 CREATE TABLE IF NOT EXISTS tracker_deliveries(
                   run_id TEXT PRIMARY KEY, status TEXT NOT NULL,
                   attempts INTEGER NOT NULL DEFAULT 0, tracker_run_id TEXT,
@@ -127,10 +141,57 @@ class PortalStore:
                   FOREIGN KEY(run_id) REFERENCES scan_runs(run_id));
                 CREATE INDEX IF NOT EXISTS idx_gitlab_issue_links_finding
                   ON gitlab_issue_links(gitlab_project_id,finding_key,created_at DESC);
+                CREATE TABLE IF NOT EXISTS schedule_targets(
+                  target_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
+                  host TEXT NOT NULL, port INTEGER NOT NULL DEFAULT 22, username TEXT NOT NULL,
+                  ssh_key_ref TEXT NOT NULL, known_hosts_file TEXT NOT NULL, remote_directory TEXT NOT NULL,
+                  exclude_json TEXT NOT NULL DEFAULT '[]', standard TEXT NOT NULL DEFAULT 'local',
+                  standard_category TEXT NOT NULL DEFAULT 'all', scan_scope TEXT NOT NULL DEFAULT 'all',
+                  disabled_rules_json TEXT NOT NULL DEFAULT '[]', gitlab_mapping_id TEXT,
+                  gitlab_target_branch TEXT NOT NULL DEFAULT '',
+                  source_kind TEXT NOT NULL DEFAULT 'server',
+                  schedule_frequency TEXT NOT NULL DEFAULT 'daily',
+                  schedule_time TEXT NOT NULL DEFAULT '01:00',
+                  schedule_weekdays_json TEXT NOT NULL DEFAULT '[0,1,2,3,4,5,6]',
+                  schedule_interval_hours INTEGER NOT NULL DEFAULT 24,
+                  source_gitlab_mapping_id TEXT, source_gitlab_ref TEXT NOT NULL DEFAULT '',
+                  source_gitlab_ref_type TEXT NOT NULL DEFAULT 'branch',
+                  source_gitlab_directory TEXT NOT NULL DEFAULT '',
+                  server_connection_id TEXT,
+                  enabled INTEGER NOT NULL DEFAULT 0, order_index INTEGER NOT NULL DEFAULT 0,
+                  config_version INTEGER NOT NULL DEFAULT 1, max_files INTEGER NOT NULL DEFAULT 200000,
+                  max_bytes INTEGER NOT NULL DEFAULT 1073741824, timeout_seconds INTEGER NOT NULL DEFAULT 14400,
+                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                  FOREIGN KEY(project_id) REFERENCES projects(project_id));
+                CREATE INDEX IF NOT EXISTS idx_schedule_targets_order ON schedule_targets(enabled,order_index,target_id);
+                CREATE TABLE IF NOT EXISTS schedule_runs(
+                  schedule_run_id TEXT PRIMARY KEY, target_id TEXT NOT NULL, scheduled_for TEXT NOT NULL,
+                  mode TEXT NOT NULL CHECK(mode IN ('full','changed')), status TEXT NOT NULL DEFAULT 'queued',
+                  stage TEXT NOT NULL DEFAULT 'queued', config_version INTEGER NOT NULL DEFAULT 1,
+                  run_id TEXT, files_total INTEGER NOT NULL DEFAULT 0, changed_files INTEGER NOT NULL DEFAULT 0,
+                  cleanup_status TEXT NOT NULL DEFAULT 'pending', cleanup_error TEXT,
+                  tracker_status TEXT NOT NULL DEFAULT 'pending', gitlab_status TEXT NOT NULL DEFAULT 'pending',
+                  error TEXT, metadata_json TEXT NOT NULL DEFAULT '{}',
+                  started_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                  UNIQUE(target_id,scheduled_for),
+                  FOREIGN KEY(target_id) REFERENCES schedule_targets(target_id),
+                  FOREIGN KEY(run_id) REFERENCES scan_runs(run_id));
+                CREATE INDEX IF NOT EXISTS idx_schedule_runs_target ON schedule_runs(target_id,scheduled_for DESC);
+                CREATE TABLE IF NOT EXISTS schedule_files(
+                  target_id TEXT NOT NULL, relative_path TEXT NOT NULL, size INTEGER NOT NULL,
+                  mtime REAL NOT NULL, sha256 TEXT NOT NULL, updated_at TEXT NOT NULL,
+                  PRIMARY KEY(target_id,relative_path), FOREIGN KEY(target_id) REFERENCES schedule_targets(target_id));
                 """
             )
+            input_columns = {row[1] for row in db.execute("PRAGMA table_info(inputs)")}
+            if "registered_by" not in input_columns:
+                db.execute("ALTER TABLE inputs ADD COLUMN registered_by TEXT")
+                for event in db.execute("SELECT subject_id,detail_json FROM audit_events WHERE action='input.created' ORDER BY id"):
+                    detail = json.loads(event["detail_json"])
+                    db.execute("UPDATE inputs SET registered_by=? WHERE input_id=? AND registered_by IS NULL", (event["subject_id"], detail.get("input_id")))
             columns = {row[1] for row in db.execute("PRAGMA table_info(scan_runs)")}
             for definition in (
+                "deleted_at TEXT",
                 "stage TEXT NOT NULL DEFAULT 'queued'",
                 "progress INTEGER NOT NULL DEFAULT 0",
                 "cancel_requested INTEGER NOT NULL DEFAULT 0",
@@ -148,6 +209,21 @@ class PortalStore:
             ):
                 if definition.split()[0] not in tracker_columns:
                     db.execute(f"ALTER TABLE tracker_deliveries ADD COLUMN {definition}")
+            target_columns = {row[1] for row in db.execute("PRAGMA table_info(schedule_targets)")}
+            for definition in (
+                "source_kind TEXT NOT NULL DEFAULT 'server'",
+                "schedule_frequency TEXT NOT NULL DEFAULT 'daily'",
+                "schedule_time TEXT NOT NULL DEFAULT '01:00'",
+                "schedule_weekdays_json TEXT NOT NULL DEFAULT '[0,1,2,3,4,5,6]'",
+                "schedule_interval_hours INTEGER NOT NULL DEFAULT 24",
+                "source_gitlab_mapping_id TEXT",
+                "source_gitlab_ref TEXT NOT NULL DEFAULT ''",
+                "source_gitlab_ref_type TEXT NOT NULL DEFAULT 'branch'",
+                "source_gitlab_directory TEXT NOT NULL DEFAULT ''",
+                "server_connection_id TEXT",
+            ):
+                if definition.split()[0] not in target_columns:
+                    db.execute(f"ALTER TABLE schedule_targets ADD COLUMN {definition}")
             # Older rows predate the split delivery state. A saved Tracker run
             # means upload/analysis completed and the old failure belonged to
             # the GitLab publishing half of the former combined state.
@@ -274,6 +350,31 @@ class PortalStore:
             db.execute("COMMIT")
             return updated
 
+    def delete_subject_registration(self, subject_id: str, actor: str) -> None:
+        """Remove KODA registration while retaining Tracker identity and scan history."""
+        subject_id, actor = str(subject_id), str(actor)
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM subjects WHERE subject_id=?", (subject_id,)).fetchone()
+            if not row:
+                raise KeyError("subject not found")
+            if row["status"] == "tombstoned":
+                raise ValueError("tombstoned subject cannot be deleted")
+            if subject_id == actor:
+                raise ValueError("cannot delete current administrator registration")
+            if row["system_admin"]:
+                admins = db.execute(
+                    "SELECT count(*) FROM subjects WHERE status='enabled' AND system_admin=1"
+                ).fetchone()[0]
+                if admins <= 1:
+                    raise ValueError("last enabled system administrator")
+            db.execute("DELETE FROM memberships WHERE subject_id=?", (subject_id,))
+            db.execute("DELETE FROM subjects WHERE subject_id=?", (subject_id,))
+            self._audit_db(db, actor, "subject.registration_deleted", None, {
+                "subject_id": subject_id, "memberships_deleted": True,
+            })
+            db.execute("COMMIT")
+
     def bootstrap(self, subject_id: str) -> dict:
         with self._db() as db:
             existing_admin = db.execute(
@@ -394,6 +495,466 @@ class PortalStore:
                 "mapping_id": str(mapping_id), "gitlab_project_id": row["gitlab_project_id"],
             })
 
+    def list_server_connections(self, project_id: str | None = None, *, include_disabled: bool = False) -> list[dict]:
+        where = "" if include_disabled else " WHERE s.enabled=1"
+        args: list[str] = []
+        if project_id is not None:
+            where += (" AND " if where else " WHERE ") + "psc.project_id=?"
+            args.append(str(project_id))
+        with self._db() as db:
+            rows = db.execute(
+                "SELECT s.*,GROUP_CONCAT(psc.project_id) AS project_ids "
+                "FROM server_connections s LEFT JOIN project_server_connections psc ON psc.connection_id=s.connection_id"
+                + where + " GROUP BY s.connection_id ORDER BY s.name,s.connection_id", args).fetchall()
+        return [self._server_connection_dict(row) for row in rows]
+
+    @staticmethod
+    def _server_connection_dict(row: sqlite3.Row) -> dict:
+        value = dict(row)
+        value["enabled"] = bool(value.get("enabled"))
+        value["project_ids"] = [item for item in (value.pop("project_ids", "") or "").split(",") if item]
+        return value
+
+    def server_connection(self, connection_id: str, *, include_disabled: bool = False) -> dict:
+        rows = self.list_server_connections(include_disabled=include_disabled)
+        for row in rows:
+            if row["connection_id"] == str(connection_id):
+                return row
+        raise KeyError("server connection not found")
+
+    def save_server_connection(self, config: dict, actor: str | None = None) -> dict:
+        if not isinstance(config, dict):
+            raise ValueError("invalid server connection")
+        connection_id = str(config.get("connection_id") or uuid.uuid4()).strip()
+        name, host, username = (str(config.get(key) or "").strip() for key in ("name", "host", "username"))
+        ssh_key_ref, known_hosts_file = (str(config.get(key) or "").strip() for key in ("ssh_key_ref", "known_hosts_file"))
+        fingerprint = str(config.get("host_key_fingerprint") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", connection_id) or not name or not host or not username or not ssh_key_ref or not known_hosts_file:
+            raise ValueError("server connection fields are required")
+        if any(len(value) > 1024 for value in (name, host, username, ssh_key_ref, known_hosts_file, fingerprint)):
+            raise ValueError("server connection field is too long")
+        if any(any(ord(char) < 32 for char in value) for value in (name, host, username, ssh_key_ref, known_hosts_file, fingerprint)):
+            raise ValueError("server connection fields contain an invalid control character")
+        if not Path(ssh_key_ref).expanduser().is_absolute() or not Path(known_hosts_file).expanduser().is_absolute():
+            raise ValueError("SSH key and known-hosts paths must be absolute")
+        port = int(config.get("port", 22))
+        if not 1 <= port <= 65535:
+            raise ValueError("invalid SSH port")
+        project_ids = config.get("project_ids")
+        if project_ids is None:
+            with self._db() as db:
+                project_ids = [row[0] for row in db.execute("SELECT project_id FROM project_server_connections WHERE connection_id=?", (connection_id,))]
+        if not isinstance(project_ids, list) or any(not str(item).strip() for item in project_ids):
+            raise ValueError("project_ids must be a list")
+        project_ids = sorted(set(str(item).strip() for item in project_ids))
+        now = self._now()
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if any(not db.execute("SELECT 1 FROM projects WHERE project_id=?", (item,)).fetchone() for item in project_ids):
+                db.execute("ROLLBACK"); raise KeyError("project not found")
+            old = db.execute("SELECT created_at FROM server_connections WHERE connection_id=?", (connection_id,)).fetchone()
+            old_projects = {row[0] for row in db.execute("SELECT project_id FROM project_server_connections WHERE connection_id=?", (connection_id,))}
+            removed_projects = old_projects - set(project_ids)
+            if removed_projects and db.execute("SELECT 1 FROM schedule_targets WHERE server_connection_id=? AND project_id IN (%s)" % ",".join("?" * len(removed_projects)), (connection_id, *removed_projects)).fetchone():
+                db.execute("ROLLBACK"); raise ValueError("server connection is used by an enabled schedule")
+            if old and not bool(config.get("enabled", True)) and db.execute("SELECT 1 FROM schedule_targets WHERE server_connection_id=?", (connection_id,)).fetchone():
+                db.execute("ROLLBACK"); raise ValueError("server connection is used by an enabled schedule")
+            db.execute(
+                "INSERT INTO server_connections(connection_id,name,host,port,username,ssh_key_ref,known_hosts_file,host_key_fingerprint,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(connection_id) DO UPDATE SET name=excluded.name,host=excluded.host,port=excluded.port,username=excluded.username,ssh_key_ref=excluded.ssh_key_ref,known_hosts_file=excluded.known_hosts_file,host_key_fingerprint=excluded.host_key_fingerprint,enabled=excluded.enabled,updated_at=excluded.updated_at",
+                (connection_id,name,host,port,username,ssh_key_ref,known_hosts_file,fingerprint,int(bool(config.get("enabled", True))),old["created_at"] if old else now,now))
+            db.execute("DELETE FROM project_server_connections WHERE connection_id=?", (connection_id,))
+            db.executemany("INSERT INTO project_server_connections(project_id,connection_id,created_at) VALUES(?,?,?)", [(item,connection_id,now) for item in project_ids])
+            # Keep existing targets usable by the worker while ensuring a changed connection is a new config version.
+            db.execute("UPDATE schedule_targets SET host=?,port=?,username=?,ssh_key_ref=?,known_hosts_file=?,server_connection_id=?,config_version=config_version+1,updated_at=? WHERE server_connection_id=?", (host,port,username,ssh_key_ref,known_hosts_file,connection_id,now,connection_id))
+            self._audit_db(db, actor, "server_connection.updated", None, {"connection_id": connection_id, "project_ids": project_ids, "enabled": bool(config.get("enabled", True))})
+            db.execute("COMMIT")
+        return self.server_connection(connection_id, include_disabled=True)
+
+    def remove_server_connection(self, connection_id: str, actor: str | None = None) -> None:
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM server_connections WHERE connection_id=?", (str(connection_id),)).fetchone()
+            if not row:
+                db.execute("ROLLBACK"); raise KeyError("server connection not found")
+            if db.execute("SELECT 1 FROM schedule_targets WHERE server_connection_id=?", (str(connection_id),)).fetchone():
+                db.execute("ROLLBACK"); raise ValueError("server connection is used by an enabled schedule")
+            now = self._now()
+            db.execute("UPDATE server_connections SET enabled=0,updated_at=? WHERE connection_id=?", (now,str(connection_id)))
+            self._audit_db(db, actor, "server_connection.disabled", None, {"connection_id": str(connection_id)})
+            db.execute("COMMIT")
+
+    def list_schedule_targets(self, *, enabled_only: bool = False) -> list[dict]:
+        where = "WHERE t.enabled=1" if enabled_only else ""
+        with self._db() as db:
+            rows = db.execute(
+                "SELECT t.*,p.name AS project_name FROM schedule_targets t "
+                "JOIN projects p ON p.project_id=t.project_id "
+                f"{where} ORDER BY t.order_index,t.name,t.target_id"
+            ).fetchall()
+        return [self._schedule_target_dict(row) for row in rows]
+
+    def schedule_target(self, target_id: str) -> dict:
+        with self._db() as db:
+            row = db.execute(
+                "SELECT t.*,p.name AS project_name FROM schedule_targets t "
+                "JOIN projects p ON p.project_id=t.project_id WHERE t.target_id=?",
+                (str(target_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError("schedule target not found")
+        return self._schedule_target_dict(row)
+
+    @staticmethod
+    def _schedule_target_dict(row: sqlite3.Row) -> dict:
+        value = dict(row)
+        value["exclude_paths"] = json.loads(value.pop("exclude_json") or "[]")
+        value["disabled_rules"] = json.loads(value.pop("disabled_rules_json") or "[]")
+        value["schedule_weekdays"] = json.loads(value.pop("schedule_weekdays_json") or "[0,1,2,3,4,5,6]")
+        value["enabled"] = bool(value.get("enabled"))
+        return value
+
+    def save_schedule_target(self, config: dict, actor: str | None = None) -> dict:
+        if not isinstance(config, dict):
+            raise ValueError("invalid schedule target")
+        target_id = str(config.get("target_id") or uuid.uuid4()).strip()
+        project_id = str(config.get("project_id") or "").strip()
+        name = str(config.get("name") or "").strip()
+        source_kind = str(config.get("source_kind") or "server").strip().lower()
+        if source_kind not in {"server", "gitlab"}:
+            raise ValueError("invalid schedule source kind")
+        server_connection_id = str(config.get("server_connection_id") or "").strip() or None
+        if source_kind == "gitlab" and server_connection_id:
+            raise ValueError("GitLab targets cannot use a server connection")
+        host = str(config.get("host") or "").strip()
+        username = str(config.get("username") or "").strip()
+        ssh_key_ref = str(config.get("ssh_key_ref") or "").strip()
+        known_hosts_file = str(config.get("known_hosts_file") or "").strip()
+        remote_directory = str(config.get("remote_directory") or "").strip()
+        if source_kind == "server" and server_connection_id:
+            with self._db() as db:
+                connection = db.execute(
+                    "SELECT s.* FROM server_connections s JOIN project_server_connections psc ON psc.connection_id=s.connection_id "
+                    "WHERE s.connection_id=? AND psc.project_id=? AND s.enabled=1", (server_connection_id, project_id)
+                ).fetchone()
+            if not connection:
+                raise ValueError("server connection is not enabled for this project")
+            host, port, username = connection["host"], int(connection["port"]), connection["username"]
+            ssh_key_ref, known_hosts_file = connection["ssh_key_ref"], connection["known_hosts_file"]
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", target_id) or not project_id or not name:
+            raise ValueError("schedule target connection fields are required")
+        if source_kind == "server" and not all((host, username, ssh_key_ref, known_hosts_file, remote_directory)):
+            raise ValueError("server schedule connection fields are required")
+        if any(len(value) > 1024 for value in (host, username, ssh_key_ref, known_hosts_file, remote_directory)) or len(name) > 255:
+            raise ValueError("schedule target field is too long")
+        if any(any(ord(char) < 32 for char in value) for value in (host, username, ssh_key_ref, known_hosts_file, remote_directory)):
+            raise ValueError("schedule target fields contain an invalid control character")
+        if source_kind == "server" and not remote_directory.startswith("/"):
+            raise ValueError("remote directory must be an absolute path")
+        if source_kind == "server" and (not Path(ssh_key_ref).expanduser().is_absolute() or not Path(known_hosts_file).expanduser().is_absolute()):
+            raise ValueError("SSH key and known-hosts paths must be absolute")
+        port = int(config.get("port", 22))
+        if not 1 <= port <= 65535:
+            raise ValueError("invalid SSH port")
+        scan_scope = str(config.get("scan_scope") or "all")
+        if scan_scope not in SCAN_SCOPE_CATEGORIES:
+            raise ValueError("invalid scan scope")
+        standard = str(config.get("standard") or ("local" if scan_scope == "library" else "local"))
+        standard_category = str(config.get("standard_category") or "all")
+        if scan_scope == "library":
+            standard, standard_category = "local", "all"
+        from .standards import resolve_standard_selection
+
+        resolve_standard_selection(standard, standard_category)
+        excludes = config.get("exclude_paths", config.get("excludes", []))
+        disabled_rules = config.get("disabled_rules", [])
+        if not isinstance(excludes, list) or any(
+            not isinstance(item, str) or not item.strip() or any(ord(char) < 32 for char in item)
+            for item in excludes
+        ):
+            raise ValueError("invalid excluded path list")
+        if not isinstance(disabled_rules, list) or any(
+            not isinstance(item, str) or not item.strip() or any(ord(char) < 32 for char in item)
+            for item in disabled_rules
+        ):
+            raise ValueError("invalid disabled rule list")
+        max_files, max_bytes, timeout_seconds = (
+            int(config.get("max_files", 200_000)), int(config.get("max_bytes", 1024 * 1024 * 1024)),
+            int(config.get("timeout_seconds", 14_400)),
+        )
+        if not 1 <= max_files <= 200_000 or not 1 <= max_bytes <= 4 * 1024 * 1024 * 1024 or not 60 <= timeout_seconds <= 86_400:
+            raise ValueError("invalid schedule resource limit")
+        mapping_id = str(config.get("gitlab_mapping_id") or "").strip() or None
+        gitlab_target_branch = str(config.get("gitlab_target_branch") or "").strip()
+        if len(gitlab_target_branch) > 255 or any(char in gitlab_target_branch for char in "\r\n"):
+            raise ValueError("invalid GitLab target branch")
+        schedule_frequency = str(config.get("schedule_frequency") or "daily").strip().lower()
+        if schedule_frequency not in {"daily", "weekly", "hourly"}:
+            raise ValueError("invalid schedule frequency")
+        schedule_time = str(config.get("schedule_time") or "01:00").strip()
+        if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", schedule_time):
+            raise ValueError("schedule time must be HH:MM")
+        weekdays = config.get("schedule_weekdays", [0, 1, 2, 3, 4, 5, 6])
+        if not isinstance(weekdays, list) or not weekdays or any(type(day) is not int or day < 0 or day > 6 for day in weekdays):
+            raise ValueError("schedule weekdays must contain Python weekday numbers 0-6")
+        weekdays = sorted(set(weekdays))
+        interval_hours = int(config.get("schedule_interval_hours", 24))
+        if schedule_frequency == "hourly" and interval_hours not in {1, 2, 3, 4, 6, 8, 12, 24}:
+            raise ValueError("schedule interval must divide 24 hours")
+        if schedule_frequency != "hourly":
+            interval_hours = 24
+        source_gitlab_mapping_id = str(config.get("source_gitlab_mapping_id") or "").strip() or None
+        source_gitlab_ref = str(config.get("source_gitlab_ref") or "").strip()
+        source_gitlab_ref_type = str(config.get("source_gitlab_ref_type") or "branch").strip().lower()
+        source_gitlab_directory = str(config.get("source_gitlab_directory") or "").strip()
+        if source_gitlab_ref_type not in {"branch", "tag"}:
+            raise ValueError("GitLab source ref type must be branch or tag")
+        if any(ord(char) < 32 for char in source_gitlab_ref):
+            raise ValueError("invalid GitLab source ref")
+        if source_kind == "gitlab" and source_gitlab_ref_type == "tag" and not source_gitlab_ref:
+            raise ValueError("GitLab tag name is required")
+        if len(source_gitlab_ref) > 255:
+            raise ValueError("GitLab source ref is too long")
+        if len(source_gitlab_directory) > 1024 or any(ord(char) < 32 for char in source_gitlab_directory):
+            raise ValueError("invalid GitLab source directory")
+        if source_gitlab_directory in {"", "/"}:
+            source_gitlab_directory = ""
+        else:
+            if "\\" in source_gitlab_directory or any(part in {".", ".."} for part in source_gitlab_directory.split("/")):
+                raise ValueError("invalid GitLab source directory")
+            source_gitlab_directory = source_gitlab_directory.strip("/")
+        if source_kind == "gitlab":
+            source_gitlab_mapping_id = source_gitlab_mapping_id or mapping_id
+            if not source_gitlab_mapping_id:
+                raise ValueError("GitLab schedule source requires a repository")
+        order_index = int(config.get("order_index", 0))
+        if order_index < 0:
+            raise ValueError("invalid schedule order")
+        now = self._now()
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM projects WHERE project_id=?", (project_id,)).fetchone():
+                db.execute("ROLLBACK")
+                raise KeyError("project not found")
+            if mapping_id:
+                mapping = db.execute(
+                    "SELECT project_id FROM gitlab_repositories WHERE mapping_id=? AND enabled=1", (mapping_id,)
+                ).fetchone()
+                if not mapping or mapping["project_id"] != project_id:
+                    db.execute("ROLLBACK")
+                    raise ValueError("GitLab mapping does not belong to project")
+            if source_gitlab_mapping_id and source_gitlab_mapping_id != mapping_id:
+                source_mapping = db.execute(
+                    "SELECT project_id,default_branch FROM gitlab_repositories WHERE mapping_id=? AND enabled=1",
+                    (source_gitlab_mapping_id,),
+                ).fetchone()
+                if not source_mapping or source_mapping["project_id"] != project_id:
+                    db.execute("ROLLBACK")
+                    raise ValueError("GitLab source mapping does not belong to project")
+            elif source_gitlab_mapping_id:
+                source_mapping = db.execute(
+                    "SELECT project_id,default_branch FROM gitlab_repositories WHERE mapping_id=? AND enabled=1",
+                    (source_gitlab_mapping_id,),
+                ).fetchone()
+                if not source_mapping or source_mapping["project_id"] != project_id:
+                    db.execute("ROLLBACK")
+                    raise ValueError("GitLab source mapping does not belong to project")
+            if source_kind == "gitlab" and not source_gitlab_ref:
+                source_gitlab_ref = str(source_mapping["default_branch"] or "").strip()
+                if not source_gitlab_ref:
+                    db.execute("ROLLBACK")
+                    raise ValueError("GitLab source ref is required when default branch is unavailable")
+            existing = db.execute("SELECT config_version,created_at FROM schedule_targets WHERE target_id=?", (target_id,)).fetchone()
+            version = int(existing["config_version"]) + 1 if existing else 1
+            created_at = existing["created_at"] if existing else now
+            db.execute(
+                "INSERT INTO schedule_targets(target_id,project_id,name,host,port,username,ssh_key_ref,known_hosts_file,remote_directory,exclude_json,standard,standard_category,scan_scope,disabled_rules_json,gitlab_mapping_id,gitlab_target_branch,source_kind,schedule_frequency,schedule_time,schedule_weekdays_json,schedule_interval_hours,source_gitlab_mapping_id,source_gitlab_ref,source_gitlab_ref_type,source_gitlab_directory,server_connection_id,enabled,order_index,config_version,max_files,max_bytes,timeout_seconds,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(target_id) DO UPDATE SET "
+                "project_id=excluded.project_id,name=excluded.name,host=excluded.host,port=excluded.port,username=excluded.username,ssh_key_ref=excluded.ssh_key_ref,known_hosts_file=excluded.known_hosts_file,remote_directory=excluded.remote_directory,exclude_json=excluded.exclude_json,standard=excluded.standard,standard_category=excluded.standard_category,scan_scope=excluded.scan_scope,disabled_rules_json=excluded.disabled_rules_json,gitlab_mapping_id=excluded.gitlab_mapping_id,gitlab_target_branch=excluded.gitlab_target_branch,source_kind=excluded.source_kind,schedule_frequency=excluded.schedule_frequency,schedule_time=excluded.schedule_time,schedule_weekdays_json=excluded.schedule_weekdays_json,schedule_interval_hours=excluded.schedule_interval_hours,source_gitlab_mapping_id=excluded.source_gitlab_mapping_id,source_gitlab_ref=excluded.source_gitlab_ref,source_gitlab_ref_type=excluded.source_gitlab_ref_type,source_gitlab_directory=excluded.source_gitlab_directory,server_connection_id=excluded.server_connection_id,enabled=excluded.enabled,order_index=excluded.order_index,config_version=excluded.config_version,max_files=excluded.max_files,max_bytes=excluded.max_bytes,timeout_seconds=excluded.timeout_seconds,updated_at=excluded.updated_at",
+                (target_id, project_id, name, host, port, username, ssh_key_ref, known_hosts_file, remote_directory,
+                 self._json(sorted(set(item.strip() for item in excludes))), standard, standard_category, scan_scope,
+                 self._json(sorted(set(item.strip() for item in disabled_rules))), mapping_id, gitlab_target_branch, source_kind, schedule_frequency, schedule_time, self._json(weekdays), interval_hours, source_gitlab_mapping_id, source_gitlab_ref, source_gitlab_ref_type, source_gitlab_directory, server_connection_id, int(bool(config.get("enabled", False))),
+                 order_index, version, max_files, max_bytes, timeout_seconds, created_at, now),
+            )
+            self._audit_db(db, actor, "schedule_target.updated", project_id, {"target_id": target_id, "enabled": bool(config.get("enabled", False)), "config_version": version})
+            db.execute("COMMIT")
+        return self.schedule_target(target_id)
+
+    def disable_schedule_target(self, target_id: str, actor: str | None = None) -> dict:
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT project_id FROM schedule_targets WHERE target_id=?", (str(target_id),)).fetchone()
+            if not row:
+                db.execute("ROLLBACK")
+                raise KeyError("schedule target not found")
+            db.execute("UPDATE schedule_targets SET enabled=0,config_version=config_version+1,updated_at=? WHERE target_id=?", (self._now(), str(target_id)))
+            self._audit_db(db, actor, "schedule_target.disabled", row["project_id"], {"target_id": str(target_id)})
+            db.execute("COMMIT")
+        return self.schedule_target(target_id)
+
+    def baseline_schedule_files(self, target_id: str) -> dict[str, dict]:
+        with self._db() as db:
+            rows = db.execute("SELECT * FROM schedule_files WHERE target_id=?", (str(target_id),)).fetchall()
+        return {str(row["relative_path"]): dict(row) for row in rows}
+
+    def replace_schedule_files(self, target_id: str, files: list[dict]) -> None:
+        now = self._now()
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM schedule_files WHERE target_id=?", (str(target_id),))
+            for item in files:
+                db.execute(
+                    "INSERT INTO schedule_files(target_id,relative_path,size,mtime,sha256,updated_at) VALUES(?,?,?,?,?,?)",
+                    (str(target_id), str(item["relative_path"]), int(item["size"]), float(item["mtime"]), str(item["sha256"]), now),
+                )
+            db.execute("COMMIT")
+
+    def begin_schedule_run(self, target_id: str, scheduled_for: str, mode: str, config_version: int) -> dict:
+        if mode not in {"full", "changed"}:
+            raise ValueError("invalid schedule mode")
+        now = self._now()
+        schedule_run_id = str(uuid.uuid4())
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM schedule_targets WHERE target_id=?", (str(target_id),)).fetchone():
+                db.execute("ROLLBACK")
+                raise KeyError("schedule target not found")
+            db.execute(
+                "INSERT OR IGNORE INTO schedule_runs(schedule_run_id,target_id,scheduled_for,mode,status,stage,config_version,created_at,updated_at) VALUES(?,?,?,?,'queued','queued',?,?,?)",
+                (schedule_run_id, str(target_id), str(scheduled_for), mode, int(config_version), now, now),
+            )
+            row = db.execute("SELECT * FROM schedule_runs WHERE target_id=? AND scheduled_for=?", (str(target_id), str(scheduled_for))).fetchone()
+            db.execute("COMMIT")
+        return self._schedule_run_dict(row)
+
+    def update_schedule_run(self, schedule_run_id: str, **fields) -> dict:
+        allowed = {"status", "stage", "config_version", "run_id", "files_total", "changed_files", "cleanup_status", "cleanup_error", "tracker_status", "gitlab_status", "error", "metadata", "started_at", "completed_at"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError("invalid schedule run fields")
+        values = dict(fields)
+        if "metadata" in values:
+            values["metadata_json"] = self._json(values.pop("metadata") or {})
+        if not values:
+            return self.schedule_run(schedule_run_id)
+        values["updated_at"] = self._now()
+        assignments = ",".join(f"{key}=?" for key in values)
+        with self._lock, self._db() as db:
+            db.execute("UPDATE schedule_runs SET " + assignments + " WHERE schedule_run_id=?", (*values.values(), str(schedule_run_id)))
+        return self.schedule_run(schedule_run_id)
+
+    def schedule_run(self, schedule_run_id: str) -> dict:
+        with self._db() as db:
+            row = db.execute("SELECT * FROM schedule_runs WHERE schedule_run_id=?", (str(schedule_run_id),)).fetchone()
+        if not row:
+            raise KeyError("schedule run not found")
+        return self._schedule_run_dict(row)
+
+    @staticmethod
+    def _schedule_run_dict(row: sqlite3.Row | None) -> dict:
+        if not row:
+            raise KeyError("schedule run not found")
+        value = dict(row)
+        value["metadata"] = json.loads(value.pop("metadata_json") or "{}")
+        return value
+
+    def list_schedule_runs(self, target_id: str | None = None, limit: int = 100) -> list[dict]:
+        with self._db() as db:
+            if target_id:
+                rows = db.execute("SELECT * FROM schedule_runs WHERE target_id=? ORDER BY scheduled_for DESC LIMIT ?", (str(target_id), min(max(int(limit), 1), 500))).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM schedule_runs ORDER BY scheduled_for DESC LIMIT ?", (min(max(int(limit), 1), 500),)).fetchall()
+        return [self._schedule_run_dict(row) for row in rows]
+
+    def last_schedule_run(self, target_id: str) -> dict | None:
+        with self._db() as db:
+            row = db.execute(
+                "SELECT * FROM schedule_runs WHERE target_id=? AND status='completed' AND cleanup_status='completed' "
+                "ORDER BY scheduled_for DESC,created_at DESC LIMIT 1", (str(target_id),)
+            ).fetchone()
+        return self._schedule_run_dict(row) if row else None
+
+    def has_active_schedule_work(self, target_id: str | None = None) -> bool:
+        with self._db() as db:
+            if target_id:
+                row = db.execute(
+                    "SELECT 1 FROM schedule_runs WHERE target_id=? AND status IN ('running','cancelling') LIMIT 1",
+                    (str(target_id),),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT 1 FROM schedule_runs WHERE status IN ('running','cancelling') LIMIT 1"
+                ).fetchone()
+        return bool(row)
+
+    def claim_schedule_run(self, schedule_run_id: str) -> bool:
+        """Atomically claim a queued/recovered target for one worker."""
+        now = self._now()
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute(
+                "UPDATE schedule_runs SET status='running',stage='listing',run_id=NULL,files_total=0,"
+                "changed_files=0,cleanup_status='pending',cleanup_error=NULL,tracker_status='pending',"
+                "gitlab_status='pending',metadata_json='{}',error=NULL,started_at=?,completed_at=NULL,updated_at=? "
+                "WHERE schedule_run_id=? AND status='queued' AND NOT EXISTS(SELECT 1 FROM schedule_runs WHERE status IN ('running','cancelling'))",
+                (now, now, str(schedule_run_id)),
+            ).rowcount
+            db.execute("COMMIT")
+        return bool(changed)
+
+    def has_active_manual_work(self) -> bool:
+        with self._db() as db:
+            rows = db.execute("SELECT status,snapshot_json FROM scan_runs WHERE status IN ('queued','running','cancelling')").fetchall()
+        for row in rows:
+            try:
+                if json.loads(row["snapshot_json"]).get("source_type") != "scheduled_server":
+                    return True
+            except (TypeError, json.JSONDecodeError):
+                return True
+        return False
+
+    def create_scheduled_scan(self, project_id: str, input_id: str, standard: str, standard_category: str, scan_scope: str, source_snapshot: dict) -> dict:
+        if scan_scope == "library":
+            standard, standard_category = "local", "all"
+        if scan_scope not in SCAN_SCOPE_CATEGORIES or not isinstance(source_snapshot, dict) or source_snapshot.get("source_type") != "scheduled_server":
+            raise ValueError("invalid scheduled scan options")
+        from .standards import resolve_standard_selection
+
+        resolve_standard_selection(standard, standard_category)
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            source = db.execute("SELECT * FROM inputs WHERE input_id=? AND project_id=?", (str(input_id), str(project_id))).fetchone()
+            if not source or not Path(source["path"]).is_file():
+                db.execute("ROLLBACK")
+                raise ValueError("scheduled input is unavailable")
+            policy = db.execute("SELECT * FROM rule_policies WHERE project_id=? ORDER BY version DESC LIMIT 1", (str(project_id),)).fetchone()
+            if not policy:
+                db.execute("ROLLBACK")
+                raise KeyError("rule policy not found")
+            round_number = (db.execute("SELECT max(round_number) FROM scan_runs WHERE project_id=?", (str(project_id),)).fetchone()[0] or 0) + 1
+            disabled_rules = sorted(set(source_snapshot.get("disabled_rules", [])) | set(json.loads(policy["rules_json"])))
+            source_snapshot = {**source_snapshot, "disabled_rules": disabled_rules}
+            if not isinstance(disabled_rules, list) or any(not isinstance(item, str) for item in disabled_rules):
+                db.execute("ROLLBACK")
+                raise ValueError("invalid scheduled rule policy")
+            snapshot = {
+                "input_id": str(input_id), "input_hash": source["content_hash"], "standard": standard,
+                "standard_category": standard_category, "scan_scope": scan_scope,
+                "disabled_rules": sorted(set(disabled_rules)), "rule_policy_version": policy["version"],
+                "rule_policy_hash": policy["hash"], "scanner_version": _scanner_version(),
+                "requested_by": "schedule-worker", **source_snapshot,
+            }
+            run_id, revision_id, now = str(uuid.uuid4()), str(uuid.uuid4()), self._now()
+            db.execute(
+                "INSERT INTO scan_runs(run_id,project_id,round_number,status,standard,standard_category,input_id,policy_version,requested_by,snapshot_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, str(project_id), round_number, "queued", standard, standard_category, str(input_id), policy["version"], "schedule-worker", self._json(snapshot), now),
+            )
+            db.execute("INSERT INTO analysis_revisions(revision_id,run_id,sequence,snapshot_json,created_at) VALUES(?,?,?,?,?)", (revision_id, run_id, 1, self._json(snapshot), now))
+            db.execute("UPDATE schedule_runs SET run_id=? WHERE schedule_run_id=?", (run_id, source_snapshot["schedule_run_id"]))
+            self._audit_db(db, "schedule-worker", "scan.created.scheduled", project_id, {"run_id": run_id, "round_number": round_number, "target_id": source_snapshot.get("schedule_target_id")})
+            db.execute("COMMIT")
+        return self.run(run_id)
+
     def set_membership(self, project_id: str, subject_id: str, role: str, actor: str | None = None) -> None:
         policy = self.role_policy()
         if role not in policy["roles"]:
@@ -491,13 +1052,19 @@ class PortalStore:
         content_hash = content_hash or hashlib.sha256(path.read_bytes()).hexdigest()
         input_id = str(uuid.uuid4())
         with self._db() as db:
-            db.execute("INSERT INTO inputs VALUES(?,?,?,?,?,?)", (input_id, str(project_id), name[:255], str(path), content_hash, self._now()))
+            db.execute("INSERT INTO inputs(input_id,project_id,name,path,content_hash,created_at,registered_by) VALUES(?,?,?,?,?,?,?)", (input_id, str(project_id), name[:255], str(path), content_hash, self._now(), actor))
             self._audit_db(db, actor, "input.created", project_id, {"input_id": input_id, "name": name[:255], "sha256": content_hash})
         return input_id
 
     def list_inputs(self, project_id: str) -> list[dict]:
         with self._db() as db:
-            rows = [dict(row) for row in db.execute("SELECT * FROM inputs WHERE project_id=? ORDER BY created_at DESC", (str(project_id),))]
+            rows = [dict(row) for row in db.execute(
+                "SELECT i.*,s.display AS registered_by_id FROM inputs i LEFT JOIN subjects s ON s.subject_id=i.registered_by "
+                "WHERE i.project_id=? ORDER BY i.created_at DESC", (str(project_id),))]
+            for row in rows:
+                row["registered_by_id"] = row["registered_by_id"] or ("schedule-worker" if row["registered_by"] == "schedule-worker" else "기록 없음")
+                row["runs"] = [dict(run) for run in db.execute(
+                    "SELECT run_id,round_number FROM scan_runs WHERE input_id=? AND deleted_at IS NULL ORDER BY round_number", (row["input_id"],))]
         for row in rows:
             row["available"] = Path(row["path"]).is_file()
         return rows
@@ -592,6 +1159,29 @@ class PortalStore:
                     raise ValueError("invalid source snapshot")
                 snapshot.update(source_snapshot)
             run_id, revision_id, now = str(uuid.uuid4()), str(uuid.uuid4()), self._now()
+            if snapshot.get("gitlab_mapping_id"):
+                # Allocate under BEGIN IMMEDIATE; tombstoned runs still reserve
+                # their version so deletion/restart cannot reuse a result branch.
+                day = dt.datetime.fromisoformat(now).astimezone(dt.timezone(dt.timedelta(hours=9))).date()
+                start = dt.datetime.combine(day, dt.time(), dt.timezone(dt.timedelta(hours=9)))
+                previous = db.execute(
+                    "SELECT snapshot_json FROM scan_runs WHERE project_id=? AND requested_by=? "
+                    "AND created_at>=? AND created_at<?",
+                    (str(project_id), str(subject_id), start.astimezone(dt.timezone.utc).isoformat(),
+                     (start + dt.timedelta(days=1)).astimezone(dt.timezone.utc).isoformat()),
+                ).fetchall()
+                version = 1 + max((int(json.loads(row[0]).get("gitlab_result_version", 0)) for row in previous), default=0)
+                project_name = db.execute("SELECT name FROM projects WHERE project_id=?", (str(project_id),)).fetchone()[0]
+                display = db.execute("SELECT display FROM subjects WHERE subject_id=?", (str(subject_id),)).fetchone()[0]
+                # Keep Korean names readable, but exclude Git ref syntax and
+                # bound UTF-8 length. Project ID disambiguates normalized names.
+                slug = re.sub(r"[^\w-]+", "-", project_name, flags=re.UNICODE).strip("-_")
+                slug = slug.encode("utf-8")[:72].decode("utf-8", errors="ignore") or "project"
+                snapshot.update({
+                    "project_name": project_name, "requested_by_display": display,
+                    "gitlab_result_date": day.isoformat(), "gitlab_result_version": version,
+                    "gitlab_result_branch": f"koda/results/{day:%Y%m%d}/{slug}-{str(project_id)[:8]}/{subject_id}/v{version}",
+                })
             db.execute(
                 "INSERT INTO scan_runs(run_id,project_id,round_number,status,standard,standard_category,input_id,policy_version,requested_by,snapshot_json,created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -647,26 +1237,26 @@ class PortalStore:
 
     def recover_incomplete_runs(self) -> list[str]:
         with self._lock, self._db() as db:
-            db.execute("UPDATE scan_runs SET status='cancelled',stage='cancelled',completed_at=? WHERE status IN ('running','cancelling') AND cancel_requested=1", (self._now(),))
-            db.execute("UPDATE scan_runs SET status='queued',stage='queued',progress=0 WHERE status IN ('running','cancelling') AND cancel_requested=0")
-            queued = [row[0] for row in db.execute("SELECT run_id FROM scan_runs WHERE status='queued' ORDER BY created_at")]
+            db.execute("UPDATE scan_runs SET status='cancelled',stage='cancelled',completed_at=? WHERE status IN ('running','cancelling') AND cancel_requested=1 AND run_id NOT IN (SELECT run_id FROM schedule_runs WHERE run_id IS NOT NULL)", (self._now(),))
+            db.execute("UPDATE scan_runs SET status='queued',stage='queued',progress=0 WHERE status IN ('running','cancelling') AND cancel_requested=0 AND run_id NOT IN (SELECT run_id FROM schedule_runs WHERE run_id IS NOT NULL)")
+            queued = [row[0] for row in db.execute("SELECT run_id FROM scan_runs WHERE status='queued' AND run_id NOT IN (SELECT run_id FROM schedule_runs WHERE run_id IS NOT NULL) ORDER BY created_at")]
         self.cleanup_terminal_inputs()
         return queued
 
     def recover_tracker_deliveries(self) -> list[str]:
         with self._lock, self._db() as db:
-            db.execute("UPDATE tracker_deliveries SET status='pending',updated_at=? WHERE status='sending'", (self._now(),))
+            db.execute("UPDATE tracker_deliveries SET status='pending',updated_at=? WHERE status='sending' AND run_id NOT IN (SELECT run_id FROM schedule_runs WHERE run_id IS NOT NULL)", (self._now(),))
             return [row[0] for row in db.execute(
                 "SELECT d.run_id FROM tracker_deliveries d JOIN scan_runs r USING(run_id) "
-                "WHERE d.status='pending' AND r.status='completed' ORDER BY d.created_at"
+                "WHERE d.status='pending' AND r.status='completed' AND r.deleted_at IS NULL AND r.run_id NOT IN (SELECT run_id FROM schedule_runs WHERE run_id IS NOT NULL) ORDER BY d.created_at"
             )]
 
     def recover_gitlab_results(self) -> list[str]:
         with self._lock, self._db() as db:
-            db.execute("UPDATE tracker_deliveries SET gitlab_result_status='pending',updated_at=? WHERE gitlab_result_status='sending'", (self._now(),))
+            db.execute("UPDATE tracker_deliveries SET gitlab_result_status='pending',updated_at=? WHERE gitlab_result_status='sending' AND run_id NOT IN (SELECT run_id FROM schedule_runs WHERE run_id IS NOT NULL)", (self._now(),))
             return [row[0] for row in db.execute(
                 "SELECT d.run_id FROM tracker_deliveries d JOIN scan_runs r USING(run_id) "
-                "WHERE d.gitlab_result_status='pending' AND d.status='completed' AND r.status='completed' ORDER BY d.created_at"
+                "WHERE d.gitlab_result_status='pending' AND d.status='completed' AND r.status='completed' AND r.deleted_at IS NULL AND r.run_id NOT IN (SELECT run_id FROM schedule_runs WHERE run_id IS NOT NULL) ORDER BY d.created_at"
             )]
 
     def cleanup_input_for_run(self, run_id: str) -> bool:
@@ -683,11 +1273,16 @@ class PortalStore:
                 if active:
                     return False
                 source = db.execute("SELECT path FROM inputs WHERE input_id=?", (run["input_id"],)).fetchone()
-                if not source:
-                    return False
-                path = Path(source["path"])
+            if not source:
+                return False
+            if not source["path"]:
+                return True  # Result-only scheduled input has no filesystem source.
+            path = Path(source["path"])
             try:
-                path.unlink(missing_ok=True)
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=False)
+                else:
+                    path.unlink(missing_ok=True)
             except OSError:
                 return False
             return True
@@ -698,11 +1293,59 @@ class PortalStore:
                 run_ids = [row[0] for row in db.execute("SELECT run_id FROM scan_runs WHERE status IN ('completed','failed','cancelled')")]
             return sum(self.cleanup_input_for_run(run_id) for run_id in run_ids)
 
+    def prune_schedule_runs(self, days: int = 90) -> int:
+        """Delete terminal scheduled results older than the configured retention window."""
+        days = int(days)
+        if days < 1:
+            raise ValueError("retention days must be positive")
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+        paths: list[Path] = []
+        deleted = 0
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT sr.schedule_run_id,sr.run_id,r.input_id,i.path FROM schedule_runs sr "
+                "LEFT JOIN scan_runs r ON r.run_id=sr.run_id LEFT JOIN inputs i ON i.input_id=r.input_id "
+                "WHERE sr.created_at<? AND sr.cleanup_status='completed' AND sr.status IN ('completed','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM tracker_deliveries d WHERE d.run_id=sr.run_id AND (d.status='sending' OR d.gitlab_result_status='sending'))",
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                schedule_run_id, run_id, input_id = row["schedule_run_id"], row["run_id"], row["input_id"]
+                db.execute("DELETE FROM schedule_runs WHERE schedule_run_id=?", (schedule_run_id,))
+                if run_id:
+                    db.execute("DELETE FROM tracker_deliveries WHERE run_id=?", (run_id,))
+                    db.execute("DELETE FROM gitlab_issue_deliveries WHERE run_id=?", (run_id,))
+                    db.execute("DELETE FROM gitlab_issue_links WHERE run_id=?", (run_id,))
+                    db.execute("DELETE FROM analysis_revisions WHERE run_id=?", (run_id,))
+                    # Inputs may be shared with a manually-created run; only
+                    # remove the row and path when this is the final reference.
+                    shared = db.execute(
+                        "SELECT 1 FROM scan_runs WHERE input_id=? AND run_id<>? LIMIT 1", (input_id, run_id)
+                    ).fetchone() if input_id else None
+                    db.execute("DELETE FROM scan_runs WHERE run_id=?", (run_id,))
+                    if input_id and not shared:
+                        db.execute("DELETE FROM inputs WHERE input_id=?", (input_id,))
+                        if row["path"]:
+                            paths.append(Path(row["path"]))
+                deleted += 1
+            db.execute("COMMIT")
+        for path in paths:
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                # Retention is best effort for already-unlinked files; the
+                # durable rows are removed only after all references are gone.
+                continue
+        return deleted
+
     def complete_run(self, run_id: str, result: dict | None = None, error: str | None = None) -> None:
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
-            current = db.execute("SELECT cancel_requested,snapshot_json FROM scan_runs WHERE run_id=?", (str(run_id),)).fetchone()
-            if not current:
+            current = db.execute("SELECT cancel_requested,snapshot_json,deleted_at FROM scan_runs WHERE run_id=?", (str(run_id),)).fetchone()
+            if not current or current["deleted_at"] is not None:
                 db.execute("ROLLBACK")
                 raise KeyError("run not found")
             cancelled = bool(current["cancel_requested"])
@@ -736,13 +1379,22 @@ class PortalStore:
                 row["gitlab_issue_urls"] = json.loads(row.pop("gitlab_issue_urls_json") or "[]")
             return row
 
+    def skip_source_tracker_delivery(self, run_id: str) -> dict:
+        """Retain the GitLab delivery record without contacting Tracker."""
+        run = self.run(run_id)
+        if run.get("status") != "completed" or run.get("snapshot", {}).get("scan_scope") != "source":
+            raise ValueError("completed source-only run required")
+        with self._lock, self._db() as db:
+            db.execute("UPDATE tracker_deliveries SET status='skipped',last_error=NULL,updated_at=? WHERE run_id=?", (self._now(), str(run_id)))
+        return self.tracker_delivery(run_id) or {}
+
     def claim_tracker_delivery(self, run_id: str, *, retry: bool = False) -> dict:
         now, expected = self._now(), "failed" if retry else "pending"
         with self._lock, self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             changed = db.execute(
                 "UPDATE tracker_deliveries SET status='sending',attempts=attempts+1,last_error=NULL,updated_at=? "
-                "WHERE run_id=? AND status=? AND EXISTS(SELECT 1 FROM scan_runs WHERE run_id=? AND status='completed')",
+                "WHERE run_id=? AND status=? AND EXISTS(SELECT 1 FROM scan_runs WHERE run_id=? AND status='completed' AND deleted_at IS NULL)",
                 (now, str(run_id), expected, str(run_id)),
             ).rowcount
             row = db.execute("SELECT * FROM tracker_deliveries WHERE run_id=?", (str(run_id),)).fetchone()
@@ -780,15 +1432,18 @@ class PortalStore:
             row["gitlab_issue_urls"] = json.loads(row.pop("gitlab_issue_urls_json") or "[]")
             return row
 
-    def claim_gitlab_result(self, run_id: str, *, retry: bool = False) -> dict:
-        expected = ("failed", "pending") if retry else ("pending",)
+    def claim_gitlab_result(
+        self, run_id: str, *, retry: bool = False, allow_tracker_failure: bool = False, refresh: bool = False,
+    ) -> dict:
+        expected = ("failed", "pending", "completed") if refresh else (("failed", "pending") if retry else ("pending",))
         placeholders = ",".join("?" for _ in expected)
+        tracker_status = "status IN ('completed','failed','skipped')" if allow_tracker_failure else "status IN ('completed','skipped')"
         with self._lock, self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             changed = db.execute(
                 f"UPDATE tracker_deliveries SET gitlab_result_status='sending',gitlab_result_attempts=gitlab_result_attempts+1,gitlab_result_last_error=NULL,updated_at=? "
-                f"WHERE run_id=? AND gitlab_result_status IN ({placeholders}) AND status='completed'",
-                (self._now(), str(run_id), *expected),
+                f"WHERE run_id=? AND gitlab_result_status IN ({placeholders}) AND {tracker_status} AND EXISTS(SELECT 1 FROM scan_runs WHERE run_id=? AND status='completed' AND deleted_at IS NULL)",
+                (self._now(), str(run_id), *expected, str(run_id)),
             ).rowcount
             row = db.execute("SELECT * FROM tracker_deliveries WHERE run_id=?", (str(run_id),)).fetchone()
             if not row:
@@ -823,10 +1478,10 @@ class PortalStore:
 
     def recover_gitlab_issue_deliveries(self) -> list[str]:
         with self._lock, self._db() as db:
-            db.execute("UPDATE gitlab_issue_deliveries SET status='pending',updated_at=? WHERE status='sending'", (self._now(),))
+            db.execute("UPDATE gitlab_issue_deliveries SET status='pending',updated_at=? WHERE status='sending' AND run_id NOT IN (SELECT run_id FROM schedule_runs WHERE run_id IS NOT NULL)", (self._now(),))
             return [row[0] for row in db.execute(
                 "SELECT d.run_id FROM gitlab_issue_deliveries d JOIN scan_runs r USING(run_id) "
-                "WHERE d.status='pending' AND r.status='completed' ORDER BY d.created_at"
+                "WHERE d.status='pending' AND r.status='completed' AND r.deleted_at IS NULL AND r.run_id NOT IN (SELECT run_id FROM schedule_runs WHERE run_id IS NOT NULL) ORDER BY d.created_at"
             )]
 
     def claim_gitlab_issue_delivery(self, run_id: str, *, retry: bool = False) -> dict:
@@ -842,7 +1497,7 @@ class PortalStore:
             placeholders = ",".join("?" for _ in expected)
             changed = db.execute(
                 f"UPDATE gitlab_issue_deliveries SET status='sending',attempts=attempts+1,last_error=NULL,updated_at=? "
-                f"WHERE run_id=? AND status IN ({placeholders}) AND EXISTS(SELECT 1 FROM scan_runs WHERE run_id=? AND status='completed')",
+                f"WHERE run_id=? AND status IN ({placeholders}) AND EXISTS(SELECT 1 FROM scan_runs WHERE run_id=? AND status='completed' AND deleted_at IS NULL)",
                 (now, str(run_id), *expected, str(run_id)),
             ).rowcount
             row = db.execute("SELECT * FROM gitlab_issue_deliveries WHERE run_id=?", (str(run_id),)).fetchone()
@@ -949,7 +1604,7 @@ class PortalStore:
 
     def run(self, run_id: str) -> dict:
         with self._db() as db:
-            row = db.execute("SELECT * FROM scan_runs WHERE run_id=?", (str(run_id),)).fetchone()
+            row = db.execute("SELECT * FROM scan_runs WHERE run_id=? AND deleted_at IS NULL", (str(run_id),)).fetchone()
         if not row:
             raise KeyError("run not found")
         result = dict(row)
@@ -960,15 +1615,45 @@ class PortalStore:
 
     def list_runs(self, project_id: str) -> list[dict]:
         with self._db() as db:
-            rows = db.execute("SELECT * FROM scan_runs WHERE project_id=? ORDER BY round_number DESC", (str(project_id),))
+            rows = db.execute("SELECT r.*,s.display AS requested_by_id FROM scan_runs r LEFT JOIN subjects s ON s.subject_id=r.requested_by WHERE r.project_id=? AND r.deleted_at IS NULL ORDER BY r.round_number DESC", (str(project_id),))
             runs = []
             for row in rows:
                 value = dict(row)
                 snapshot = json.loads(value.pop("snapshot_json"))
                 value.pop("result_json", None)
+                value["requested_by_id"] = value["requested_by_id"] or ("schedule-worker" if value["requested_by"] == "schedule-worker" else "기록 없음")
                 value["scan_scope"] = snapshot.get("scan_scope", "all")
+                value["source"] = snapshot.get("source_type") or "manual"
+                if value["source"] == "scheduled_server":
+                    scheduled = db.execute("SELECT status,cleanup_status FROM schedule_runs WHERE run_id=?", (value["run_id"],)).fetchone()
+                    if scheduled:
+                        value["status"] = scheduled["status"]
+                        value["cleanup_status"] = scheduled["cleanup_status"]
                 runs.append(value)
             return runs
+
+    def delete_run(self, run_id: str, actor: str) -> None:
+        """Logically remove a terminal local result without touching external deliveries."""
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            run = db.execute("SELECT * FROM scan_runs WHERE run_id=?", (str(run_id),)).fetchone()
+            if not run or run["deleted_at"] is not None:
+                raise KeyError("run not found")
+            if run["status"] not in TERMINAL_RUN_STATUSES:
+                raise ValueError("실행 중인 점검은 삭제할 수 없습니다")
+            sending = db.execute(
+                "SELECT 1 FROM tracker_deliveries WHERE run_id=? AND (status='sending' OR gitlab_result_status='sending') "
+                "UNION ALL SELECT 1 FROM gitlab_issue_deliveries WHERE run_id=? AND status='sending' "
+                "UNION ALL SELECT 1 FROM gitlab_issue_links WHERE run_id=? AND status='creating' LIMIT 1",
+                (str(run_id), str(run_id), str(run_id)),
+            ).fetchone()
+            if sending:
+                raise ValueError("결과 전송 중인 점검은 삭제할 수 없습니다")
+            now = self._now()
+            db.execute("UPDATE scan_runs SET deleted_at=?,result_json=NULL WHERE run_id=? AND deleted_at IS NULL", (now, str(run_id)))
+            db.execute("UPDATE analysis_revisions SET result_json=NULL WHERE run_id=?", (str(run_id),))
+            self._audit_db(db, actor, "scan.deleted", run["project_id"], {"run_id": str(run_id), "round_number": run["round_number"]})
+            db.execute("COMMIT")
 
     def audit_events(self, limit: int | None = 100) -> list[dict]:
         with self._db() as db:
@@ -991,7 +1676,13 @@ class PortalStore:
             if db.execute("SELECT 1 FROM scan_runs WHERE input_id=?", (str(input_id),)).fetchone():
                 raise ValueError("input is already used by a scan")
             db.execute("DELETE FROM inputs WHERE input_id=?", (str(input_id),))
-        Path(row["path"]).unlink(missing_ok=True)
+        if not row["path"]:
+            return
+        path = Path(row["path"])
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=False)
+        else:
+            path.unlink(missing_ok=True)
 
     def _audit_db(self, db, subject_id, action, project_id, detail) -> None:
         db.execute(

@@ -1,0 +1,177 @@
+server {
+    listen 8080;
+    server_name ${GATEWAY_SERVER_NAME};
+    client_max_body_size 100m;
+
+    location = /healthz {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+
+    location = /api/v1/healthz {
+        proxy_pass http://${PORTAL_API_UPSTREAM}/health;
+    }
+
+    # The login page is public; credentials are posted directly to Tracker.
+    location = /koda/login {
+        proxy_pass http://${KODA_PORTAL_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix /koda;
+    }
+    location ^~ /koda/assets/ {
+        proxy_pass http://${KODA_PORTAL_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix /koda;
+    }
+    location = /koda/live { proxy_pass http://${KODA_PORTAL_UPSTREAM}; }
+    location = /_tracker_health {
+        internal;
+        proxy_pass http://${PORTAL_API_UPSTREAM}/health;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+    }
+    location = /koda/ready {
+        auth_request /_tracker_health;
+        error_page 500 502 503 504 = @koda_auth_unavailable;
+        proxy_pass http://${KODA_PORTAL_UPSTREAM};
+    }
+
+    # auth_request forwards only the browser cookie to Tracker.  The KODA
+    # upstream receives a fresh, gateway-owned identity envelope below.
+    location = /_koda_auth {
+        internal;
+        proxy_pass http://${TRACKER_SESSION_UPSTREAM}/api/v1/auth/session;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Host $host;
+        proxy_set_header Cookie $http_cookie;
+        proxy_set_header Authorization "";
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For "";
+        proxy_set_header X-Forwarded-Host "";
+        proxy_set_header X-Forwarded-Port "";
+        proxy_set_header X-Forwarded-Proto "";
+        proxy_set_header X-Real-IP "";
+        proxy_set_header X-KODA-Session "";
+        proxy_set_header X-KODA-Identity-ID "";
+        proxy_set_header X-KODA-Identity-Expires "";
+        proxy_set_header X-KODA-Identity-Display "";
+        proxy_set_header X-KODA-Logout "";
+    }
+
+    location ^~ /koda/api/ {
+        client_max_body_size 1g;
+        # KODA streams uploads to disk.  The defaults are only 60 seconds and
+        # turn a slow, valid upload into a gateway 504 (then the old broad
+        # error mapping misreported it as authentication failure).
+        client_body_timeout 1h;
+        proxy_connect_timeout 30s;
+        proxy_send_timeout 1h;
+        proxy_read_timeout 1h;
+        proxy_request_buffering off;
+        auth_request /_koda_auth;
+        auth_request_set $koda_identity_id $upstream_http_x_koda_identity_id;
+        auth_request_set $koda_identity_expires $upstream_http_x_koda_identity_expires;
+        auth_request_set $koda_identity_display $upstream_http_x_koda_identity_display;
+        error_page 401 = @koda_api_unauthorized;
+        # auth_request reports an unavailable auth subrequest as 500.  Do not
+        # rewrite KODA's own 502/503/504 responses as an auth outage.
+        error_page 500 = @koda_auth_unavailable;
+        proxy_pass http://${KODA_PORTAL_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header Cookie "";
+        proxy_set_header Authorization "";
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-KODA-Session "";
+        proxy_set_header X-KODA-Identity-ID $koda_identity_id;
+        proxy_set_header X-KODA-Identity-Expires $koda_identity_expires;
+        proxy_set_header X-KODA-Identity-Display $koda_identity_display;
+        proxy_set_header X-KODA-Logout "";
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix /koda;
+        proxy_intercept_errors off;
+    }
+
+    location ^~ /koda/ {
+        auth_request /_koda_auth;
+        auth_request_set $koda_identity_id $upstream_http_x_koda_identity_id;
+        auth_request_set $koda_identity_expires $upstream_http_x_koda_identity_expires;
+        auth_request_set $koda_identity_display $upstream_http_x_koda_identity_display;
+        error_page 401 = @koda_login_redirect;
+        error_page 500 502 503 504 = @koda_auth_unavailable;
+        proxy_pass http://${KODA_PORTAL_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header Cookie "";
+        proxy_set_header Authorization "";
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-KODA-Session "";
+        proxy_set_header X-KODA-Identity-ID $koda_identity_id;
+        proxy_set_header X-KODA-Identity-Expires $koda_identity_expires;
+        proxy_set_header X-KODA-Identity-Display $koda_identity_display;
+        proxy_set_header X-KODA-Logout "";
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix /koda;
+        proxy_intercept_errors off;
+    }
+
+    location @koda_login_redirect { add_header Cache-Control "no-store" always; return 302 /koda/login; }
+    location @koda_api_unauthorized {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        return 401 '{"detail":"authentication required"}';
+    }
+    location @koda_auth_unavailable {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        return 503 '{"detail":"authentication service unavailable"}';
+    }
+
+    location /api/ {
+        proxy_set_header Host $host;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_pass http://${PORTAL_API_UPSTREAM}/api/;
+    }
+    location = /dependency-track { return 308 /dependency-track/; }
+    location /dependency-track/api/ {
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://${DTRACK_APISERVER_UPSTREAM}/api/;
+    }
+    location = /dependency-track/static/config.json {
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store" always;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix ${DTRACK_BASE_PATH};
+        proxy_pass http://${DTRACK_FRONTEND_UPSTREAM}/static/config.json;
+    }
+    location /dependency-track/ {
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix ${DTRACK_BASE_PATH};
+        # The frontend serves /static/config.json at its container root.
+        # Strip the public prefix before proxying or this path returns 404.
+        proxy_pass http://${DTRACK_FRONTEND_UPSTREAM}/;
+    }
+    location / {
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://${PORTAL_WEB_UPSTREAM}/;
+    }
+}

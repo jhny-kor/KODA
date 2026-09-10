@@ -1,0 +1,22 @@
+services:
+  portal-api:
+    environment:
+      TRACKER_KODA_PROVISIONING_TOKEN_FILE: /run/secrets/koda-tracker-provisioning
+    volumes:
+      - ${KODA_TRACKER_PROVISIONING_TOKEN_FILE}:/run/secrets/koda-tracker-provisioning:ro
+
+  gateway:
+    volumes:
+      - ./gateway/gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+    environment:
+      KODA_PORTAL_UPSTREAM: ${KODA_PORTAL_UPSTREAM:-koda-dashboard:8765}
+      TRACKER_SESSION_UPSTREAM: ${TRACKER_SESSION_UPSTREAM:-portal-api:8000}
+    networks:
+      - edge
+      - app
+      - koda_dashboard
+
+networks:
+  koda_dashboard:
+    external: true
+    name: ${KODA_DASHBOARD_NETWORK:-koda-dashboard}

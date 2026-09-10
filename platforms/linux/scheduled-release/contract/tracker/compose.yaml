@@ -1,0 +1,235 @@
+name: ${COMPOSE_PROJECT_NAME:-koda-sbom}
+
+services:
+  gateway:
+    image: ${NGINX_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-gateway
+    depends_on:
+      portal-web:
+        condition: service_healthy
+      portal-api:
+        condition: service_healthy
+      dtrack-frontend:
+        condition: service_healthy
+      dtrack-apiserver:
+        condition: service_healthy
+    ports:
+      - "${PUBLIC_HTTP_PORT:-8088}:8080"
+    volumes:
+      - ./deploy/nginx/gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+    environment:
+      GATEWAY_SERVER_NAME: ${GATEWAY_SERVER_NAME:-_}
+      DTRACK_BASE_PATH: ${DTRACK_BASE_PATH:-/dependency-track}
+      PORTAL_API_UPSTREAM: portal-api:${PORTAL_API_PORT:-8000}
+      PORTAL_WEB_UPSTREAM: portal-web:${PORTAL_WEB_PORT:-8080}
+      DTRACK_FRONTEND_UPSTREAM: dtrack-frontend:8080
+      DTRACK_APISERVER_UPSTREAM: dtrack-apiserver:8080
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz && wget -q -O /dev/null http://127.0.0.1:8080/dependency-track/ && wget -q -O /dev/null http://127.0.0.1:8080/dependency-track/api/version || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      edge:
+      app:
+        ipv4_address: ${GATEWAY_APP_IP:-172.30.80.10}
+    restart: unless-stopped
+
+  portal-web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE}
+        NGINX_IMAGE: ${NGINX_IMAGE}
+    image: ${PORTAL_WEB_IMAGE}:${PORTAL_IMAGE_TAG:-dev}
+    container_name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-portal-web
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:${PORTAL_WEB_PORT:-8080}/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - app
+    restart: unless-stopped
+
+  portal-api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
+        GRYPE_IMAGE: ${GRYPE_IMAGE}
+    image: ${PORTAL_API_IMAGE}:${PORTAL_IMAGE_TAG:-dev}
+    container_name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-portal-api
+    environment:
+      TRACKER_DATABASE_URL: ${TRACKER_DATABASE_URL}
+      TRACKER_ARTIFACT_DIR: ${ARTIFACT_ROOT:-/var/lib/sbom-tracker/artifacts}
+      TRACKER_MAX_UPLOAD_BYTES: ${UPLOAD_MAX_BYTES:-104857600}
+      TRACKER_BOOTSTRAP_ADMIN_USERNAME: ${TRACKER_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      TRACKER_BOOTSTRAP_ADMIN_PASSWORD: ${TRACKER_BOOTSTRAP_ADMIN_PASSWORD}
+      TRACKER_SECURE_COOKIES: ${TRACKER_SECURE_COOKIES:-false}
+      TRACKER_ENVIRONMENT: ${TRACKER_ENVIRONMENT:-development}
+      TRACKER_PUBLIC_ORIGIN: ${TRACKER_PUBLIC_ORIGIN:-}
+      TRACKER_TRUSTED_PROXY_CIDRS: ${TRACKER_TRUSTED_PROXY_CIDRS:-172.30.80.10/32}
+      TRACKER_LDAP_ENCRYPTION_KEY: ${TRACKER_LDAP_ENCRYPTION_KEY:-}
+      TRACKER_DEPENDENCY_TRACK_URL: ${TRACKER_DEPENDENCY_TRACK_URL:-http://dtrack-apiserver:8080}
+      TRACKER_DEPENDENCY_TRACK_API_KEY: ${TRACKER_DEPENDENCY_TRACK_API_KEY}
+      TRACKER_DEPENDENCY_TRACK_UI_URL: ${TRACKER_DEPENDENCY_TRACK_UI_URL:-/dependency-track/}
+      TRACKER_GRYPE_BINARY: ${TRACKER_GRYPE_BINARY:-grype}
+      TRACKER_GRYPE_DB_DIR: ${TRACKER_GRYPE_DB_DIR:-/var/lib/sbom-tracker/vuln-data/current/grype-db}
+      TRACKER_CYCLONEDX_CLI_BINARY: /usr/local/bin/cyclonedx
+    volumes:
+      - tracker-artifacts:${ARTIFACT_ROOT:-/var/lib/sbom-tracker/artifacts}
+      - vuln-data:${VULN_DATA_ROOT:-/var/lib/sbom-tracker/vuln-data}:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:${PORTAL_API_PORT:-8000}/health')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - app
+    restart: unless-stopped
+
+  portal-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
+        GRYPE_IMAGE: ${GRYPE_IMAGE}
+    image: ${PORTAL_WORKER_IMAGE}:${PORTAL_IMAGE_TAG:-dev}
+    container_name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-portal-worker
+    command: ["koda-tracker-worker"]
+    environment:
+      TRACKER_DATABASE_URL: ${TRACKER_DATABASE_URL}
+      TRACKER_ARTIFACT_DIR: ${ARTIFACT_ROOT:-/var/lib/sbom-tracker/artifacts}
+      TRACKER_MAX_UPLOAD_BYTES: ${UPLOAD_MAX_BYTES:-104857600}
+      TRACKER_DEPENDENCY_TRACK_URL: ${TRACKER_DEPENDENCY_TRACK_URL:-http://dtrack-apiserver:8080}
+      TRACKER_DEPENDENCY_TRACK_API_KEY: ${TRACKER_DEPENDENCY_TRACK_API_KEY}
+      TRACKER_DEPENDENCY_TRACK_UI_URL: ${TRACKER_DEPENDENCY_TRACK_UI_URL:-/dependency-track/}
+      TRACKER_GRYPE_BINARY: ${TRACKER_GRYPE_BINARY:-grype}
+      TRACKER_GRYPE_DB_DIR: ${TRACKER_GRYPE_DB_DIR:-/var/lib/sbom-tracker/vuln-data/current/grype-db}
+      TRACKER_CYCLONEDX_CLI_BINARY: /usr/local/bin/cyclonedx
+    volumes:
+      - tracker-artifacts:${ARTIFACT_ROOT:-/var/lib/sbom-tracker/artifacts}
+      - vuln-data:${VULN_DATA_ROOT:-/var/lib/sbom-tracker/vuln-data}:ro
+      - backups:/var/lib/sbom-tracker/backups
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from pathlib import Path; raise SystemExit('koda-tracker-worker' not in Path('/proc/1/cmdline').read_bytes().decode(errors='ignore'))\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - app
+    restart: unless-stopped
+
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      POSTGRES_INITDB_ARGS: ${POSTGRES_INITDB_ARGS:---encoding=UTF-8 --locale=C.UTF-8}
+      DTRACK_DB_NAME: ${DTRACK_DB_NAME:-dtrack}
+      DTRACK_DB_USER: ${DTRACK_DB_USER:-dtrack}
+      DTRACK_DB_PASSWORD: ${DTRACK_DB_PASSWORD}
+      TRACKER_DB_NAME: ${TRACKER_DB_NAME:-sbom_tracker}
+      TRACKER_DB_USER: ${TRACKER_DB_USER:-sbom_tracker}
+      TRACKER_DB_PASSWORD: ${TRACKER_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/postgres/init/10-init-multi-db.sh:/docker-entrypoint-initdb.d/10-init-multi-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPERUSER:-postgres} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    expose:
+      - "${POSTGRES_PORT:-5432}"
+    networks:
+      - app
+    restart: unless-stopped
+
+  dtrack-apiserver:
+    image: ${DTRACK_APISERVER_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-dtrack-apiserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DT_DATASOURCE_URL: jdbc:postgresql://postgres:${POSTGRES_PORT:-5432}/${DTRACK_DB_NAME:-dtrack}
+      DT_DATASOURCE_USERNAME: ${DTRACK_DB_USER:-dtrack}
+      DT_DATASOURCE_PASSWORD: ${DTRACK_DB_PASSWORD}
+      DT_METRICS_ENABLED: "true"
+      DT_CORS_ENABLED: "false"
+      EXTRA_JAVA_OPTIONS: -Xms1g -Xmx2g
+    volumes:
+      - dtrack-data:/data
+    expose:
+      - "8080"
+      - "9000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9000/health/ready || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+    networks:
+      - app
+    restart: unless-stopped
+
+  dtrack-frontend:
+    image: ${DTRACK_FRONTEND_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-dtrack-frontend
+    depends_on:
+      dtrack-apiserver:
+        condition: service_healthy
+    environment:
+      # Dependency-Track's frontend appends /api to this value. Keep the
+      # public frontend/API base path here, without the trailing /api.
+      API_BASE_URL: ${DTRACK_API_BASE_URL:-http://localhost:8088/dependency-track}
+      # The frontend's relative JS/CSS URLs require a directory base. Keep
+      # DTRACK_BASE_PATH itself slashless for gateway/API routing, and add the
+      # trailing slash only for Dependency-Track frontend URL resolution.
+      BASE_PATH: ${DTRACK_BASE_PATH:-/dependency-track}/
+      TITLE: ${DTRACK_FRONTEND_TITLE:-KODA Dependency-Track}
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - app
+    restart: unless-stopped
+
+networks:
+  edge:
+    name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-edge
+  app:
+    name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-app
+    internal: true
+    ipam:
+      config:
+        - subnet: ${APP_NETWORK_SUBNET:-172.30.80.0/24}
+
+volumes:
+  postgres-data:
+    name: ${POSTGRES_DATA_VOLUME_NAME:-koda-sbom-postgres-data}
+  dtrack-data:
+    name: ${DTRACK_DATA_VOLUME_NAME:-koda-sbom-dtrack-data}
+  tracker-artifacts:
+    name: ${TRACKER_ARTIFACTS_VOLUME_NAME:-koda-sbom-tracker-artifacts}
+  vuln-data:
+    name: ${VULN_DATA_VOLUME_NAME:-koda-sbom-vuln-data}
+  backups:
+    name: ${BACKUP_VOLUME_NAME:-koda-sbom-backups}

@@ -119,6 +119,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{project.name}\t{project.path}\t{ecosystems}\t{markers}")
         return 0
 
+    if args.command == "schedule-worker":
+        from .schedule_worker import main as schedule_worker_main
+
+        worker_args = ["--db", args.db]
+        if args.work_dir:
+            worker_args.extend(("--work-dir", args.work_dir))
+        if args.once:
+            worker_args.append("--once")
+        return schedule_worker_main(worker_args)
+
     if args.command == "serve":
         # Linux is the portal deployment; desktop/local app keeps the legacy dashboard.
         if sys.platform.startswith("linux") and not getattr(args, "legacy_dashboard", False):
@@ -1051,6 +1061,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--portal", action="store_true", help="run the authenticated Linux portal")
     serve.add_argument("--legacy-dashboard", action="store_true", help="keep the unauthenticated local dashboard (development only)")
     serve.add_argument("--db", default=os.environ.get("KODA_PORTAL_DB", "koda-portal.sqlite3"), help="portal SQLite database")
+
+    schedule_worker = subparsers.add_parser("schedule-worker", help="run the nightly remote-directory schedule worker")
+    schedule_worker.add_argument("--db", default=os.environ.get("KODA_PORTAL_DB", "koda-portal.sqlite3"), help="portal SQLite database")
+    schedule_worker.add_argument("--work-dir", default=os.environ.get("KODA_SCHEDULE_WORK_DIR"), help="temporary schedule work directory")
+    schedule_worker.add_argument("--once", action="store_true", help="run the current KST schedule date once")
 
     bootstrap = subparsers.add_parser("portal-bootstrap", help="explicitly enable the first portal administrator")
     bootstrap.add_argument("--tracker-user-id", required=True, help="Tracker UUID")

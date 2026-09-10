@@ -1,0 +1,23 @@
+KODA offline update — 2026-09-10 UI revision 1
+Target: existing Linux x86_64 KODA Suite; not a fresh installation bundle.
+
+Fresh verification:
+- Host KODA unittest discovery: 498 tests, OK (5 skipped).
+- Built linux/amd64 KODA image, network disabled: 59 schedule tests, OK (2 skipped: Node unavailable).
+- Exact image/source comparison: all 83 KODA Python files and 13 Tracker Python files match this working tree.
+- Tracker scheduled backend pytest: 4 passed (deprecation warnings).
+- Tracker web production build (VITE_DEMO_MODE=false), nginx -t and HTTP smoke: passed.
+- KODA offline list-categories, Syft 1.46.0 and Grype database status: passed with network disabled.
+- Grype database preserved: 2026-09-01T06:32:09Z; no vulnerability data refresh.
+- Browser sample UI: branch/tag selection, category selection, MB save/edit roundtrip, account multiselect overlay, ascending/descending sorting, sidebar transitions passed.
+- Latest UI sizing: account picker 13px / 42px; sort header backgrounds transparent, borders 0.
+
+Image inventory records canonical config digests for Docker 27 and build-store IDs separately.
+Source snapshot includes current uncommitted changes; no secret .env, SSH keys or tokens are included.
+Live closed-network SSH, GitLab branch creation/publication and actual scheduled execution require target-server acceptance.
+
+Release checks:
+- Linux executable installer/rollback tests: 5 passed, including config/build ID compatibility and digest rejection before service stop.
+- Package manifest/source/image inventory test: passed.
+- Bash syntax and git diff whitespace checks: passed.
+- Exact LDAP variant compatibility tests: 2 passed; unreviewed edits rejected.

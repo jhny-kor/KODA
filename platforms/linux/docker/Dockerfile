@@ -25,8 +25,9 @@ FROM ${PYTHON_IMAGE} AS runtime
 COPY --from=installer /opt/koda /opt/koda
 
 # Chromium shared-library dependencies for dashboard PDF export, then a
-# fixed non-root user. No other packages are added.
+# the SSH client for scheduled collection, then a fixed non-root user.
 RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-client \
  && PYTHONPATH=/opt/koda/render-lib python3 -m playwright install-deps chromium \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 1000 koda \
