@@ -41,6 +41,7 @@ from security_scanner.portal_store import GLOBAL_ROLE_POLICY_ID, SCREEN_PERMISSI
 from security_scanner.portal_views import format_portal_time
 from security_scanner.reporting import render_html_pair_zip_from_payload
 from security_scanner.server import scan_directory_payload
+from security_scanner.schedule_worker import RemoteFile
 
 
 class LinuxPortalStoreTests(unittest.TestCase):
@@ -58,7 +59,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def gitlab_run(self, findings):
+    def gitlab_run(self, findings, scope="source"):
         mappings = self.store.gitlab_repositories(self.project)
         mapping = mappings[0] if mappings else self.store.set_gitlab_repositories(self.project, [{
             "gitlab_project_id": 42, "path_with_namespace": "group/demo", "name": "demo",
@@ -68,7 +69,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
         target = Path(self.tmp.name) / f"gitlab-{uuid.uuid4().hex}.tar.gz"
         target.write_bytes(b"archive")
         input_id = self.store.add_input(self.project, target.name, target)
-        run = self.store.create_scan(self.admin, self.project, input_id, "local", "all", "source", source_snapshot={
+        run = self.store.create_scan(self.admin, self.project, input_id, "local", "all", scope, source_snapshot={
             "gitlab_mapping_id": mapping["mapping_id"], "gitlab_project_id": 42,
             "gitlab_path_with_namespace": "group/demo", "gitlab_ref_type": "branch",
             "gitlab_ref_name": "main", "gitlab_commit_sha": "a" * 40,
@@ -290,7 +291,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
         self.assertEqual(self.store.gitlab_issue_delivery(issue_run["run_id"])["status"], "failed")
 
     def test_gitlab_result_retry_uses_snapshotted_tracker_token(self):
-        run = self.gitlab_run([])
+        run = self.gitlab_run([], scope="all")
         self.store.claim_tracker_delivery(run["run_id"])
         self.store.finish_tracker_delivery(run["run_id"], "completed", tracker_run_id="tracker-result")
         tracker_result = {"run": {"runUrl": None}, "analysis": {"findings": []}}
@@ -815,7 +816,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
             "default_branch": "main", "tracker_service_id": "service-1",
             "tracker_environment_id": "environment-1", "tracker_token_ref": "demo.token",
         }], self.admin)[0]
-        run = self.store.create_scan(self.admin, self.project, self.input_id, "local", "all", "source", source_snapshot={
+        run = self.store.create_scan(self.admin, self.project, self.input_id, "local", "all", "all", source_snapshot={
             "gitlab_mapping_id": mapping["mapping_id"], "gitlab_project_id": 42,
             "gitlab_path_with_namespace": "group/demo", "gitlab_ref_type": "branch",
             "gitlab_ref_name": "main", "gitlab_commit_sha": "a" * 40,
@@ -865,6 +866,23 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=2)
         self.tmp.cleanup()
+
+    def test_schedule_resource_settings_require_admin_and_persist(self):
+        endpoint = "/koda/api/v1/admin/schedule-settings"
+        status, initial = self.request(endpoint, headers=self.headers())
+        self.assertEqual(status, 200)
+        self.assertFalse(initial["enabled"])
+        status, saved = self.request(endpoint, method="POST", headers=self.headers(), payload={"enabled": True, "rate_bytes_per_sec": 1048576})
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["rate_bytes_per_sec"], 1048576)
+        self.assertEqual(self.request(endpoint, headers=self.headers())[1]["version"], saved["version"])
+        outsider = str(uuid.uuid4())
+        store = self.server.portal_store
+        store.ensure_subject(outsider, "viewer")
+        store.set_subject(outsider, status="enabled", system_admin=False, actor=self.admin)
+        self.assertEqual(self.request(endpoint, headers=self.headers(outsider))[0], 403)
+        self.assertEqual(self.request(endpoint, method="POST", headers=self.headers(outsider), payload={"enabled": False})[0], 403)
+        self.assertEqual(self.request(endpoint, method="POST", headers=self.headers(), payload={"cpu_limit": 0})[0], 422)
 
     def headers(self, subject=None, display="admin"):
         return {
@@ -1179,6 +1197,35 @@ class LinuxPortalHttpTests(unittest.TestCase):
             "/koda/api/v1/admin/gitlab/configuration", headers=self.headers(viewer),
         )[0], 403)
 
+    def test_schedule_connection_and_access_probes_are_admin_only(self):
+        payload = {
+            "host": "server.internal", "port": 22, "username": "koda-readonly",
+            "ssh_key_ref": "/run/koda/ssh/id_ed25519",
+            "known_hosts_file": "/run/koda/ssh/known_hosts",
+            "remote_directory": "/srv/application", "exclude_paths": [],
+            "max_files": 10, "max_bytes": 1000, "timeout_seconds": 30,
+        }
+        with patch("security_scanner.schedule_worker.OpenSSHCollector") as collector_type:
+            collector = collector_type.return_value
+            collector.list_files.return_value = [RemoteFile("app.py", 7, 1700000000.0)]
+            status, connected = self.request(
+                "/koda/api/v1/admin/schedules/test-connection", method="POST",
+                headers=self.headers(), payload=payload,
+            )
+            self.assertEqual((status, connected), (200, {"ok": True}))
+            collector.test_connection.assert_called_once()
+            status, access = self.request(
+                "/koda/api/v1/admin/schedules/test-access", method="POST",
+                headers=self.headers(), payload=payload,
+            )
+            self.assertEqual((status, access), (200, {"ok": True, "fileCount": 1, "totalBytes": 7}))
+            collector.list_files.assert_called_once()
+        viewer = str(uuid.uuid4())
+        self.assertEqual(self.request(
+            "/koda/api/v1/admin/schedules/test-connection", method="POST",
+            headers=self.headers(viewer), payload=payload,
+        )[0], 403)
+
     def test_gitlab_issue_status_api_hides_project_and_retry_is_admin_only(self):
         store = self.server.portal_store
         project = store.create_project("Issue API", self.admin)
@@ -1377,7 +1424,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
             self.assertEqual(response.headers.get_content_type(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
-        for expected in ("발생 시간", "주체 ID", "프로젝트명", "상세 JSON", "2026-01-01 09:00:00", self.admin, "audit project", project, "audit.test", "확인"):
+        for expected in ("발생 시간", "사용자 ID", "주체 ID", "프로젝트명", "상세 JSON", "2026-01-01 09:00:00", "admin", self.admin, "audit project", project, "audit.test", "확인"):
             self.assertIn(expected, sheet)
 
         viewer = str(uuid.uuid4())

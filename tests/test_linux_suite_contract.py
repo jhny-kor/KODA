@@ -450,6 +450,81 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
                 for line in docker_log.read_text().splitlines()
             ))
 
+    def test_enabling_schedule_preserves_running_dashboard_and_isolates_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake_bin = root / 'bin'
+            fake_bin.mkdir()
+            wrapper = root / 'koda-docker'
+            wrapper.write_text(self.docker_wrapper)
+            wrapper.chmod(0o755)
+            (root / 'image-ref.txt').write_text('local/koda:test\n')
+            ssh_dir = root / 'ssh'
+            ssh_dir.mkdir()
+            (ssh_dir / 'known_hosts').write_text('test\n')
+            docker_log = root / 'docker.log'
+            docker = fake_bin / 'docker'
+            docker.write_text(
+                '#!/usr/bin/env bash\n'
+                'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+                'if [[ "$1" == container && "$2" == inspect ]]; then\n'
+                '  [[ "$3" == koda-dashboard ]] && exit 0\n'
+                '  exit 1\n'
+                'fi\n'
+                'if [[ "$1" == inspect ]]; then echo true; exit 0; fi\n'
+                'if [[ "$1" == ps ]]; then echo koda-dashboard; exit 0; fi\n'
+                'if [[ "$1" == network && "$2" == inspect ]]; then exit 0; fi\n'
+                'if [[ "$1" == network && "$2" == connect ]]; then exit 0; fi\n'
+                'if [[ "$1" == run ]]; then exit 0; fi\n'
+                'exit 99\n'
+            )
+            docker.chmod(0o755)
+            env = {
+                **os.environ,
+                'PATH': f'{fake_bin}:{os.environ["PATH"]}',
+                'DOCKER_LOG': str(docker_log),
+                'KODA_SCHEDULE_ENABLED': '1',
+                'KODA_SCHEDULE_SSH_DIR': str(ssh_dir),
+                'KODA_PORTAL_DATA_DIR': str(root / 'portal'),
+                'KODA_GITLAB_TOKEN_FILE': str(root / 'gitlab-token'),
+                'KODA_TRACKER_TOKEN_DIR': str(root / 'tracker-tokens'),
+            }
+            (root / 'gitlab-token').write_text('secret\n')
+            (root / 'tracker-tokens').mkdir()
+            result = subprocess.run(
+                [str(wrapper), 'dashboard', 'start'], text=True,
+                capture_output=True, env=env, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            commands = docker_log.read_text().splitlines()
+            self.assertFalse(any(line.startswith('rm ') for line in commands))
+            self.assertFalse(any(
+                line.startswith('run ') and '--name koda-dashboard' in line
+                for line in commands
+            ))
+            worker_runs = [
+                line for line in commands
+                if line.startswith('run ') and '--name koda-schedule-worker' in line
+            ]
+            self.assertEqual(len(worker_runs), 1)
+            worker = worker_runs[0]
+            self.assertIn('--network koda-dashboard-schedule', worker)
+            self.assertNotIn('--network koda-dashboard ', worker)
+            self.assertIn('network connect koda-dashboard koda-schedule-worker', commands)
+            for forbidden in (
+                '/var/lib/koda:', '/run/secrets/koda-gitlab-token',
+                '/run/koda/tracker-tokens', 'KODA_GITLAB_TOKEN_FILE=',
+                'KODA_TRACKER_TOKEN_DIR=', 'KODA_GITLAB_URL=',
+                'KODA_TRACKER_URL=',
+            ):
+                self.assertNotIn(forbidden, worker)
+            for required in (
+                '/var/lib/koda-schedule:rw', '/run/koda/schedule:ro',
+                '/run/koda/ssh:ro', '--cpus 1', '--memory 4g',
+                '--read-only', '--cap-drop ALL',
+            ):
+                self.assertIn(required, worker)
+
     def test_dashboard_start_and_stop_refuse_a_foreign_named_container(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

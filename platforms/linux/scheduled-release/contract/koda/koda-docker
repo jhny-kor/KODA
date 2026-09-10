@@ -18,7 +18,6 @@ fi
 
 dashboard_name="koda-dashboard"
 dashboard_network="koda-dashboard"
-schedule_worker_name="koda-schedule-worker"
 
 dashboard_is_owned() {
   local offline_label
@@ -26,16 +25,6 @@ dashboard_is_owned() {
   offline_label="$(docker inspect -f '{{index .Config.Labels "io.koda.offline"}}' "$dashboard_name")"
   if [ "$offline_label" != true ]; then
     echo "error: refusing to replace foreign container named $dashboard_name" >&2
-    exit 2
-  fi
-}
-
-schedule_worker_is_owned() {
-  local offline_label
-  docker container inspect "$schedule_worker_name" >/dev/null 2>&1 || return 1
-  offline_label="$(docker inspect -f '{{index .Config.Labels "io.koda.offline"}}' "$schedule_worker_name")"
-  if [ "$offline_label" != true ]; then
-    echo "error: refusing to replace foreign container named $schedule_worker_name" >&2
     exit 2
   fi
 }
@@ -55,12 +44,6 @@ read-write) are bind-mounted automatically at the same absolute path.
 Environment:
   KODA_IMAGE            image reference, default from image-ref.txt
   KODA_CPUS             default 2
-  KODA_SCHEDULE_CPUS    schedule worker CPU limit, default 1
-  KODA_SCHEDULE_MEMORY  schedule worker memory limit, default 4g
-  KODA_SCHEDULE_RATE_BYTES maximum collection rate, default 5242880
-  KODA_SCHEDULE_GAP_SECONDS seconds between targets, default 30
-  KODA_SCHEDULE_DISK_RESERVE_BYTES minimum free worker disk, default 1073741824
-  KODA_SCHEDULE_MIN_FREE_BYTES alias for minimum free worker disk
   KODA_MEMORY           default 4g
   KODA_PIDS_LIMIT       default 256
   KODA_TMPFS_SIZE       default 512m
@@ -79,8 +62,6 @@ Environment:
   KODA_TRACKER_PROVISIONING_TOKEN_FILE shared Tracker provisioning token file
   KODA_TRACKER_RESULT_TIMEOUT_SECONDS analysis-result wait limit, default 900
   KODA_TRACKER_CA_FILE   optional private CA bundle for Tracker
-  KODA_SCHEDULE_ENABLED  set 1 to start the nightly remote-directory worker (default 0)
-  KODA_SCHEDULE_SSH_DIR  host directory containing read-only SSH keys and known_hosts
   KODA_DOCKER_EXTRA_ARGS extra docker run options, whitespace-separated
 EOF
 }
@@ -99,7 +80,6 @@ base_run_opts() {
     --read-only \
     --cap-drop ALL \
     --security-opt no-new-privileges \
-    --label io.koda.offline=true \
     --pids-limit "${KODA_PIDS_LIMIT:-256}" \
     --memory "${KODA_MEMORY:-4g}" \
     --cpus "${KODA_CPUS:-2}" \
@@ -230,9 +210,7 @@ dashboard_start() {
   local bind="${KODA_DASHBOARD_BIND:-127.0.0.1}"
   local port="${KODA_PORT:-8765}"
   local portal_data="${KODA_PORTAL_DATA_DIR:-$script_dir/data/portal}"
-  local schedule_ssh_dir="${KODA_SCHEDULE_SSH_DIR:-}"
   local run_network="$dashboard_network" run_network_arg server_major
-  local dashboard_running=0 worker_running=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --reports) reports="${2:-}"; shift 2 ;;
@@ -248,30 +226,12 @@ dashboard_start() {
     echo "error: dashboard port must be an integer from 1 to 65535: $port" >&2
     exit 2
   fi
-  if [ "${KODA_SCHEDULE_ENABLED:-0}" = "1" ] && [ -z "$schedule_ssh_dir" ]; then
-    echo "error: KODA_SCHEDULE_SSH_DIR is required when scheduled scans are enabled" >&2
-    exit 2
-  fi
-  if [ -n "$schedule_ssh_dir" ]; then
-    schedule_ssh_dir="$(realpath "$schedule_ssh_dir")"
-    [ -d "$schedule_ssh_dir" ] && [ -r "$schedule_ssh_dir" ] && [ -x "$schedule_ssh_dir" ] || {
-      echo "error: schedule SSH directory is not readable" >&2
-      exit 2
-    }
-  fi
   if dashboard_is_owned; then
     if docker ps --format '{{.Names}}' | grep -qx "$dashboard_name"; then
-      dashboard_running=1
-    else
-      docker rm -f "$dashboard_name" >/dev/null
+      echo "dashboard already running: http://$bind:$port/security-dashboard.html"
+      return 0
     fi
-  fi
-  if schedule_worker_is_owned; then
-    if [ "${KODA_SCHEDULE_ENABLED:-0}" = "1" ] && docker ps --format '{{.Names}}' | grep -qx "$schedule_worker_name"; then
-      worker_running=1
-    else
-      docker rm -f "$schedule_worker_name" >/dev/null
-    fi
+    docker rm -f "$dashboard_name" >/dev/null
   fi
   # A dedicated bridge with IP masquerade disabled keeps standalone published
   # ports working while blocking container egress. Gateway mode publishes no
@@ -321,21 +281,6 @@ dashboard_start() {
     -e KODA_PORTAL_DB=/var/lib/koda/portal.sqlite3
     -e KODA_PORTAL_INPUT_DIR=/var/lib/koda/inputs
   )
-  if [ -n "$schedule_ssh_dir" ]; then
-    filtered+=(-v "$schedule_ssh_dir:/run/koda/ssh:ro")
-  fi
-  local schedule_auth="$portal_data/schedule-auth"
-  local schedule_state="${KODA_SCHEDULE_STATE_DIR:-${portal_data}-schedule}"
-  if [ "${KODA_SCHEDULE_ENABLED:-0}" = "1" ]; then
-    mkdir -p "$schedule_auth" "$schedule_state"
-    chmod 700 "$schedule_auth" "$schedule_state"
-    if [ ! -f "$schedule_auth/token" ]; then
-      (umask 077; set -o noclobber; LC_ALL=C od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "$schedule_auth/token")
-    fi
-    chmod 600 "$schedule_auth/token"
-    filtered+=(-v "$schedule_auth:/run/koda/schedule:ro"
-      -e KODA_SCHEDULE_API_TOKEN_FILE=/run/koda/schedule/token)
-  fi
   if [ -n "${KODA_SSBOM_TRACKER_URL:-}" ]; then
     filtered+=(-e "KODA_SSBOM_TRACKER_URL=${KODA_SSBOM_TRACKER_URL}")
   fi
@@ -382,44 +327,10 @@ dashboard_start() {
   if [ "${#extra_args[@]}" -gt 0 ]; then
     docker_opts+=("${extra_args[@]}")
   fi
-  if [ "$dashboard_running" = "0" ]; then
-    docker run "${docker_opts[@]}" "$image" \
-      serve --host 0.0.0.0 --port 8765 >/dev/null
-  fi
-  if [ "${KODA_SCHEDULE_ENABLED:-0}" = "1" ] && [ "$worker_running" = "0" ]; then
-    # Only the worker needs outbound SSH; the dashboard bridge keeps its no-egress policy.
-    local schedule_network="${dashboard_network}-schedule"
-    if ! docker network inspect "$schedule_network" >/dev/null 2>&1; then
-      docker network create "$schedule_network" >/dev/null
-    fi
-    # Worker never inherits portal DB, uploads, reports, or publication credentials.
-    local worker_opts=(-d --name "$schedule_worker_name" --network "$schedule_network"
-      --restart unless-stopped --label io.koda.offline=true --platform linux/amd64 --pull never --read-only
-      --cap-drop ALL --security-opt no-new-privileges --pids-limit "${KODA_PIDS_LIMIT:-256}"
-      --user "$(id -u):$(id -g)" --tmpfs "/tmp:rw,noexec,nosuid,size=${KODA_TMPFS_SIZE:-512m}"
-      --cpus "${KODA_SCHEDULE_CPUS:-1}" --memory "${KODA_SCHEDULE_MEMORY:-4g}"
-      -v "$schedule_state:/var/lib/koda-schedule:rw"
-      -v "$schedule_auth:/run/koda/schedule:ro"
-      -v "$schedule_ssh_dir:/run/koda/ssh:ro"
-      -e HOME=/tmp/koda-home -e XDG_CACHE_HOME=/tmp/koda-cache
-      -e "KODA_SCHEDULE_API_URL=http://$dashboard_name:8765"
-      -e KODA_SCHEDULE_API_TOKEN_FILE=/run/koda/schedule/token
-      -e KODA_SCHEDULE_STATE_DIR=/var/lib/koda-schedule
-      -e KODA_SCHEDULE_WORK_DIR=/var/lib/koda-schedule/work
-    )
-    if ! docker run "${worker_opts[@]}" "$image" schedule-worker >/dev/null; then
-      docker rm -f "$schedule_worker_name" >/dev/null 2>&1 || true
-      echo "error: could not start $schedule_worker_name" >&2
-      exit 2
-    fi
-    if ! docker network connect "$dashboard_network" "$schedule_worker_name"; then
-      docker rm -f "$schedule_worker_name" >/dev/null 2>&1 || true
-      echo "error: could not connect $schedule_worker_name to $dashboard_network" >&2
-      exit 2
-    fi
-  fi
-  if [ "$dashboard_running" = "0" ] && [ "$run_network" != "$dashboard_network" ] && ! docker network connect "$dashboard_network" "$dashboard_name"; then
-    docker rm -f "$schedule_worker_name" "$dashboard_name" >/dev/null 2>&1 || true
+  docker run "${docker_opts[@]}" "$image" \
+    serve --host 0.0.0.0 --port 8765 >/dev/null
+  if [ "$run_network" != "$dashboard_network" ] && ! docker network connect "$dashboard_network" "$dashboard_name"; then
+    docker rm -f "$dashboard_name" >/dev/null
     echo "error: could not connect dashboard to $dashboard_network" >&2
     exit 2
   fi
@@ -444,9 +355,8 @@ case "${1:-}" in
     case "${1:-}" in
       start) shift; dashboard_start "$@" ;;
       status)
-        printf 'NAME\tSTATUS\tPORTS\n'
-        docker ps --all --filter "name=^${dashboard_name}\$" --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
-        docker ps --all --filter "name=^${schedule_worker_name}\$" --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
+        docker ps --all --filter "name=^${dashboard_name}\$" \
+          --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
         ;;
       logs) shift; docker logs ${1:+"$1"} "$dashboard_name" ;;
       bootstrap)
@@ -457,9 +367,6 @@ case "${1:-}" in
           --tracker-user-id "$2" --db /var/lib/koda/portal.sqlite3
         ;;
       stop)
-        if schedule_worker_is_owned; then
-          docker rm -f "$schedule_worker_name" >/dev/null
-        fi
         if dashboard_is_owned; then
           docker rm -f "$dashboard_name" >/dev/null
           echo "dashboard stopped"

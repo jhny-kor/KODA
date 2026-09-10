@@ -22,6 +22,7 @@ MAX_GITLAB_MARKER_ITEMS = 50_000
 MAX_GITLAB_PAGES = 500
 MAX_GITLAB_JSON_BYTES = 32 * 1024 * 1024
 MAX_GITLAB_CA_BYTES = 1024 * 1024
+MAX_TRACKER_SCHEDULE_CHANGED_FILES = 2_000
 _GITLAB_CONFIG = "gitlab.json"
 _GITLAB_TOKEN = "gitlab.token"
 _GITLAB_WRITE_TOKEN = "gitlab-write.token"
@@ -346,6 +347,32 @@ def list_gitlab_refs(project_id: int, ref_type: str, settings_dir: str | Path | 
     return refs
 
 
+def _validate_gitlab_branch_name(value: str, field: str = "branch") -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"올바른 {field} 이름이 아닙니다")
+    name = value.strip()
+    if not 1 <= len(name) <= 255 or any(ord(char) < 32 or char.isspace() for char in name):
+        raise ValueError(f"올바른 {field} 이름이 아닙니다")
+    if name.startswith(("/", ".")) or name.endswith(("/", ".", ".lock")) or ".." in name:
+        raise ValueError(f"올바른 {field} 이름이 아닙니다")
+    if any(char in name for char in "~^:?*[\\") or "@{" in name:
+        raise ValueError(f"올바른 {field} 이름이 아닙니다")
+    return name
+
+
+def create_gitlab_branch(project_id: int, branch: str, ref: str, settings_dir: str | Path) -> dict[str, str]:
+    """Create a branch from an existing branch or tag; GitLab rejects duplicates."""
+    name = _validate_gitlab_branch_name(branch)
+    base_ref = _validate_gitlab_branch_name(ref, "기준 ref")
+    payload = _gitlab_write_json(
+        f"/projects/{int(project_id)}/repository/branches", settings_dir=settings_dir,
+        method="POST", payload={"branch": name, "ref": base_ref},
+    )
+    if not isinstance(payload, dict) or payload.get("name") != name:
+        raise IntegrationError("GitLab 브랜치 생성 응답 형식이 올바르지 않습니다")
+    return {"name": name}
+
+
 def resolve_gitlab_ref(project_id: int, ref_type: str, ref_name: str, settings_dir: str | Path | None = None) -> str:
     endpoint = {"branch": "branches", "tag": "tags"}.get(ref_type)
     if not endpoint or not isinstance(ref_name, str) or not 1 <= len(ref_name) <= 255:
@@ -549,6 +576,7 @@ def find_gitlab_issue_note(project_id: int, issue_iid: int, marker: str, *, sett
 
 def _gitlab_scan_report(run: dict, tracker_run_id: str, tracker_result: dict) -> dict:
     snapshot, result = run.get("snapshot") or {}, run.get("result") or {}
+    scheduled = snapshot.get("source_type") == "scheduled_server"
     # Export report fields, never the integration snapshot (token refs) or
     # internal analyzer trace. Evidence/source_context are report-redacted.
     finding_fields = {
@@ -567,19 +595,41 @@ def _gitlab_scan_report(run: dict, tracker_run_id: str, tracker_result: dict) ->
         {key: value for key, value in item.items() if key in finding_fields}
         for item in findings if isinstance(item, dict)
     ]
-    return {
-        "schemaVersion": 2,
-        "source": {
-            "gitlabProjectId": snapshot.get("gitlab_project_id"),
-            "pathWithNamespace": snapshot.get("gitlab_path_with_namespace"),
+    source = {
+        "gitlabProjectId": snapshot.get("gitlab_project_id"),
+        "pathWithNamespace": snapshot.get("gitlab_path_with_namespace"),
+    }
+    if scheduled:
+        source.update({
+            "type": "scheduled_server",
+            "server": snapshot.get("remote_server"),
+            "directory": snapshot.get("remote_directory"),
+            "targetId": snapshot.get("schedule_target_id"),
+            "scheduleRunId": snapshot.get("schedule_run_id"),
+            "mode": snapshot.get("scan_mode"),
+            "changedFiles": snapshot.get("changed_files", []),
+            "rulePolicyVersion": snapshot.get("rule_policy_version"),
+        })
+        if snapshot.get("scheduled_source_kind") == "gitlab":
+            source.update({
+                "type": "scheduled_gitlab", "gitlabProjectId": snapshot.get("source_gitlab_project_id"),
+                "pathWithNamespace": snapshot.get("source_gitlab_path"),
+                "refType": snapshot.get("source_gitlab_ref_type"), "refName": snapshot.get("source_gitlab_ref"),
+                "commitSha": snapshot.get("source_gitlab_commit_sha"),
+            })
+    else:
+        source.update({
             "refType": snapshot.get("gitlab_ref_type"), "refName": snapshot.get("gitlab_ref_name"),
             "commitSha": snapshot.get("gitlab_commit_sha"),
-        },
+        })
+    return {
+        "schemaVersion": 2,
+        "source": source,
         "inspection": {
             "projectId": run.get("project_id"), "projectName": snapshot.get("project_name"),
             "accountId": run.get("requested_by") or snapshot.get("requested_by"),
             "accountDisplay": snapshot.get("requested_by_display"),
-            "date": snapshot.get("gitlab_result_date"), "timezone": "Asia/Seoul",
+            "date": snapshot.get("scheduled_for") or snapshot.get("gitlab_result_date"), "timezone": "Asia/Seoul",
             "version": snapshot.get("gitlab_result_version"), "branch": snapshot.get("gitlab_result_branch"),
             "roundNumber": run.get("round_number"), "scope": snapshot.get("scan_scope", "all"),
             "status": run.get("status"), "createdAt": run.get("created_at"), "completedAt": run.get("completed_at"),
@@ -601,6 +651,7 @@ def _gitlab_report_cell(value, limit: int = 180) -> str:
 
 def _gitlab_mr_summary(report: dict, file_path: str) -> tuple[str, str, list[str]]:
     inspection, source = report["inspection"], report["source"]
+    scheduled = source.get("type") == "scheduled_server"
     result, tracker = report["kodaResult"], report["trackerResult"]
     local = result["findings"]
     remote = [item for item in ((tracker.get("analysis") or {}).get("findings") or []) if isinstance(item, dict)]
@@ -608,7 +659,8 @@ def _gitlab_mr_summary(report: dict, file_path: str) -> tuple[str, str, list[str
     library_findings = [item for item in local if item.get("category") == "dependencies"]
     cell = _gitlab_report_cell
     scope = {"source": "소스코드", "library": "라이브러리", "all": "소스코드·라이브러리"}.get(inspection["scope"], inspection["scope"])
-    title = f"[KODA] {inspection.get('date') or ''} {inspection.get('projectName') or source.get('pathWithNamespace') or '점검'} {scope} 점검"
+    subject = source.get("targetId") or inspection.get("projectName") or source.get("pathWithNamespace") or "점검"
+    title = f"[KODA]{'[스케줄]' if scheduled else ''} {inspection.get('date') or ''} {subject} {scope} 점검"
     if inspection.get("version"):
         title += f" v{inspection['version']}"
     lines = [
@@ -618,7 +670,9 @@ def _gitlab_mr_summary(report: dict, file_path: str) -> tuple[str, str, list[str
         f"- 점검일: {cell(inspection.get('date'))} (Asia/Seoul) · 버전: {cell(inspection.get('version'))}",
         f"- 시작 / 완료: {cell(inspection.get('createdAt'))} / {cell(inspection.get('completedAt'))}",
         f"- 범위: {cell(scope)} · 기준: {cell(inspection.get('standard'))} / {cell(inspection.get('standardCategory'))}",
-        f"- 원본 Ref: {cell(source.get('refType'))} / {cell(source.get('refName'))} · SHA: `{cell(source.get('commitSha'))}`",
+        (f"- 서버·디렉토리: `{cell(source.get('server'))}` / `{cell(source.get('directory'))}` · 대상 ID: `{cell(source.get('targetId'))}` · 방식: {cell(source.get('mode'))}"
+         if scheduled else
+         f"- 원본 Ref: {cell(source.get('refType'))} / {cell(source.get('refName'))} · SHA: `{cell(source.get('commitSha'))}`"),
         f"- KODA 회차: `{cell(report['kodaRunId'])}` · Tracker 회차: `{cell(report['trackerRunId'])}`",
         f"- KODA 상태: {cell(inspection.get('status'))} · 분석 상태: {cell(result.get('analysis_overall'))}",
         f"- Tracker 상태: {cell((tracker.get('run') or {}).get('state'))} / {cell((tracker.get('analysis') or {}).get('state'))}",
@@ -650,6 +704,10 @@ def _gitlab_mr_summary(report: dict, file_path: str) -> tuple[str, str, list[str
               "", "결과 JSON에는 소스/라이브러리 상세 근거·권장 조치와 전체 SBOM이 포함됩니다.",
               "<!-- koda-scan-summary:end -->"]
     labels = {"KODA", "security-scan", f"scan:{inspection['scope']}"}
+    if scheduled:
+        labels.add("scheduled")
+        if source.get("targetId"):
+            labels.add("schedule:" + re.sub(r"[^\w.-]+", "-", str(source["targetId"]))[:80])
     for key, value in (("standard", inspection.get("standard")), ("project", inspection.get("projectName"))):
         if value:
             labels.add(f"{key}:" + re.sub(r"[^\w.-]+", "-", str(value))[:80])
@@ -667,16 +725,30 @@ def _gitlab_mr_summary(report: dict, file_path: str) -> tuple[str, str, list[str
 
 def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracker_result: dict, *, settings_dir: str | Path) -> dict:
     snapshot = run.get("snapshot") or {}
+    scheduled = snapshot.get("source_type") == "scheduled_server"
     project_id = int(snapshot.get("gitlab_project_id") or mapping.get("gitlab_project_id") or 0)
-    commit_sha = str(snapshot.get("gitlab_commit_sha") or "")
-    target_branch = str(mapping.get("default_branch") or "").strip()
-    if project_id <= 0 or not re.fullmatch(r"[0-9a-f]{40,64}", commit_sha) or not target_branch:
+    target_branch = str(
+        snapshot.get("gitlab_target_branch") or snapshot.get("gitlab_default_branch") or mapping.get("default_branch") or ""
+    ).strip()
+    if project_id <= 0 or not target_branch or any(char in target_branch for char in "\r\n"):
         raise IntegrationError("GitLab 결과 저장 대상 정보가 올바르지 않습니다")
-    short_sha = commit_sha[:12]
-    # Old runs keep their original branch/path; newly snapshotted runs get a
-    # date/project/account/version branch and an immutable per-run report path.
-    source_branch = snapshot.get("gitlab_result_branch") or f"koda/sbom-results/{short_sha}"
-    file_path = f".koda/scan-results/{run['run_id']}.json" if snapshot.get("gitlab_result_branch") else f".koda/sbom-tracker/{commit_sha}.json"
+    if scheduled:
+        target_id = str(snapshot.get("schedule_target_id") or "")
+        schedule_run_id = str(snapshot.get("schedule_run_id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", target_id) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", schedule_run_id):
+            raise IntegrationError("스케줄 결과 식별자가 올바르지 않습니다")
+        source_branch = f"koda/scheduled/{target_id}/{schedule_run_id}"
+        file_path = f".koda/scheduled-results/{target_id}/{schedule_run_id}.json"
+        short_sha = schedule_run_id[:12]
+    else:
+        commit_sha = str(snapshot.get("gitlab_commit_sha") or "")
+        if not re.fullmatch(r"[0-9a-f]{40,64}", commit_sha):
+            raise IntegrationError("GitLab 결과 저장 대상 정보가 올바르지 않습니다")
+        short_sha = commit_sha[:12]
+        # Old runs keep their original branch/path; newly snapshotted runs get a
+        # date/project/account/version branch and an immutable per-run report path.
+        source_branch = snapshot.get("gitlab_result_branch") or f"koda/sbom-results/{short_sha}"
+        file_path = f".koda/scan-results/{run['run_id']}.json" if snapshot.get("gitlab_result_branch") else f".koda/sbom-tracker/{commit_sha}.json"
     report = _gitlab_scan_report(run, tracker_run_id, tracker_result)
     report["source"]["gitlabProjectId"] = project_id
     content = (json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
@@ -694,9 +766,11 @@ def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracke
             raise IntegrationError("GitLab 결과 파일의 base64 내용이 올바르지 않습니다") from exc
 
     existing_content = decoded_file(source_file)
-    if source_file is None:
+    if source_file is None and not scheduled:
         existing_content = decoded_file(_gitlab_optional_json(file_endpoint, {"ref": target_branch}, settings_dir=settings_dir))
     commit = None
+    # The report contains the authoritative KODA result and provenance.  A
+    # Tracker-only comparison could suppress a changed source result.
     if existing_content != content:
         branch = _gitlab_optional_json(
             f"/projects/{project_id}/repository/branches/{quote(source_branch, safe='')}",
@@ -704,7 +778,7 @@ def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracke
         )
         commit_payload = {
             "branch": source_branch,
-            "commit_message": f"chore(koda): store security scan {run.get('run_id')} for {short_sha}",
+            "commit_message": f"chore(koda): store {'scheduled ' if scheduled else ''}security scan {run.get('run_id')} for {short_sha}",
             "actions": [{
                 "action": "update" if source_file is not None else "create",
                 "file_path": file_path,
@@ -712,13 +786,18 @@ def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracke
             }],
         }
         if branch is None:
-            commit_payload["start_sha"] = commit_sha
+            if scheduled:
+                commit_payload["start_branch"] = target_branch
+            else:
+                commit_payload["start_sha"] = commit_sha
         commit = _gitlab_write_json(
             f"/projects/{project_id}/repository/commits", settings_dir=settings_dir,
             method="POST", payload=commit_payload,
         )
     merge_requests = _gitlab_write_json(f"/projects/{project_id}/merge_requests", {
-        "state": "opened" if commit is not None else "all", "source_branch": source_branch, "target_branch": target_branch,
+        # A scheduled run keeps one branch/MR for its whole lifecycle.  GitLab
+        # also returns closed and merged MRs when state=all.
+        "state": "all", "source_branch": source_branch, "target_branch": target_branch,
         "order_by": "updated_at", "sort": "desc", "per_page": 1,
     }, settings_dir=settings_dir)
     mr_title, mr_description, mr_labels = _gitlab_mr_summary(report, file_path)
@@ -750,7 +829,7 @@ def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracke
     tracker_run = tracker_result.get("run") if isinstance(tracker_result, dict) else None
     tracker_run_url = str((tracker_run or {}).get("runUrl") or "").strip() if isinstance(tracker_run, dict) else ""
     parsed_tracker_url = urlparse(tracker_run_url) if tracker_run_url else None
-    tracker_reference = f"Tracker 회차 `{tracker_run_id}`"
+    tracker_reference = f"Tracker 회차 `{tracker_run_id}`" if tracker_run_id else "Tracker 분석 대기 상태"
     if (
         parsed_tracker_url and parsed_tracker_url.scheme in {"http", "https"}
         and parsed_tracker_url.hostname and not any(char.isspace() for char in tracker_run_url)
@@ -774,52 +853,71 @@ def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracke
             current["fixedIn"].update(str(value) for value in values if value)
     issue_urls = []
     if cves:
-        marker = f"<!-- koda-sbom-tracker:{commit_sha} -->"
-        run_marker = f"<!-- koda-sbom-tracker-run:{tracker_run_id} -->"
-        issue = find_gitlab_issue(project_id, marker, settings_dir=settings_dir)
-        if issue is None:
-            def cell(value) -> str:
-                return str(value or "-").replace("\r", " ").replace("\n", " ").replace("|", "\\|")
+        if scheduled:
+            # Keep one issue per stable vulnerability identity.  The aggregate
+            # CVE-set hash previously changed whenever another finding was
+            # added, which created duplicate issues for existing findings.
+            grouped_cves = {}
+            for key, finding in cves.items():
+                grouped_cves.setdefault(key[:3], {})[key] = finding
+            issue_groups = sorted(grouped_cves.items())
+        else:
+            issue_groups = [(None, cves)]
+        for stable_identity, issue_cves in issue_groups:
+            if scheduled:
+                stable_issue_key = hashlib.sha256(json.dumps(stable_identity, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:24]
+                marker = f"<!-- koda-scheduled:{target_id}:{stable_issue_key} -->"
+                run_marker = f"<!-- koda-scheduled-run:{schedule_run_id} -->"
+            else:
+                marker = f"<!-- koda-sbom-tracker:{commit_sha} -->"
+                run_marker = f"<!-- koda-sbom-tracker-run:{tracker_run_id} -->"
+            issue = find_gitlab_issue(project_id, marker, settings_dir=settings_dir)
+            if issue is None:
+                def cell(value) -> str:
+                    return str(value or "-").replace("\r", " ").replace("\n", " ").replace("|", "\\|")
 
-            severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, "unknown": 5}
-            ordered = sorted(cves.items(), key=lambda item: (
-                severity_order.get(item[0][3], 5), item[0][0], item[0][1], item[0][2], item[0][4],
-            ))
-            rows = ["| CVE | 심각도 | CVSS | 구성요소 | 설치 버전 | 수정 버전 |", "| --- | --- | ---: | --- | --- | --- |"]
-            for (cve, component, version, _severity, _cvss), finding in ordered[:200]:
-                fixed = ", ".join(sorted(finding["fixedIn"])) or "-"
-                rows.append(f"| {cve} | {cell(finding.get('severity'))} | {cell(finding.get('cvssScore'))} | {cell(component)} | {cell(version)} | {cell(fixed)} |")
-            omitted = max(0, len(ordered) - 200)
-            if omitted:
-                rows.append(f"\n나머지 {omitted}건은 MR의 결과 JSON에서 확인하세요.")
-            issue = _gitlab_write_json(
-                f"/projects/{project_id}/issues", settings_dir=settings_dir, method="POST", payload={
-                    "title": f"[KODA] SBOM 취약점 {short_sha} ({len(cves)}건)",
-                    "description": marker + "\n" + run_marker + f"\n{tracker_reference}에서 CVE 취약점이 확인되었습니다.\n\n" + "\n".join(rows) + f"\n\n전체 {len(ordered)}건 · 생략 {omitted}건\n분석 결과 MR: {merge_request.get('web_url') or '-'}",
-                    "labels": "KODA,SBOM,vulnerability",
-                    "confidential": True,
-                },
-            )
-        elif issue is not None and isinstance(issue, dict):
-            if run_marker not in str(issue.get("description") or "") and not find_gitlab_issue_note(
-                project_id, int(issue["iid"]), run_marker, settings_dir=settings_dir,
-            ):
-                add_gitlab_issue_note(
-                    project_id, int(issue["iid"]),
-                    run_marker + f"\n{tracker_reference}가 동일 commit 결과를 확인했습니다.\n분석 결과 MR: {merge_request.get('web_url') or '-'}",
-                    settings_dir=settings_dir,
+                severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, "unknown": 5}
+                ordered = sorted(issue_cves.items(), key=lambda item: (
+                    severity_order.get(item[0][3], 5), item[0][0], item[0][1], item[0][2], item[0][4],
+                ))
+                rows = ["| CVE | 심각도 | CVSS | 구성요소 | 설치 버전 | 수정 버전 |", "| --- | --- | ---: | --- | --- | --- |"]
+                for (cve, component, version, _severity, _cvss), finding in ordered[:200]:
+                    fixed = ", ".join(sorted(finding["fixedIn"])) or "-"
+                    rows.append(f"| {cve} | {cell(finding.get('severity'))} | {cell(finding.get('cvssScore'))} | {cell(component)} | {cell(version)} | {cell(fixed)} |")
+                omitted = max(0, len(ordered) - 200)
+                if omitted:
+                    rows.append(f"\n나머지 {omitted}건은 MR의 결과 JSON에서 확인하세요.")
+                issue = _gitlab_write_json(
+                    f"/projects/{project_id}/issues", settings_dir=settings_dir, method="POST", payload={
+                        "title": f"[KODA]{' 스케줄' if scheduled else ''} SBOM 취약점 {short_sha} ({len(ordered)}건)",
+                        "description": marker + "\n" + run_marker + f"\n{tracker_reference}에서 CVE 취약점이 확인되었습니다.\n\n" + "\n".join(rows) + f"\n\n전체 {len(ordered)}건 · 생략 {omitted}건\n분석 결과 MR: {merge_request.get('web_url') or '-'}",
+                        "labels": "KODA,SBOM,vulnerability",
+                        "confidential": True,
+                    },
                 )
-        if isinstance(issue, dict) and issue.get("web_url"):
-            issue_urls.append(str(issue["web_url"]))
+            elif issue is not None and isinstance(issue, dict):
+                if run_marker not in str(issue.get("description") or "") and not find_gitlab_issue_note(
+                    project_id, int(issue["iid"]), run_marker, settings_dir=settings_dir,
+                ):
+                    add_gitlab_issue_note(
+                        project_id, int(issue["iid"]),
+                        run_marker + f"\n{tracker_reference}가 동일 실행 결과를 확인했습니다.\n분석 결과 MR: {merge_request.get('web_url') or '-'}",
+                        settings_dir=settings_dir,
+                    )
+            if isinstance(issue, dict) and issue.get("web_url"):
+                issue_urls.append(str(issue["web_url"]))
     return {
         "commitUrl": commit.get("web_url") if isinstance(commit, dict) else None,
         "mergeRequestUrl": merge_request.get("web_url") if isinstance(merge_request, dict) else None,
         "issueUrls": issue_urls,
         "resultFile": file_path,
+        "sourceBranch": source_branch,
     }
 
 
 def send_tracker_sbom(mapping: dict, run: dict) -> str:
+    if (run.get("snapshot") or {}).get("scan_scope") == "source":
+        raise IntegrationError("소스코드 전용 점검은 Tracker로 전송하지 않습니다")
     base = (os.environ.get("KODA_TRACKER_URL") or os.environ.get("KODA_SSBOM_TRACKER_URL") or "").strip().rstrip("/")
     token_dir = os.environ.get("KODA_TRACKER_TOKEN_DIR", "").strip()
     token_ref = str(mapping.get("tracker_token_ref") or "")
@@ -835,15 +933,47 @@ def send_tracker_sbom(mapping: dict, run: dict) -> str:
         raise IntegrationError("전송할 CycloneDX SBOM이 없습니다")
     raw = (json.dumps(sbom, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     digest = hashlib.sha256(raw).hexdigest()
+    scheduled = snapshot.get("source_type") == "scheduled_server"
     ref_type, ref_name, commit_sha = snapshot.get("gitlab_ref_type"), snapshot.get("gitlab_ref_name"), str(snapshot.get("gitlab_commit_sha") or "")
-    release = str(ref_name) if ref_type == "tag" else f"{ref_name}@{commit_sha[:12]}"
+    if scheduled:
+        target_id = str(snapshot.get("schedule_target_id") or "")
+        schedule_run_id = str(snapshot.get("schedule_run_id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", target_id) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", schedule_run_id):
+            raise IntegrationError("스케줄 결과 식별자가 올바르지 않습니다")
+        mode = str(snapshot.get("scan_mode") or "")
+        if mode not in {"full", "changed"}:
+            raise IntegrationError("스케줄 점검 방식이 올바르지 않습니다")
+        release = f"scheduled-{target_id}-{mode}-{schedule_run_id[:12]}"
+        changed_files = snapshot.get("changed_files", [])
+        if not isinstance(changed_files, list):
+            changed_files = []
+        changed_files = [item for item in changed_files if isinstance(item, str)]
+        changed_files_truncated = len(changed_files) > MAX_TRACKER_SCHEDULE_CHANGED_FILES
+    else:
+        release = str(ref_name) if ref_type == "tag" else f"{ref_name}@{commit_sha[:12]}"
     boundary = "koda-" + uuid.uuid4().hex
     fields = {
         "serviceId": str(mapping["tracker_service_id"]),
         "environmentId": str(mapping["tracker_environment_id"]),
         "releaseVersion": release,
-        "note": f"KODA run {run['run_id']} · {mapping['path_with_namespace']} · {commit_sha}",
+        "note": (
+            f"KODA scheduled run {run['run_id']} · 대상 {target_id} · {snapshot.get('remote_server')} · {snapshot.get('remote_directory')}"
+            if scheduled else f"KODA run {run['run_id']} · {mapping['path_with_namespace']} · {commit_sha}"
+        ),
     }
+    if scheduled:
+        fields["source"] = "scheduled"
+        fields["sourceMetadata"] = json.dumps({
+            "targetId": target_id,
+            "scheduleRunId": schedule_run_id,
+            "server": snapshot.get("remote_server"),
+            "directory": snapshot.get("remote_directory"),
+            "mode": snapshot.get("scan_mode"),
+            "changedFiles": changed_files[:MAX_TRACKER_SCHEDULE_CHANGED_FILES],
+            "changedFilesTruncated": changed_files_truncated,
+            "kodaRunId": run.get("run_id"),
+            "rulePolicyVersion": snapshot.get("rule_policy_version"),
+        }, ensure_ascii=False, separators=(",", ":"))
     if any("\r" in value or "\n" in value for value in fields.values()):
         raise IntegrationError("Tracker 전송 값에 허용되지 않는 문자가 있습니다")
     parts = []

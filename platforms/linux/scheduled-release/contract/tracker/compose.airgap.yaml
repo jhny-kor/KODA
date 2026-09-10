@@ -1,0 +1,15 @@
+services:
+  gateway:
+    pull_policy: never
+  portal-web:
+    pull_policy: never
+  portal-api:
+    pull_policy: never
+  portal-worker:
+    pull_policy: never
+  postgres:
+    pull_policy: never
+  dtrack-apiserver:
+    pull_policy: never
+  dtrack-frontend:
+    pull_policy: never

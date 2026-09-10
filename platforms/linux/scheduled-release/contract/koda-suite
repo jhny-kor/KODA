@@ -305,15 +305,6 @@ runtime_values() {
   tracker_provisioning_file="${KODA_TRACKER_PROVISIONING_TOKEN_FILE:-$(env_value "$env_file" KODA_TRACKER_PROVISIONING_TOKEN_FILE "")}"
   tracker_result_timeout="${KODA_TRACKER_RESULT_TIMEOUT_SECONDS:-$(env_value "$env_file" KODA_TRACKER_RESULT_TIMEOUT_SECONDS 900)}"
   tracker_ca_file="${KODA_TRACKER_CA_FILE:-$(env_value "$env_file" KODA_TRACKER_CA_FILE "")}"
-  schedule_enabled="${KODA_SCHEDULE_ENABLED:-$(env_value "$env_file" KODA_SCHEDULE_ENABLED 0)}"
-  schedule_ssh_dir="${KODA_SCHEDULE_SSH_DIR:-$(env_value "$env_file" KODA_SCHEDULE_SSH_DIR "")}"
-  schedule_state="${KODA_SCHEDULE_STATE_DIR:-$(env_value "$env_file" KODA_SCHEDULE_STATE_DIR "")}"
-  schedule_cpus="${KODA_SCHEDULE_CPUS:-$(env_value "$env_file" KODA_SCHEDULE_CPUS 1)}"
-  schedule_memory="${KODA_SCHEDULE_MEMORY:-$(env_value "$env_file" KODA_SCHEDULE_MEMORY 4g)}"
-  schedule_rate_bytes="${KODA_SCHEDULE_RATE_BYTES:-$(env_value "$env_file" KODA_SCHEDULE_RATE_BYTES 5242880)}"
-  schedule_gap_seconds="${KODA_SCHEDULE_GAP_SECONDS:-$(env_value "$env_file" KODA_SCHEDULE_GAP_SECONDS 30)}"
-  schedule_disk_reserve_bytes="${KODA_SCHEDULE_DISK_RESERVE_BYTES:-$(env_value "$env_file" KODA_SCHEDULE_DISK_RESERVE_BYTES 1073741824)}"
-  schedule_min_free_bytes="${KODA_SCHEDULE_MIN_FREE_BYTES:-$(env_value "$env_file" KODA_SCHEDULE_MIN_FREE_BYTES "$schedule_disk_reserve_bytes")}"
   gateway_scheme="${GATEWAY_PUBLIC_SCHEME:-$(env_value "$env_file" GATEWAY_PUBLIC_SCHEME https)}"
   tracker_env="${TRACKER_ENVIRONMENT:-$(env_value "$env_file" TRACKER_ENVIRONMENT production)}"
   tracker_secure_cookies="${TRACKER_SECURE_COOKIES:-$(env_value "$env_file" TRACKER_SECURE_COOKIES true)}"
@@ -354,11 +345,6 @@ start_dashboard() {
   local prefix="$1" env_file="$prefix/tracker/.env"
   ensure_tracker_integration_secrets "$env_file"
   runtime_values "$env_file"
-  if [[ "$schedule_enabled" == 1 ]]; then
-    [[ -n "$schedule_ssh_dir" ]] || fail "KODA_SCHEDULE_SSH_DIR is required when scheduled scans are enabled."
-    [[ -d "$schedule_ssh_dir" && -r "$schedule_ssh_dir" && -x "$schedule_ssh_dir" ]] \
-      || fail "KODA_SCHEDULE_SSH_DIR must be a readable directory."
-  fi
   "$prefix/koda/koda-docker" dashboard stop >/dev/null
   KODA_PORT="$koda_port" \
   KODA_DASHBOARD_BIND="$koda_bind" \
@@ -375,15 +361,6 @@ start_dashboard() {
   KODA_TRACKER_PROVISIONING_TOKEN_FILE="$tracker_provisioning_file" \
   KODA_TRACKER_RESULT_TIMEOUT_SECONDS="$tracker_result_timeout" \
   KODA_TRACKER_CA_FILE="$tracker_ca_file" \
-  KODA_SCHEDULE_ENABLED="$schedule_enabled" \
-  KODA_SCHEDULE_SSH_DIR="$schedule_ssh_dir" \
-  KODA_SCHEDULE_STATE_DIR="$schedule_state" \
-  KODA_SCHEDULE_CPUS="$schedule_cpus" \
-  KODA_SCHEDULE_MEMORY="$schedule_memory" \
-  KODA_SCHEDULE_RATE_BYTES="$schedule_rate_bytes" \
-  KODA_SCHEDULE_GAP_SECONDS="$schedule_gap_seconds" \
-  KODA_SCHEDULE_DISK_RESERVE_BYTES="$schedule_disk_reserve_bytes" \
-  KODA_SCHEDULE_MIN_FREE_BYTES="$schedule_min_free_bytes" \
     "$prefix/koda/koda-docker" dashboard start
 }
 
