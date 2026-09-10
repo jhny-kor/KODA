@@ -77,14 +77,37 @@ Compose 프로젝트명을 변경했다면 gateway 이름도 함께 바꿉니다
 
 완료된 CycloneDX 결과는 KODA-SBOM-Tracker로 자동 전송됩니다. GitLab API를 호출하는
 주체는 KODA뿐이며 Tracker는 PAT를 보관하거나 GitLab에 직접 연결하지 않습니다. KODA는 Tracker 분석이
-끝날 때까지 기다린 뒤 `.koda/sbom-tracker/<commit-sha>.json`을
-`koda/sbom-results/<commit-sha-앞12자리>` 브랜치에 저장하고 기본 브랜치 대상 Merge
-Request를 생성하거나 기존 항목을 재사용합니다. CVE가 있으면 같은 commit당 하나의
+끝날 때까지 기다린 뒤 `.koda/scan-results/<KODA-run-id>.json`을
+`koda/results/YYYYMMDD/<프로젝트명>-<프로젝트ID앞8자리>/<실행계정UUID>/v1`
+브랜치에 저장하고 기본 브랜치 대상 Merge Request를 생성합니다. 날짜는 점검 요청 시각의
+한국시간 기준이며, 계정은 GitLab 쓰기 토큰 소유자가 아닌 KODA 로그인 계정 ID입니다.
+프로젝트명의 Git ref 금지 문자는 `-`로 바꾸고 UTF-8 72바이트로 제한합니다.
+같은 날짜·프로젝트·계정의 새 점검은 v2, v3 순서로 증가합니다. 동시 요청도 DB
+트랜잭션에서 순번을 확정하며 삭제·취소된 회차의 번호는 재사용하지 않습니다.
+원본 branch/tag는 변경하지 않고 결과 브랜치만 생성합니다(별도 결과 tag는 만들지 않습니다).
+CVE가 있으면 같은 commit당 하나의
 비공개 요약 Issue를 생성하며, 재시도해도 MR·Issue를 중복 생성하지 않습니다. 전송·분석
 조회·GitLab 게시 중 하나가 실패하면 KODA 회차 자체는 보존됩니다. 결과 화면에서는
 `Tracker 전송`과 `GitLab 결과 등록` 상태를 별도로 확인하며, 실패한 단계만 각각 재시도할
-수 있습니다. GitLab 결과 등록은 commit SHA를 기준으로 결과 브랜치를 유지하고 MR과
-요약 Issue를 중복 없이 재사용합니다.
+수 있습니다. 같은 회차의 전송 재시도는 저장된 브랜치·파일·MR을 재사용합니다.
+전체 JSON이 같으면 새 commit을 만들지 않습니다. 같은 commit의 새 점검은 새 버전
+브랜치·MR을 만들고 기존 CVE 요약 Issue에 해당 Tracker 회차 댓글과 MR 링크를 추가합니다.
+업데이트 전 생성한 회차의 재시도는 기존 `koda/sbom-results/<SHA앞12자리>` 경로를 유지합니다.
+
+결과 JSON의 `schemaVersion=2`에는 원본 저장소/ref/SHA, 실행자·프로젝트·점검시각·범위·
+규칙 정책 정보(`inspection`), KODA 결과(`kodaResult`), Tracker 전체 결과(`trackerResult`)가
+들어갑니다. KODA 결과는 점검 요약·단계·경고·구성요소·CycloneDX SBOM 및 취약점별
+심각도, 확인/검토 상태, 규칙/CWE, 파일/줄, 근거, 설명, 권장 조치, 분석기 정보를 포함합니다.
+보고서에서 마스킹한 소스 문맥은 포함하지만 내부 trace와 연동 토큰 참조는 제외합니다.
+
+MR에는 실행 정보, 소스/라이브러리/Tracker별 건수와 심각도, 결과 표, 단계·경고 및 JSON
+링크를 표시합니다. 표는 그룹당 50행까지 표시하고 생략 건수를 명시하며 JSON은 자르지
+않습니다. 0건은 점검 성공/안전을 단정하지 않으며 점검 범위와 단계 상태를 함께 확인합니다.
+GitLab 기본 labels에 `KODA`, `security-scan`, `scan:source`/`scan:library`/`scan:all`,
+`project:…`, `standard:…`, `severity:…`, `category:…`, `SBOM`을 해당 결과에 맞춰 추가합니다.
+추가 키워드는 GitLab 화면에서 라벨로 자유롭게 붙일 수 있습니다. 재시도 시 기존 라벨과
+자동 요약 영역 밖의 수동 설명은 보존합니다. 상세 결과는 저장소 파일/MR 접근권한을
+따르므로 confidential Issue와 달리 저장소 열람자에게 보일 수 있습니다.
 
 KODA가 직접 `confirmed`로 확정한 코드·비밀정보·보안설정·예방통제
 취약점은 항목당 하나의 비공개 Issue로 생성합니다. 동일 취약점의 열린 Issue가 있으면

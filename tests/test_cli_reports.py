@@ -5,6 +5,7 @@ import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,17 @@ from security_scanner.reporting import _render_html_main, _source_main_filter_ma
 
 
 class CliReportTests(unittest.TestCase):
+    def test_no_command_shows_available_commands_without_error(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main([])
+
+        self.assertEqual(exit_code, 0)
+        help_text = output.getvalue()
+        self.assertIn("usage:", help_text)
+        self.assertIn("{scan,jar-scan", help_text)
+        self.assertIn("scan                scan configured local project folders", help_text)
+
     def test_source_summary_groups_same_severity_and_rule_and_collapses_locations(self) -> None:
         findings = [
             {"severity": "high", "rule_id": "code.same-rule", "path": f"source-{index}.py", "line": index, "title": "같은 문제"}
@@ -206,7 +218,7 @@ class CliReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "secret.py"
-            secret = "sk-123456789012345678901234"
+            secret = "fixture-secret-value"
             source.write_text(f'api_key = "{secret}"\n', encoding="utf-8")
             output = root / "reports" / "source.html"
             exit_code = main(

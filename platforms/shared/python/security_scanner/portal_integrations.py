@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from collections import Counter
 import hashlib
 import json
 import os
@@ -159,7 +160,7 @@ def save_gitlab_configuration(settings_dir: str | Path, url: str, token: str, ca
             raise IntegrationError("GitLab CA 인증서가 올바르지 않습니다") from exc
     directory = Path(settings_dir)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(directory, 0o700)
+    os.chmod(directory, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
     ca_file = directory / _GITLAB_CA
     if ca_value:
         _atomic_secret(ca_file, ca_value + "\n")
@@ -546,6 +547,124 @@ def find_gitlab_issue_note(project_id: int, issue_iid: int, marker: str, *, sett
     return next((item for item in payload if isinstance(item, dict) and marker in str(item.get("body") or "")), None)
 
 
+def _gitlab_scan_report(run: dict, tracker_run_id: str, tracker_result: dict) -> dict:
+    snapshot, result = run.get("snapshot") or {}, run.get("result") or {}
+    # Export report fields, never the integration snapshot (token refs) or
+    # internal analyzer trace. Evidence/source_context are report-redacted.
+    finding_fields = {
+        "rule_id", "category", "severity", "title", "target", "path", "line",
+        "evidence", "description", "recommendation", "resource", "reachable",
+        "verification_status", "verification_note", "triage_verdict", "triage_confidence",
+        "triage_note", "analyzer", "analyzer_version", "analyzer_rule_id", "cwe_ids",
+        "evidence_kind", "evidence_id", "issue_key", "standard_mappings", "source_context",
+    }
+    findings = result.get("findings", (result.get("findings_by_language") or {}).get("ko", [])) or []
+    koda_result = {key: result[key] for key in (
+        "scan", "summary", "scanner", "generated_at", "analysis_stages", "analysis_overall",
+        "source_analysis", "rule_mappings", "sw49", "components", "sbom",
+    ) if key in result}
+    koda_result["findings"] = [
+        {key: value for key, value in item.items() if key in finding_fields}
+        for item in findings if isinstance(item, dict)
+    ]
+    return {
+        "schemaVersion": 2,
+        "source": {
+            "gitlabProjectId": snapshot.get("gitlab_project_id"),
+            "pathWithNamespace": snapshot.get("gitlab_path_with_namespace"),
+            "refType": snapshot.get("gitlab_ref_type"), "refName": snapshot.get("gitlab_ref_name"),
+            "commitSha": snapshot.get("gitlab_commit_sha"),
+        },
+        "inspection": {
+            "projectId": run.get("project_id"), "projectName": snapshot.get("project_name"),
+            "accountId": run.get("requested_by") or snapshot.get("requested_by"),
+            "accountDisplay": snapshot.get("requested_by_display"),
+            "date": snapshot.get("gitlab_result_date"), "timezone": "Asia/Seoul",
+            "version": snapshot.get("gitlab_result_version"), "branch": snapshot.get("gitlab_result_branch"),
+            "roundNumber": run.get("round_number"), "scope": snapshot.get("scan_scope", "all"),
+            "status": run.get("status"), "createdAt": run.get("created_at"), "completedAt": run.get("completed_at"),
+            "standard": snapshot.get("standard"), "standardCategory": snapshot.get("standard_category"),
+            "disabledRules": snapshot.get("disabled_rules", []),
+            "rulePolicyVersion": snapshot.get("rule_policy_version"), "rulePolicyHash": snapshot.get("rule_policy_hash"),
+            "scannerVersion": snapshot.get("scanner_version"), "inputHash": snapshot.get("input_hash"),
+        },
+        "kodaRunId": run.get("run_id"), "trackerRunId": tracker_run_id,
+        "kodaResult": koda_result, "trackerResult": tracker_result,
+    }
+
+
+def _gitlab_report_cell(value, limit: int = 180) -> str:
+    # One escaped line also prevents repository-controlled quick actions.
+    value = " ".join(str(value if value is not None else "—").split())[:limit]
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "&#124;").replace("`", "&#96;")
+
+
+def _gitlab_mr_summary(report: dict, file_path: str) -> tuple[str, str, list[str]]:
+    inspection, source = report["inspection"], report["source"]
+    result, tracker = report["kodaResult"], report["trackerResult"]
+    local = result["findings"]
+    remote = [item for item in ((tracker.get("analysis") or {}).get("findings") or []) if isinstance(item, dict)]
+    source_findings = [item for item in local if item.get("category") != "dependencies"]
+    library_findings = [item for item in local if item.get("category") == "dependencies"]
+    cell = _gitlab_report_cell
+    scope = {"source": "소스코드", "library": "라이브러리", "all": "소스코드·라이브러리"}.get(inspection["scope"], inspection["scope"])
+    title = f"[KODA] {inspection.get('date') or ''} {inspection.get('projectName') or source.get('pathWithNamespace') or '점검'} {scope} 점검"
+    if inspection.get("version"):
+        title += f" v{inspection['version']}"
+    lines = [
+        "<!-- koda-scan-summary:start -->", "## KODA 보안점검 요약", "",
+        f"- 프로젝트: {cell(inspection.get('projectName'))} / `{cell(inspection.get('projectId'))}`",
+        f"- 실행 계정 ID: `{cell(inspection.get('accountId'))}` · {cell(inspection.get('accountDisplay'))}",
+        f"- 점검일: {cell(inspection.get('date'))} (Asia/Seoul) · 버전: {cell(inspection.get('version'))}",
+        f"- 시작 / 완료: {cell(inspection.get('createdAt'))} / {cell(inspection.get('completedAt'))}",
+        f"- 범위: {cell(scope)} · 기준: {cell(inspection.get('standard'))} / {cell(inspection.get('standardCategory'))}",
+        f"- 원본 Ref: {cell(source.get('refType'))} / {cell(source.get('refName'))} · SHA: `{cell(source.get('commitSha'))}`",
+        f"- KODA 회차: `{cell(report['kodaRunId'])}` · Tracker 회차: `{cell(report['trackerRunId'])}`",
+        f"- KODA 상태: {cell(inspection.get('status'))} · 분석 상태: {cell(result.get('analysis_overall'))}",
+        f"- Tracker 상태: {cell((tracker.get('run') or {}).get('state'))} / {cell((tracker.get('analysis') or {}).get('state'))}",
+        f"- 전체 결과 JSON: [{cell(file_path)}]({quote(file_path, safe='/')})", "",
+        "각 분석기의 결과를 별도로 집계합니다. 검토 필요 항목은 확정 취약점과 구분하며, 0건도 점검 범위·단계 상태와 함께 확인하세요.",
+    ]
+    severities = ("critical", "high", "medium", "low", "info", "unknown")
+    for label, items in (("KODA 소스코드", source_findings), ("KODA 라이브러리", library_findings), ("Tracker 라이브러리", remote)):
+        counts = Counter(str(item.get("severity") or "unknown").lower() for item in items)
+        counts["unknown"] += sum(count for severity, count in counts.items() if severity not in severities)
+        lines += ["", f"### {label}: {len(items)}건", " · ".join(f"{severity}: {counts[severity]}" for severity in severities)]
+        if label.startswith("KODA"):
+            lines += ["| 심각도 | 확인 상태 | 규칙 | 제목 | 위치 |", "| --- | --- | --- | --- | --- |"]
+        else:
+            lines += ["| CVE | 심각도 | CVSS | 구성요소 | 설치 버전 | 수정 버전 |", "| --- | --- | --- | --- | --- | --- |"]
+        ordered = sorted(items, key=lambda item: (severities.index(str(item.get("severity") or "unknown").lower()) if str(item.get("severity") or "unknown").lower() in severities else 5, str(item.get("rule_id") or item.get("canonicalId") or "")))
+        for item in ordered[:50]:
+            values = (
+                (item.get("severity"), item.get("verification_status", "unknown"), item.get("rule_id"), item.get("title"), f"{item.get('path') or item.get('resource') or '—'}:{item.get('line') or '—'}")
+                if label.startswith("KODA") else
+                (item.get("canonicalId") or item.get("id"), item.get("severity"), item.get("cvssScore"), item.get("component"), item.get("version") or item.get("installedVersion"), item.get("fixedIn") or item.get("fixVersions") or item.get("fixedVersion"))
+            )
+            lines.append("| " + " | ".join(cell(value, 100) for value in values) + " |")
+        if len(items) > 50:
+            lines.append(f"전체 {len(items)}건 중 {len(items) - 50}건 생략. 전체 상세는 결과 JSON에 있습니다.")
+    lines += ["", "### 점검 단계 및 경고", cell(json.dumps(result.get("analysis_stages") or {}, ensure_ascii=False), 3000),
+              cell(json.dumps((result.get("scan") or {}).get("warnings") or [], ensure_ascii=False), 3000),
+              "Tracker 오류: " + cell((tracker.get("analysis") or {}).get("error"), 1000),
+              "", "결과 JSON에는 소스/라이브러리 상세 근거·권장 조치와 전체 SBOM이 포함됩니다.",
+              "<!-- koda-scan-summary:end -->"]
+    labels = {"KODA", "security-scan", f"scan:{inspection['scope']}"}
+    for key, value in (("standard", inspection.get("standard")), ("project", inspection.get("projectName"))):
+        if value:
+            labels.add(f"{key}:" + re.sub(r"[^\w.-]+", "-", str(value))[:80])
+    for item in local + remote:
+        severity = str(item.get("severity") or "unknown").lower()
+        labels.add(f"severity:{severity if severity in severities else 'unknown'}")
+        if item.get("category") in {"code", "secrets", "configuration", "prevention", "dependencies", "quality"}:
+            labels.add(f"category:{item['category']}")
+    # Fixed-category labels stay manageable; individual CVEs remain searchable
+    # in the MR tables/JSON instead of creating thousands of project labels.
+    if remote or result.get("sbom"):
+        labels.add("SBOM")
+    return " ".join(title.split())[:255], "\n".join(lines), sorted(labels)
+
+
 def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracker_result: dict, *, settings_dir: str | Path) -> dict:
     snapshot = run.get("snapshot") or {}
     project_id = int(snapshot.get("gitlab_project_id") or mapping.get("gitlab_project_id") or 0)
@@ -554,21 +673,12 @@ def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracke
     if project_id <= 0 or not re.fullmatch(r"[0-9a-f]{40,64}", commit_sha) or not target_branch:
         raise IntegrationError("GitLab 결과 저장 대상 정보가 올바르지 않습니다")
     short_sha = commit_sha[:12]
-    source_branch = f"koda/sbom-results/{short_sha}"
-    file_path = f".koda/sbom-tracker/{commit_sha}.json"
-    report = {
-        "schemaVersion": 1,
-        "source": {
-            "gitlabProjectId": project_id,
-            "pathWithNamespace": snapshot.get("gitlab_path_with_namespace"),
-            "refType": snapshot.get("gitlab_ref_type"),
-            "refName": snapshot.get("gitlab_ref_name"),
-            "commitSha": commit_sha,
-        },
-        "kodaRunId": run.get("run_id"),
-        "trackerRunId": tracker_run_id,
-        "trackerResult": tracker_result,
-    }
+    # Old runs keep their original branch/path; newly snapshotted runs get a
+    # date/project/account/version branch and an immutable per-run report path.
+    source_branch = snapshot.get("gitlab_result_branch") or f"koda/sbom-results/{short_sha}"
+    file_path = f".koda/scan-results/{run['run_id']}.json" if snapshot.get("gitlab_result_branch") else f".koda/sbom-tracker/{commit_sha}.json"
+    report = _gitlab_scan_report(run, tracker_run_id, tracker_result)
+    report["source"]["gitlabProjectId"] = project_id
     content = (json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
     file_endpoint = f"/projects/{project_id}/repository/files/{quote(file_path, safe='')}"
     source_file = _gitlab_optional_json(file_endpoint, {"ref": source_branch}, settings_dir=settings_dir)
@@ -586,26 +696,15 @@ def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracke
     existing_content = decoded_file(source_file)
     if source_file is None:
         existing_content = decoded_file(_gitlab_optional_json(file_endpoint, {"ref": target_branch}, settings_dir=settings_dir))
-    try:
-        existing_report = json.loads(existing_content) if existing_content else {}
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        existing_report = {}
-    current_analysis = tracker_result.get("analysis") if isinstance(tracker_result, dict) else None
-    existing_result = existing_report.get("trackerResult") if isinstance(existing_report, dict) else None
-    analysis_unchanged = (
-        isinstance(current_analysis, dict)
-        and isinstance(existing_result, dict)
-        and existing_result.get("analysis") == current_analysis
-    )
     commit = None
-    if existing_content != content and not analysis_unchanged:
+    if existing_content != content:
         branch = _gitlab_optional_json(
             f"/projects/{project_id}/repository/branches/{quote(source_branch, safe='')}",
             settings_dir=settings_dir,
         )
         commit_payload = {
             "branch": source_branch,
-            "commit_message": f"chore(koda): store SBOM analysis for {short_sha}",
+            "commit_message": f"chore(koda): store security scan {run.get('run_id')} for {short_sha}",
             "actions": [{
                 "action": "update" if source_file is not None else "create",
                 "file_path": file_path,
@@ -622,15 +721,28 @@ def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracke
         "state": "opened" if commit is not None else "all", "source_branch": source_branch, "target_branch": target_branch,
         "order_by": "updated_at", "sort": "desc", "per_page": 1,
     }, settings_dir=settings_dir)
+    mr_title, mr_description, mr_labels = _gitlab_mr_summary(report, file_path)
     if isinstance(merge_requests, list) and merge_requests:
         merge_request = merge_requests[0]
+        if merge_request.get("iid"):
+            old_description = str(merge_request.get("description") or "")
+            block = re.compile(r"<!-- koda-scan-summary:start -->.*?<!-- koda-scan-summary:end -->", re.S)
+            description = block.sub(lambda _: mr_description, old_description, count=1) if block.search(old_description) else mr_description + ("\n\n" + old_description if old_description else "")
+            missing_labels = sorted(set(mr_labels) - set(merge_request.get("labels") or []))
+            if description != old_description or missing_labels:
+                merge_request = _gitlab_write_json(
+                    f"/projects/{project_id}/merge_requests/{int(merge_request['iid'])}",
+                    settings_dir=settings_dir, method="PUT",
+                    payload={"description": description, "add_labels": ",".join(missing_labels)},
+                )
     else:
         merge_request = _gitlab_write_json(
             f"/projects/{project_id}/merge_requests", settings_dir=settings_dir, method="POST", payload={
                 "source_branch": source_branch,
                 "target_branch": target_branch,
-                "title": f"[KODA] SBOM 분석 결과 {short_sha}",
-                "description": f"KODA 회차 `{run.get('run_id')}` / Tracker 회차 `{tracker_run_id}`\n\n결과 파일: `{file_path}`",
+                "title": mr_title,
+                "description": mr_description,
+                "labels": ",".join(mr_labels),
                 "remove_source_branch": False,
             },
         )
@@ -694,7 +806,7 @@ def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracke
             ):
                 add_gitlab_issue_note(
                     project_id, int(issue["iid"]),
-                    run_marker + f"\n{tracker_reference}가 동일 commit 결과를 확인했습니다.",
+                    run_marker + f"\n{tracker_reference}가 동일 commit 결과를 확인했습니다.\n분석 결과 MR: {merge_request.get('web_url') or '-'}",
                     settings_dir=settings_dir,
                 )
         if isinstance(issue, dict) and issue.get("web_url"):

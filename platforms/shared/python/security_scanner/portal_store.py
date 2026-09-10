@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -131,6 +132,7 @@ class PortalStore:
             )
             columns = {row[1] for row in db.execute("PRAGMA table_info(scan_runs)")}
             for definition in (
+                "deleted_at TEXT",
                 "stage TEXT NOT NULL DEFAULT 'queued'",
                 "progress INTEGER NOT NULL DEFAULT 0",
                 "cancel_requested INTEGER NOT NULL DEFAULT 0",
@@ -273,6 +275,31 @@ class PortalStore:
             self._audit_db(db, actor, "subject.updated", None, {"subject_id": str(subject_id), "status": new_status, "system_admin": bool(new_admin)})
             db.execute("COMMIT")
             return updated
+
+    def delete_subject_registration(self, subject_id: str, actor: str) -> None:
+        """Remove KODA registration while retaining Tracker identity and scan history."""
+        subject_id, actor = str(subject_id), str(actor)
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM subjects WHERE subject_id=?", (subject_id,)).fetchone()
+            if not row:
+                raise KeyError("subject not found")
+            if row["status"] == "tombstoned":
+                raise ValueError("tombstoned subject cannot be deleted")
+            if subject_id == actor:
+                raise ValueError("cannot delete current administrator registration")
+            if row["system_admin"]:
+                admins = db.execute(
+                    "SELECT count(*) FROM subjects WHERE status='enabled' AND system_admin=1"
+                ).fetchone()[0]
+                if admins <= 1:
+                    raise ValueError("last enabled system administrator")
+            db.execute("DELETE FROM memberships WHERE subject_id=?", (subject_id,))
+            db.execute("DELETE FROM subjects WHERE subject_id=?", (subject_id,))
+            self._audit_db(db, actor, "subject.registration_deleted", None, {
+                "subject_id": subject_id, "memberships_deleted": True,
+            })
+            db.execute("COMMIT")
 
     def bootstrap(self, subject_id: str) -> dict:
         with self._db() as db:
@@ -592,6 +619,29 @@ class PortalStore:
                     raise ValueError("invalid source snapshot")
                 snapshot.update(source_snapshot)
             run_id, revision_id, now = str(uuid.uuid4()), str(uuid.uuid4()), self._now()
+            if snapshot.get("gitlab_mapping_id"):
+                # Allocate under BEGIN IMMEDIATE; tombstoned runs still reserve
+                # their version so deletion/restart cannot reuse a result branch.
+                day = dt.datetime.fromisoformat(now).astimezone(dt.timezone(dt.timedelta(hours=9))).date()
+                start = dt.datetime.combine(day, dt.time(), dt.timezone(dt.timedelta(hours=9)))
+                previous = db.execute(
+                    "SELECT snapshot_json FROM scan_runs WHERE project_id=? AND requested_by=? "
+                    "AND created_at>=? AND created_at<?",
+                    (str(project_id), str(subject_id), start.astimezone(dt.timezone.utc).isoformat(),
+                     (start + dt.timedelta(days=1)).astimezone(dt.timezone.utc).isoformat()),
+                ).fetchall()
+                version = 1 + max((int(json.loads(row[0]).get("gitlab_result_version", 0)) for row in previous), default=0)
+                project_name = db.execute("SELECT name FROM projects WHERE project_id=?", (str(project_id),)).fetchone()[0]
+                display = db.execute("SELECT display FROM subjects WHERE subject_id=?", (str(subject_id),)).fetchone()[0]
+                # Keep Korean names readable, but exclude Git ref syntax and
+                # bound UTF-8 length. Project ID disambiguates normalized names.
+                slug = re.sub(r"[^\w-]+", "-", project_name, flags=re.UNICODE).strip("-_")
+                slug = slug.encode("utf-8")[:72].decode("utf-8", errors="ignore") or "project"
+                snapshot.update({
+                    "project_name": project_name, "requested_by_display": display,
+                    "gitlab_result_date": day.isoformat(), "gitlab_result_version": version,
+                    "gitlab_result_branch": f"koda/results/{day:%Y%m%d}/{slug}-{str(project_id)[:8]}/{subject_id}/v{version}",
+                })
             db.execute(
                 "INSERT INTO scan_runs(run_id,project_id,round_number,status,standard,standard_category,input_id,policy_version,requested_by,snapshot_json,created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -658,7 +708,7 @@ class PortalStore:
             db.execute("UPDATE tracker_deliveries SET status='pending',updated_at=? WHERE status='sending'", (self._now(),))
             return [row[0] for row in db.execute(
                 "SELECT d.run_id FROM tracker_deliveries d JOIN scan_runs r USING(run_id) "
-                "WHERE d.status='pending' AND r.status='completed' ORDER BY d.created_at"
+                "WHERE d.status='pending' AND r.status='completed' AND r.deleted_at IS NULL ORDER BY d.created_at"
             )]
 
     def recover_gitlab_results(self) -> list[str]:
@@ -666,7 +716,7 @@ class PortalStore:
             db.execute("UPDATE tracker_deliveries SET gitlab_result_status='pending',updated_at=? WHERE gitlab_result_status='sending'", (self._now(),))
             return [row[0] for row in db.execute(
                 "SELECT d.run_id FROM tracker_deliveries d JOIN scan_runs r USING(run_id) "
-                "WHERE d.gitlab_result_status='pending' AND d.status='completed' AND r.status='completed' ORDER BY d.created_at"
+                "WHERE d.gitlab_result_status='pending' AND d.status='completed' AND r.status='completed' AND r.deleted_at IS NULL ORDER BY d.created_at"
             )]
 
     def cleanup_input_for_run(self, run_id: str) -> bool:
@@ -701,8 +751,8 @@ class PortalStore:
     def complete_run(self, run_id: str, result: dict | None = None, error: str | None = None) -> None:
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
-            current = db.execute("SELECT cancel_requested,snapshot_json FROM scan_runs WHERE run_id=?", (str(run_id),)).fetchone()
-            if not current:
+            current = db.execute("SELECT cancel_requested,snapshot_json,deleted_at FROM scan_runs WHERE run_id=?", (str(run_id),)).fetchone()
+            if not current or current["deleted_at"] is not None:
                 db.execute("ROLLBACK")
                 raise KeyError("run not found")
             cancelled = bool(current["cancel_requested"])
@@ -742,7 +792,7 @@ class PortalStore:
             db.execute("BEGIN IMMEDIATE")
             changed = db.execute(
                 "UPDATE tracker_deliveries SET status='sending',attempts=attempts+1,last_error=NULL,updated_at=? "
-                "WHERE run_id=? AND status=? AND EXISTS(SELECT 1 FROM scan_runs WHERE run_id=? AND status='completed')",
+                "WHERE run_id=? AND status=? AND EXISTS(SELECT 1 FROM scan_runs WHERE run_id=? AND status='completed' AND deleted_at IS NULL)",
                 (now, str(run_id), expected, str(run_id)),
             ).rowcount
             row = db.execute("SELECT * FROM tracker_deliveries WHERE run_id=?", (str(run_id),)).fetchone()
@@ -787,8 +837,8 @@ class PortalStore:
             db.execute("BEGIN IMMEDIATE")
             changed = db.execute(
                 f"UPDATE tracker_deliveries SET gitlab_result_status='sending',gitlab_result_attempts=gitlab_result_attempts+1,gitlab_result_last_error=NULL,updated_at=? "
-                f"WHERE run_id=? AND gitlab_result_status IN ({placeholders}) AND status='completed'",
-                (self._now(), str(run_id), *expected),
+                f"WHERE run_id=? AND gitlab_result_status IN ({placeholders}) AND status='completed' AND EXISTS(SELECT 1 FROM scan_runs WHERE run_id=? AND status='completed' AND deleted_at IS NULL)",
+                (self._now(), str(run_id), *expected, str(run_id)),
             ).rowcount
             row = db.execute("SELECT * FROM tracker_deliveries WHERE run_id=?", (str(run_id),)).fetchone()
             if not row:
@@ -826,7 +876,7 @@ class PortalStore:
             db.execute("UPDATE gitlab_issue_deliveries SET status='pending',updated_at=? WHERE status='sending'", (self._now(),))
             return [row[0] for row in db.execute(
                 "SELECT d.run_id FROM gitlab_issue_deliveries d JOIN scan_runs r USING(run_id) "
-                "WHERE d.status='pending' AND r.status='completed' ORDER BY d.created_at"
+                "WHERE d.status='pending' AND r.status='completed' AND r.deleted_at IS NULL ORDER BY d.created_at"
             )]
 
     def claim_gitlab_issue_delivery(self, run_id: str, *, retry: bool = False) -> dict:
@@ -842,7 +892,7 @@ class PortalStore:
             placeholders = ",".join("?" for _ in expected)
             changed = db.execute(
                 f"UPDATE gitlab_issue_deliveries SET status='sending',attempts=attempts+1,last_error=NULL,updated_at=? "
-                f"WHERE run_id=? AND status IN ({placeholders}) AND EXISTS(SELECT 1 FROM scan_runs WHERE run_id=? AND status='completed')",
+                f"WHERE run_id=? AND status IN ({placeholders}) AND EXISTS(SELECT 1 FROM scan_runs WHERE run_id=? AND status='completed' AND deleted_at IS NULL)",
                 (now, str(run_id), *expected, str(run_id)),
             ).rowcount
             row = db.execute("SELECT * FROM gitlab_issue_deliveries WHERE run_id=?", (str(run_id),)).fetchone()
@@ -949,7 +999,7 @@ class PortalStore:
 
     def run(self, run_id: str) -> dict:
         with self._db() as db:
-            row = db.execute("SELECT * FROM scan_runs WHERE run_id=?", (str(run_id),)).fetchone()
+            row = db.execute("SELECT * FROM scan_runs WHERE run_id=? AND deleted_at IS NULL", (str(run_id),)).fetchone()
         if not row:
             raise KeyError("run not found")
         result = dict(row)
@@ -960,7 +1010,7 @@ class PortalStore:
 
     def list_runs(self, project_id: str) -> list[dict]:
         with self._db() as db:
-            rows = db.execute("SELECT * FROM scan_runs WHERE project_id=? ORDER BY round_number DESC", (str(project_id),))
+            rows = db.execute("SELECT * FROM scan_runs WHERE project_id=? AND deleted_at IS NULL ORDER BY round_number DESC", (str(project_id),))
             runs = []
             for row in rows:
                 value = dict(row)
@@ -969,6 +1019,29 @@ class PortalStore:
                 value["scan_scope"] = snapshot.get("scan_scope", "all")
                 runs.append(value)
             return runs
+
+    def delete_run(self, run_id: str, actor: str) -> None:
+        """Logically remove a terminal local result without touching external deliveries."""
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            run = db.execute("SELECT * FROM scan_runs WHERE run_id=?", (str(run_id),)).fetchone()
+            if not run or run["deleted_at"] is not None:
+                raise KeyError("run not found")
+            if run["status"] not in TERMINAL_RUN_STATUSES:
+                raise ValueError("실행 중인 점검은 삭제할 수 없습니다")
+            sending = db.execute(
+                "SELECT 1 FROM tracker_deliveries WHERE run_id=? AND (status='sending' OR gitlab_result_status='sending') "
+                "UNION ALL SELECT 1 FROM gitlab_issue_deliveries WHERE run_id=? AND status='sending' "
+                "UNION ALL SELECT 1 FROM gitlab_issue_links WHERE run_id=? AND status='creating' LIMIT 1",
+                (str(run_id), str(run_id), str(run_id)),
+            ).fetchone()
+            if sending:
+                raise ValueError("결과 전송 중인 점검은 삭제할 수 없습니다")
+            now = self._now()
+            db.execute("UPDATE scan_runs SET deleted_at=?,result_json=NULL WHERE run_id=? AND deleted_at IS NULL", (now, str(run_id)))
+            db.execute("UPDATE analysis_revisions SET result_json=NULL WHERE run_id=?", (str(run_id),))
+            self._audit_db(db, actor, "scan.deleted", run["project_id"], {"run_id": str(run_id), "round_number": run["round_number"]})
+            db.execute("COMMIT")
 
     def audit_events(self, limit: int | None = 100) -> list[dict]:
         with self._db() as db:

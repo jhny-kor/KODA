@@ -36,10 +36,12 @@ KODA 웹 포털의 화면·분석 탭·회차 비교·접근 관리 흐름은
 | 문서 | 내용 |
 | --- | --- |
 | [offline-delivery.md](install/offline-delivery.md) | 폐쇄망 배포 개요 — Docker 전달물 / Linux tarball / Windows 설치본+데이터 zip 비교, 점검 파이프라인, 종료 코드, 빌드 옵션 |
+| [koda-tracker-linux-operations.md](install/koda-tracker-linux-operations.md) | KODA·KODA SBOM Tracker Linux 설치·패치·백업·복구 운영서 |
 | [macos.md](install/macos.md) | macOS 설치 (스크립트 설치) |
 | [linux.md](install/linux.md) | Linux 설치·운영 가이드 (호스트 설치, 대시보드, Docker 전달물) |
 | [koda-web-portal.md](koda-web-portal.md) | KODA 웹 포털 실제 예시 화면, 결과 분류 탭과 기능 흐름 |
 | [폐쇄망 설치 장애 대응](../platforms/linux/suite/TROUBLESHOOTING.md) | 설치 중 발생한 EOF·413·흰 화면·로그인·API 키·분석 실패·안전한 재설치 대응 |
+| [Linux 포털 패치 안내](../platforms/linux/patch/README.md) | 기존 통합 포털에 이미지·코드 패치를 적용하고 롤백하는 절차 |
 | [windows.md](install/windows.md) | Windows 설치본 빌드·설치 및 취약점 데이터 패키지 연결 |
 | [vuln-data-refresh.md](install/vuln-data-refresh.md) | Windows 취약점 데이터(`koda-vuln-data-<date>.zip`) 현행화 절차 |
 | [usage.md](usage.md) | 공통 Python CLI 사용법 — 설정, 보고서, CI, 자동 교정과 권한 있는 네트워크 점검 |

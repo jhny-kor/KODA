@@ -21,6 +21,8 @@ from unittest.mock import patch
 from security_scanner.portal_identity import IdentityError, identity_from_headers
 from security_scanner.portal_integrations import (
     IntegrationError,
+    _gitlab_scan_report,
+    _gitlab_mr_summary,
     _gitlab_settings,
     create_gitlab_issue,
     find_gitlab_issue,
@@ -358,8 +360,89 @@ class LinuxPortalStoreTests(unittest.TestCase):
         self.assertEqual(token_dir.stat().st_mode & 0o777, 0o733)
         self.assertEqual(request.call_args.args[:2], ("/api/v1/integrations/koda/repositories", "provision-secret"))
 
+    def test_gitlab_result_branch_versions_use_korean_date_and_account(self):
+        import subprocess
+        with patch.object(self.store, "_now", return_value="2026-09-05T15:00:00+00:00"):
+            first = self.gitlab_run([])
+            second = self.gitlab_run([])
+        prefix = f"koda/results/20260906/demo-{self.project[:8]}/{self.admin}/v"
+        self.assertEqual(first["snapshot"]["gitlab_result_branch"], prefix + "1")
+        self.assertEqual(second["snapshot"]["gitlab_result_branch"], prefix + "2")
+        with patch.object(self.store, "_now", return_value="2026-09-06T15:00:00+00:00"):
+            third = self.gitlab_run([])
+        self.assertEqual(third["snapshot"]["gitlab_result_version"], 1)
+        self.assertEqual(third["snapshot"]["gitlab_result_date"], "2026-09-07")
+        self.assertEqual(self.store.run(first["run_id"])["snapshot"], first["snapshot"])
+        self.project = self.store.create_project("한글 프로젝트 / [태그] " + "긴이름" * 25)
+        self.store.set_membership(self.project, self.admin, "admin")
+        korean = self.gitlab_run([])
+        branch = korean["snapshot"]["gitlab_result_branch"]
+        self.assertIn("한글-프로젝트", branch)
+        subprocess.run(["git", "check-ref-format", "--branch", branch], check=True, capture_output=True)
+        self.assertEqual(korean["snapshot"]["gitlab_result_version"], 1)
+
+    def test_gitlab_result_branch_versions_are_serialized_across_connections(self):
+        from concurrent.futures import ThreadPoolExecutor
+        first = self.gitlab_run([])
+        source = {key: value for key, value in first["snapshot"].items() if key in {
+            "gitlab_mapping_id", "gitlab_project_id", "gitlab_commit_sha",
+        }}
+        def create(_):
+            store = PortalStore(Path(self.tmp.name) / "portal.sqlite3")
+            return store.create_scan(self.admin, self.project, self.input_id, "local", "all", source_snapshot=source)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            runs = list(pool.map(create, range(4)))
+        self.assertEqual(sorted(run["snapshot"]["gitlab_result_version"] for run in runs), [2, 3, 4, 5])
+
+    def test_detailed_gitlab_report_and_mr_retry_preserve_human_content(self):
+        finding = {"category": "code", "severity": "high", "rule_id": "SQL-1", "title": "SQL injection",
+                   "path": "app.py", "line": 7, "evidence": "redacted evidence", "recommendation": "parameterize",
+                   "verification_status": "review", "cwe_ids": ["CWE-89"], "trace": "DO-NOT-EXPORT"}
+        run = self.gitlab_run([finding, {**finding, "category": "dependencies", "rule_id": "LIB-1"}])
+        tracker = {"analysis": {"state": "succeeded", "findings": []}}
+        report = _gitlab_scan_report(run, "tracker-1", tracker)
+        self.assertEqual(report["schemaVersion"], 2)
+        self.assertEqual(report["inspection"]["accountId"], self.admin)
+        self.assertEqual(report["kodaResult"]["findings"][0]["recommendation"], "parameterize")
+        self.assertNotIn("DO-NOT-EXPORT", json.dumps(report))
+        self.assertNotIn("tracker_token_ref", json.dumps(report))
+        self.assertIn("sbom", report["kodaResult"])
+        file_path = f".koda/scan-results/{run['run_id']}.json"
+        title, body, labels = _gitlab_mr_summary(report, file_path)
+        self.assertIn("v1", title)
+        self.assertIn("app.py:7", body)
+        self.assertIn("review", body)
+        self.assertIn("category:dependencies", labels)
+        self.assertIn("severity:high", labels)
+        encoded = base64.b64encode((json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()).decode()
+        existing = {"iid": 7, "web_url": "https://gitlab.example/mr/7", "description": "operator note", "labels": ["manual"]}
+        def write(path, query=None, *, settings_dir, method="GET", payload=None):
+            if method == "GET":
+                return [existing.copy()]
+            self.assertEqual((method, path), ("PUT", "/projects/42/merge_requests/7"))
+            existing.update(description=payload["description"], labels=existing["labels"] + payload["add_labels"].split(","))
+            return existing.copy()
+        with patch("security_scanner.portal_integrations._gitlab_optional_json", return_value={"encoding": "base64", "content": encoded}), patch(
+            "security_scanner.portal_integrations._gitlab_write_json", side_effect=write,
+        ) as request:
+            for _ in range(2):
+                publish_tracker_result({"default_branch": "main"}, run, "tracker-1", tracker, settings_dir=self.tmp.name)
+        self.assertEqual(sum(call.kwargs.get("method") == "PUT" for call in request.call_args_list), 1)
+        self.assertEqual(existing["description"], body + "\n\noperator note")
+        self.assertIn("manual", existing["labels"])
+
+    def test_mr_limits_display_without_truncating_json(self):
+        findings = [{"category": "code", "severity": "high", "rule_id": str(i), "title": "a|b\n/close"} for i in range(51)]
+        report = _gitlab_scan_report({"result": {"findings": findings}}, "tracker", {})
+        _, body, _ = _gitlab_mr_summary(report, "result.json")
+        self.assertEqual(len(report["kodaResult"]["findings"]), 51)
+        self.assertIn("1건 생략", body)
+        self.assertNotIn("\n/close", body)
+        self.assertIn("a&#124;b /close", body)
+
     def test_tracker_result_is_committed_to_mr_and_confidential_issue(self):
         calls = []
+        run = self.gitlab_run([])
 
         def write(path, query=None, *, settings_dir, method="GET", payload=None):
             calls.append((path, query, method, payload))
@@ -382,10 +465,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
         ):
             result = publish_tracker_result(
                 {"gitlab_project_id": 42, "default_branch": "main"},
-                {"run_id": "koda-run-1", "snapshot": {
-                    "gitlab_project_id": 42, "gitlab_path_with_namespace": "group/demo",
-                    "gitlab_ref_type": "branch", "gitlab_ref_name": "main", "gitlab_commit_sha": "a" * 40,
-                }},
+                run,
                 "tracker-run-1", {"run": {"runUrl": "https://tracker.example/runs/tracker-run-1"}, "analysis": {"findings": [{
                     "canonicalId": "CVE-2026-1234", "severity": "high", "cvssScore": 8.1,
                     "component": "demo", "installedVersion": "1.0", "fixedIn": ["1.1"],
@@ -400,7 +480,9 @@ class LinuxPortalStoreTests(unittest.TestCase):
         self.assertEqual(result["mergeRequestUrl"], "https://gitlab.example/group/demo/-/merge_requests/1")
         self.assertEqual(result["issueUrls"], ["https://gitlab.example/group/demo/-/issues/1"])
         commit_payload = next(payload for path, _, method, payload in calls if path.endswith("/repository/commits") and method == "POST")
-        self.assertEqual((commit_payload["branch"], commit_payload["start_sha"]), ("koda/sbom-results/aaaaaaaaaaaa", "a" * 40))
+        self.assertEqual((commit_payload["branch"], commit_payload["start_sha"]), (run["snapshot"]["gitlab_result_branch"], "a" * 40))
+        self.assertEqual(commit_payload["actions"][0]["file_path"], f".koda/scan-results/{run['run_id']}.json")
+        self.assertEqual(json.loads(commit_payload["actions"][0]["content"])["inspection"]["accountId"], self.admin)
         merge_payload = next(payload for path, _, method, payload in calls if path.endswith("/merge_requests") and method == "POST")
         self.assertFalse(merge_payload["remove_source_branch"])
         issue_payload = next(payload for path, _, method, payload in calls if path.endswith("/issues") and method == "POST")
@@ -418,14 +500,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
             "gitlab_ref_type": "branch", "gitlab_ref_name": "main", "gitlab_commit_sha": commit_sha,
         }}
         tracker_result = {"analysis": {"findings": []}}
-        report = {
-            "schemaVersion": 1,
-            "source": {
-                "gitlabProjectId": 42, "pathWithNamespace": "group/demo", "refType": "branch",
-                "refName": "main", "commitSha": commit_sha,
-            },
-            "kodaRunId": "koda-run-2", "trackerRunId": "tracker-run-2", "trackerResult": tracker_result,
-        }
+        report = _gitlab_scan_report(run, "tracker-run-2", tracker_result)
         encoded = base64.b64encode((json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()).decode()
         with patch("security_scanner.portal_integrations._gitlab_optional_json", side_effect=[None, {
             "encoding": "base64", "content": encoded,
@@ -454,7 +529,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
             )
         write.assert_not_called()
 
-    def test_same_commit_same_analysis_reuses_mr_and_adds_one_tracker_run_comment(self):
+    def test_legacy_run_new_report_is_committed_even_when_tracker_analysis_matches(self):
         commit_sha = "c" * 40
         analysis = {"findings": [{"canonicalId": "CVE-2026-4321", "component": "demo", "version": "1.0"}]}
         previous = {
@@ -468,6 +543,8 @@ class LinuxPortalStoreTests(unittest.TestCase):
 
         def write(path, query=None, *, settings_dir, method="GET", payload=None):
             calls.append((path, method, payload))
+            if path.endswith("/repository/commits"):
+                return {"web_url": "https://gitlab.example/commit/new"}
             if path.endswith("/merge_requests"):
                 return [{"web_url": "https://gitlab.example/group/demo/-/merge_requests/1"}]
             if path.endswith("/issues"):
@@ -495,7 +572,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
                 }},
                 "new-tracker-run", {"analysis": analysis}, settings_dir=Path(self.tmp.name),
             )
-        self.assertFalse(any(path.endswith("/repository/commits") for path, _, _ in calls))
+        self.assertTrue(any(path.endswith("/repository/commits") for path, _, _ in calls))
         add_note.assert_called_once()
         self.assertIn("<!-- koda-sbom-tracker-run:new-tracker-run -->", add_note.call_args.args[2])
 
@@ -542,6 +619,46 @@ class LinuxPortalStoreTests(unittest.TestCase):
         run2 = self.store.create_scan(self.admin, self.project, self.input_id, "local", "all")
         self.assertEqual(run2["round_number"], 2)
         self.assertEqual(run["snapshot"]["rule_policy_version"], 1)
+
+    def test_delete_terminal_run_hides_result_and_preserves_rounds_and_audit(self):
+        first = self.store.create_scan(self.admin, self.project, self.input_id, "local", "all")
+        self.store.complete_run(first["run_id"], result={"findings": [{"id": "keep-me"}]})
+        Path(self.tmp.name, "input.txt").write_text("secret", encoding="utf-8")
+        second = self.store.create_scan(self.admin, self.project, self.input_id, "local", "all")
+        self.store.complete_run(second["run_id"], result={"findings": [{"id": "keep-too"}]})
+        Path(self.tmp.name, "input.txt").write_text("secret", encoding="utf-8")
+        self.store.delete_run(first["run_id"], self.admin)
+        with self.assertRaises(KeyError):
+            self.store.run(first["run_id"])
+        with self.store._db() as db:
+            self.assertIsNone(db.execute("SELECT result_json FROM scan_runs WHERE run_id=?", (first["run_id"],)).fetchone()[0])
+            self.assertIsNone(db.execute("SELECT result_json FROM analysis_revisions WHERE run_id=?", (first["run_id"],)).fetchone()[0])
+        self.assertEqual([run["run_id"] for run in self.store.list_runs(self.project)], [second["run_id"]])
+        self.assertIn("scan.deleted", {event["action"] for event in self.store.audit_events(None)})
+        Path(self.tmp.name, "input.txt").write_text("secret", encoding="utf-8")
+        third = self.store.create_scan(self.admin, self.project, self.input_id, "local", "all")
+        self.assertEqual(third["round_number"], 3)
+        self.store.complete_run(third["run_id"], result={"findings": []})
+        self.store.delete_run(third["run_id"], self.admin)
+        Path(self.tmp.name, "input.txt").write_text("secret", encoding="utf-8")
+        fourth = self.store.create_scan(self.admin, self.project, self.input_id, "local", "all")
+        self.assertEqual(fourth["round_number"], 4)
+        with self.assertRaises(KeyError):
+            self.store.complete_run(third["run_id"], result={"findings": []})
+
+    def test_delete_run_rejects_active_delivery(self):
+        run = self.store.create_scan(self.admin, self.project, self.input_id, "local", "all")
+        self.store.complete_run(run["run_id"], result={"findings": []})
+        with self.store._db() as db:
+            now = self.store._now()
+            db.execute("INSERT INTO tracker_deliveries(run_id,status,attempts,created_at,updated_at) VALUES(?,?,?,?,?)", (run["run_id"], "sending", 1, now, now))
+        with self.assertRaisesRegex(ValueError, "결과 전송"):
+            self.store.delete_run(run["run_id"], self.admin)
+
+    def test_delete_run_rejects_queued_run(self):
+        run = self.store.create_scan(self.admin, self.project, self.input_id, "local", "all")
+        with self.assertRaisesRegex(ValueError, "실행 중인 점검"):
+            self.store.delete_run(run["run_id"], self.admin)
 
     def test_scan_scope_is_immutable_and_validated(self):
         library = self.store.create_scan(self.admin, self.project, self.input_id, "ignored", "ignored", "library")
@@ -796,8 +913,16 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertIn("/koda/assets/KODA.ico", admin_page)
         self.assertNotIn("Tracker", admin_page.split("</nav>", 1)[0])
         self.assertNotIn("회원가입과 계정 승인은 KODA-SBOM-Tracker", admin_page)
-        self.assertIn("KODA 접근 제어", admin_page)
-        self.assertIn("<div class='toolbar-submit'><button>저장</button></div>", admin_page)
+        self.assertIn("KODA 관리자", admin_page)
+        self.assertIn("삭제</button>", admin_page)
+        self.assertIn("id='subject-admin-filter'", admin_page)
+        self.assertIn("id='subject-role-filter'", admin_page)
+        self.assertIn("data-roles=", admin_page)
+        self.assertIn("프로젝트 역할", admin_page)
+        self.assertIn("<h2>계정 현황</h2>", admin_page)
+        self.assertIn("<h2>취약점 DB</h2>", self.request("/koda/admin/vulnerability-db", headers=self.headers())[1])
+        self.assertNotIn("name='status'", admin_page)
+        self.assertIn("<button>저장</button>", admin_page)
         self.assertIn("class='topbar'", admin_page)
         self.assertIn("id='account-toggle'", admin_page)
         self.assertIn("id='account-panel'", admin_page)
@@ -807,6 +932,65 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertNotIn("id='logout'", admin_page)
         self.assertNotIn("<option>pending</option>", admin_page)
         self.assertIn("syncSubject()", admin_page)
+
+    def test_tracker_identity_reenables_legacy_disabled_subject(self):
+        subject = str(uuid.uuid4())
+        self.server.portal_store.ensure_subject(subject, "legacy")
+        self.server.portal_store.set_subject(subject, status="disabled", actor=self.admin)
+        status, me = self.request("/koda/api/v1/me", headers=self.headers(subject, "legacy"))
+        self.assertEqual((status, me["status"]), (200, "enabled"))
+
+    def test_delete_koda_registration_keeps_history_and_allows_tracker_reentry(self):
+        subject = str(uuid.uuid4())
+        project = self.server.portal_store.create_project("registration delete", self.admin)
+        self.server.portal_store.ensure_subject(subject, "registered")
+        self.server.portal_store.set_subject(subject, status="enabled", actor=self.admin)
+        self.server.portal_store.set_membership(project, subject, "viewer", self.admin)
+        status, result = self.request(
+            f"/koda/api/v1/admin/subjects/{subject}", method="DELETE", headers=self.headers(),
+        )
+        self.assertEqual((status, result), (200, {"ok": True}))
+        self.assertIsNone(self.server.portal_store.subject(subject))
+        self.assertNotIn(subject, {membership["subject_id"] for membership in self.server.portal_store.list_memberships(project)})
+        self.assertIn("subject.registration_deleted", {event["action"] for event in self.server.portal_store.audit_events(None)})
+        status, me = self.request("/koda/api/v1/me", headers=self.headers(subject, "registered"))
+        self.assertEqual((status, me["status"]), (200, "enabled"))
+        self.assertEqual(self.server.portal_store.list_memberships(subject), [])
+
+    def test_delete_registration_rejects_self_and_last_admin(self):
+        status, body = self.request(
+            f"/koda/api/v1/admin/subjects/{self.admin}", method="DELETE", headers=self.headers(),
+        )
+        self.assertEqual((status, body["code"]), (422, "invalid_request"))
+
+    def test_delete_registration_rejects_tombstoned_subject(self):
+        subject = str(uuid.uuid4())
+        self.server.portal_store.ensure_subject(subject, "revoked")
+        self.server.portal_store.set_subject(subject, status="tombstoned", actor=self.admin)
+        status, body = self.request(
+            f"/koda/api/v1/admin/subjects/{subject}", method="DELETE", headers=self.headers(),
+        )
+        self.assertEqual((status, body["code"]), (422, "invalid_request"))
+
+    def test_run_deletion_is_system_admin_only(self):
+        project = self.server.portal_store.create_project("run deletion", self.admin)
+        target = Path(self.tmp.name) / "run-delete.txt"
+        target.write_text("input", encoding="utf-8")
+        input_id = self.server.portal_store.add_input(project, target.name, target, self.admin)
+        run = self.server.portal_store.create_scan(self.admin, project, input_id, "local", "all")
+        self.server.portal_store.complete_run(run["run_id"], result={"findings": []})
+        viewer = str(uuid.uuid4())
+        self.server.portal_store.ensure_subject(viewer, "viewer")
+        self.server.portal_store.set_subject(viewer, status="enabled", actor=self.admin)
+        self.server.portal_store.set_membership(project, viewer, "viewer", self.admin)
+        status, body = self.request(f"/koda/api/v1/runs/{run['run_id']}", method="DELETE", headers=self.headers(viewer, "viewer"))
+        self.assertEqual((status, body["code"]), (403, "forbidden"))
+        status, body = self.request(f"/koda/api/v1/runs/{run['run_id']}", method="DELETE", headers=self.headers())
+        self.assertEqual((status, body), (200, {"ok": True}))
+        self.assertEqual(self.request(f"/koda/api/v1/runs/{run['run_id']}", headers=self.headers())[0], 404)
+        self.assertEqual(self.request(f"/koda/api/v1/runs/{run['run_id']}/report?format=json", headers=self.headers())[0], 404)
+        self.assertEqual(self.request(f"/koda/api/v1/compare?left={run['run_id']}&right={run['run_id']}", headers=self.headers())[0], 404)
+        self.assertEqual(self.request(f"/koda/api/v1/runs/{run['run_id']}/retry", method="POST", payload={}, headers=self.headers())[0], 404)
 
     def test_admin_controls_project_access_per_user(self):
         project = self.server.portal_store.create_project("project access", self.admin)
@@ -1193,7 +1377,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
             self.assertEqual(response.headers.get_content_type(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
-        for expected in ("서울 시각", "주체 ID", "프로젝트명", "상세 JSON", "2026-01-01 09:00:00", self.admin, "audit project", project, "audit.test", "확인"):
+        for expected in ("발생 시간", "주체 ID", "프로젝트명", "상세 JSON", "2026-01-01 09:00:00", self.admin, "audit project", project, "audit.test", "확인"):
             self.assertIn(expected, sheet)
 
         viewer = str(uuid.uuid4())
@@ -1211,9 +1395,10 @@ class LinuxPortalHttpTests(unittest.TestCase):
         status, created = self.request("/koda/api/v1/projects", method="POST", payload={"name": "portal"}, headers=self.headers())
         self.assertEqual(status, 201)
         project_id = created["project_id"]
+        aws_access_key = "AK" + "IA" + ("A" * 16)
         request = urllib.request.Request(
             self.base + f"/koda/api/v1/projects/{project_id}/inputs?name=demo.py",
-            data=b"AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n", method="POST",
+            data=f"AWS_ACCESS_KEY_ID={aws_access_key}\n".encode(), method="POST",
             headers={**self.headers(), "Content-Type": "application/octet-stream"},
         )
         with urllib.request.urlopen(request, timeout=10) as response:

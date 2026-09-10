@@ -23,6 +23,7 @@ from security_scanner.java_vulnerability_scan import JavaScanOptions, Vulnerabil
 from security_scanner.grype_adapter import GrypeMatch, GrypeResult
 from security_scanner.java_vulnerability_reporting import write_reports
 from security_scanner.syft_adapter import run_syft
+from security_scanner.xml_safe import XmlInputError, parse_xml
 
 
 def _write_jar(path: Path, files: dict[str, str | bytes]) -> None:
@@ -32,6 +33,10 @@ def _write_jar(path: Path, files: dict[str, str | bytes]) -> None:
 
 
 class JavaInventoryTests(unittest.TestCase):
+    def test_xml_metadata_rejects_dtd_and_entity_declarations(self) -> None:
+        with self.assertRaises(XmlInputError):
+            parse_xml(b'<!DOCTYPE project [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><project>&xxe;</project>')
+
     def test_manifest_version_is_resolved_without_maven_coordinates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

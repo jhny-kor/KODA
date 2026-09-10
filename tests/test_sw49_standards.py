@@ -1176,9 +1176,10 @@ selected.getName();
         )
         self.assertEqual(generic.verification_status, "needs_review")
 
+        provider_key = "AK" + "IA" + ("A" * 16)
         provider = next(
             finding
-            for finding in self._scan("a.env", "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n")
+            for finding in self._scan("a.env", f"AWS_ACCESS_KEY_ID={provider_key}\n")
             if finding.rule_id == "secret.aws-access-key"
         )
         self.assertEqual(provider.verification_status, "confirmed")

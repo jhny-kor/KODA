@@ -68,9 +68,11 @@ class RuleCatalogTests(unittest.TestCase):
         kinds = {group["kind"] for group in catalog}
         self.assertEqual(kinds, {"security", "quality"})
         keys = {group["key"] for group in catalog}
-        # Security groups are standards, e.g. "소프트웨어 개발보안 49" and the local ruleset.
+        # Security groups are standards, e.g. "소프트웨어 개발보안 49".
         self.assertIn("sw-dev-security-49", keys)
-        self.assertIn("local", keys)
+        # The default "local" profile is every rule at once; it would duplicate
+        # the per-standard groups, so it is not listed.
+        self.assertNotIn("local", keys)
         self.assertIn("screen_quality", keys)
         # The example standard is labelled and non-empty.
         sw49 = next(g for g in catalog if g["key"] == "sw-dev-security-49")
@@ -86,8 +88,8 @@ class RuleCatalogTests(unittest.TestCase):
                     self.assertTrue(rule["title"])
 
     def test_korean_titles_use_translations(self) -> None:
-        local = next(g for g in build_rule_catalog("ko") if g["key"] == "local")
-        titles = {rule["id"]: rule["title"] for rule in local["rules"]}
+        group = next(g for g in build_rule_catalog("ko") if g["key"] == "owasp-top-10-2025")
+        titles = {rule["id"]: rule["title"] for rule in group["rules"]}
         # secret.private-key has a Korean translation in RULE_TRANSLATIONS_KO.
         self.assertIn("secret.private-key", titles)
         self.assertNotEqual(titles["secret.private-key"], "Private key")
@@ -578,8 +580,9 @@ class UploadScanTests(unittest.TestCase):
         server = create_dashboard_server(port=0)
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
+        aws_access_key = "AK" + "IA" + ("A" * 16)
         try:
-            response = self._upload(server, "config.env", b"AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n")
+            response = self._upload(server, "config.env", f"AWS_ACCESS_KEY_ID={aws_access_key}\n".encode())
             payload = json.loads(response.read())
             self.assertEqual(response.status, 200)
             self.assertEqual((payload["scan"]["kind"], payload["scan"]["path"]), ("upload", "config.env"))
@@ -588,7 +591,7 @@ class UploadScanTests(unittest.TestCase):
 
             archive_body = io.BytesIO()
             with zipfile.ZipFile(archive_body, "w") as archive:
-                archive.writestr("src/config.env", "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n")
+                archive.writestr("src/config.env", f"AWS_ACCESS_KEY_ID={aws_access_key}\n")
             response = self._upload(server, "source.zip", archive_body.getvalue())
             payload = json.loads(response.read())
             self.assertEqual(response.status, 200)

@@ -29,7 +29,7 @@ include = ["security_scanner", "security_scanner.*"]
 exclude = ["packaging", "platforms", "tests"]
 
 [tool.setuptools.package-data]
-security_scanner = ["assets/*.hwpx", "resources/sw49/*.json"]
+security_scanner = ["assets/*.hwpx", "assets/*.png", "resources/sw49/*.json"]
 
 [tool.unittest]
 testpaths = ["tests"]
