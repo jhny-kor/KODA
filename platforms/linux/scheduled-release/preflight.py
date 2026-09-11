@@ -33,6 +33,24 @@ class PreflightError(RuntimeError):
     pass
 
 
+def check_dashboard_mount(mount: dict, prefix: Path) -> None:
+    destination = str(mount.get("Destination", ""))
+    if destination in ("/run/koda/ssh", "/run/koda/schedule"):
+        source = Path(str(mount.get("Source", "")))
+        if mount.get("Type") != "bind" or mount.get("RW") is not False or not source.is_dir():
+            raise PreflightError(f"schedule mount must be an existing read-only bind directory: {destination}")
+        if destination == "/run/koda/schedule" and source.resolve() != (prefix / "data/koda-portal/schedule-auth").resolve():
+            raise PreflightError("unexpected schedule authentication mount source")
+        return
+    if destination != "/var/lib/koda" and not any(
+        destination == allowed.rstrip("/") or destination.startswith(allowed.rstrip("/") + "/")
+        for allowed in ("/run/secrets", "/run/koda/tracker-tokens")
+    ):
+        raise PreflightError("unexpected KODA mount; inspect custom runtime before patch")
+    if mount.get("Type") == "bind" and not Path(str(mount.get("Source", ""))).exists():
+        raise PreflightError("KODA bind mount source is missing")
+
+
 def command(args: list[str], *, input_text: str | None = None) -> str:
     try:
         result = subprocess.run(
@@ -223,14 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     if not (prefix / "data" / "koda-portal").exists():
         raise PreflightError("KODA portal data directory is missing")
     for mount in mounts:
-        destination = str(mount.get("Destination", ""))
-        if destination != "/var/lib/koda" and not any(
-            destination == allowed.rstrip("/") or destination.startswith(allowed.rstrip("/") + "/")
-            for allowed in ("/run/secrets", "/run/koda/tracker-tokens")
-        ):
-            raise PreflightError("unexpected KODA mount; inspect custom runtime before patch")
-        if mount.get("Type") == "bind" and not Path(str(mount.get("Source", ""))).exists():
-            raise PreflightError("KODA bind mount source is missing")
+        check_dashboard_mount(mount, prefix)
     check_backend_hashes(contract, containers, Path(__file__).resolve().parent)
     print(f"prefix={prefix}")
     print(f"project={project}")
