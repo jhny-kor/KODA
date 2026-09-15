@@ -8,6 +8,7 @@ import io
 import json
 import os
 import tempfile
+import tarfile
 import threading
 import time
 import unittest
@@ -366,12 +367,13 @@ class LinuxPortalStoreTests(unittest.TestCase):
         with patch.object(self.store, "_now", return_value="2026-09-05T15:00:00+00:00"):
             first = self.gitlab_run([])
             second = self.gitlab_run([])
-        prefix = f"koda/results/20260906/demo-{self.project[:8]}/{self.admin}/v"
+        prefix = "koda/results/demo/20260906/round-"
         self.assertEqual(first["snapshot"]["gitlab_result_branch"], prefix + "1")
         self.assertEqual(second["snapshot"]["gitlab_result_branch"], prefix + "2")
         with patch.object(self.store, "_now", return_value="2026-09-06T15:00:00+00:00"):
             third = self.gitlab_run([])
         self.assertEqual(third["snapshot"]["gitlab_result_version"], 1)
+        self.assertEqual(third["snapshot"]["gitlab_result_branch"], "koda/results/demo/20260907/round-1")
         self.assertEqual(third["snapshot"]["gitlab_result_date"], "2026-09-07")
         self.assertEqual(self.store.run(first["run_id"])["snapshot"], first["snapshot"])
         self.project = self.store.create_project("한글 프로젝트 / [태그] " + "긴이름" * 25)
@@ -951,12 +953,12 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertNotIn("<option>pending</option>", admin_page)
         self.assertIn("syncSubject()", admin_page)
 
-    def test_tracker_identity_reenables_legacy_disabled_subject(self):
+    def test_tracker_identity_preserves_legacy_disabled_subject(self):
         subject = str(uuid.uuid4())
         self.server.portal_store.ensure_subject(subject, "legacy")
         self.server.portal_store.set_subject(subject, status="disabled", actor=self.admin)
         status, me = self.request("/koda/api/v1/me", headers=self.headers(subject, "legacy"))
-        self.assertEqual((status, me["status"]), (200, "enabled"))
+        self.assertEqual((status, me["status"]), (200, "disabled"))
 
     def test_delete_koda_registration_keeps_history_and_allows_tracker_reentry(self):
         subject = str(uuid.uuid4())
@@ -1121,8 +1123,12 @@ class LinuxPortalHttpTests(unittest.TestCase):
         def fake_download(_project_id, _sha, target, *, max_bytes, settings_dir=None):
             self.assertEqual(max_bytes, MAX_INPUT_BYTES)
             self.assertEqual(settings_dir, Path(self.tmp.name) / "integrations")
-            target.write_bytes(b"archive")
-            return "b" * 64, 7
+            with tarfile.open(target, "w:gz") as archive:
+                body = b"# valid fixture\n"
+                info = tarfile.TarInfo("demo-main-aaaaaaaa/src/app.py")
+                info.size = len(body)
+                archive.addfile(info, io.BytesIO(body))
+            return "b" * 64, target.stat().st_size
 
         with patch("security_scanner.linux_portal.resolve_gitlab_ref", return_value="a" * 40), patch(
             "security_scanner.linux_portal.download_gitlab_archive", side_effect=fake_download
@@ -1690,8 +1696,8 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertIn("라이브러리 취약점 보고서", result_page)
         status, main = self.request(f"/koda/api/v1/runs/{run['run_id']}/report.html", headers=self.headers())
         self.assertEqual(status, 200)
-        self.assertIn("라이브러리 취약점 분석 요약", main)
-        self.assertIn("LIBRARY VULNERABILITY REPORT", main)
+        self.assertIn("Java 라이브러리 취약점 요약", main)
+        self.assertIn("JAVA SECURITY REPORT", main)
         self.assertNotIn("소스 보안 분석 요약", main)
         status, detail = self.request(f"/koda/api/v1/runs/{run['run_id']}/report-detail.html", headers=self.headers())
         self.assertEqual(status, 200)

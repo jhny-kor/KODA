@@ -19,7 +19,9 @@ def server_admin_section(project_options, connections, mappings):
 SERVER_ADMIN_SCRIPT = r"""<script>
 let integrationKind = location.hash === '#server' ? 'server' : 'gitlab';
 const connectionForm=document.querySelector('#server-connection-config');
+const serverProjectMap=document.querySelector('#server-project-map'),serverProjectMappings=__SERVER_PROJECT_MAPPINGS__;
 const connectionSelect=scheduleForm.elements.server_connection_id;
+function syncServerProjectConnection(){{const project=serverProjectMap?.elements.project_id.value,match=serverProjectMappings.find(x=>x.project_id===project);if(match)serverProjectMap.elements.connection_id.value=match.connection_id}}
 function refreshScheduleConnections(){
   const selected=connectionSelect.value;
   connectionSelect.replaceChildren(new Option('직접 입력 (기존 설정)',''));
@@ -63,6 +65,7 @@ document.querySelector('#server-connection-reset').addEventListener('click',()=>
 document.querySelectorAll('[data-server-edit]').forEach(b=>b.addEventListener('click',()=>{const c=serverConnections.find(c=>c.connection_id===b.dataset.serverEdit);for(const key of ['connection_id','name','host','port','username','ssh_key_ref','known_hosts_file'])connectionForm.elements[key].value=c[key];connectionForm.scrollIntoView({block:'start'});}));
 document.querySelectorAll('[data-server-remove]').forEach(b=>b.addEventListener('click',async()=>{if(!confirm('이 서버 연결을 삭제할까요? 사용 중인 스케줄이 있으면 먼저 해제해야 합니다.'))return;try{await json('/koda/api/v1/admin/server-connections/'+encodeURIComponent(b.dataset.serverRemove),{method:'DELETE'});reloadServer()}catch(e){alert(e.message)}}));
 document.querySelector('#server-project-map').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.currentTarget),c=serverConnections.find(c=>c.connection_id===f.get('connection_id'));try{await json('/koda/api/v1/admin/server-connections',{method:'POST',body:JSON.stringify(storedConnectionPayload(c,[...new Set([...c.project_ids,f.get('project_id')])]))});reloadServer()}catch(e){document.querySelector('#server-project-result').textContent=e.message}});
+serverProjectMap?.elements.project_id.addEventListener('change',syncServerProjectConnection);syncServerProjectConnection();
 document.querySelectorAll('[data-server-unmap]').forEach(b=>b.addEventListener('click',async()=>{if(!confirm('프로젝트의 서버 연결을 해제할까요?'))return;const c=serverConnections.find(c=>c.connection_id===b.dataset.serverUnmap);try{await json('/koda/api/v1/admin/server-connections',{method:'POST',body:JSON.stringify(storedConnectionPayload(c,c.project_ids.filter(id=>id!==b.dataset.project)))});reloadServer()}catch(e){alert(e.message)}}));
 document.querySelector('#server-connection-test').addEventListener('click',async e=>{if(!connectionForm.reportValidity())return;const b=e.currentTarget,status=document.querySelector('#server-connection-result');b.disabled=true;try{await json('/koda/api/v1/admin/schedules/test-connection',{method:'POST',body:JSON.stringify(Object.fromEntries(['host','port','username','ssh_key_ref','known_hosts_file'].map(key=>[key,connectionPayload()[key]]).concat([['remote_directory','/']])))});status.textContent='연결 시험 완료'}catch(e){status.textContent=e.message}finally{b.disabled=false}});
 selectIntegration(integrationKind);

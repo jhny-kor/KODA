@@ -25,6 +25,7 @@ from .portal_integrations import (
     create_gitlab_issue,
     create_gitlab_branch,
     download_gitlab_archive,
+    gitlab_archive_root,
     fetch_tracker_result,
     find_gitlab_issue,
     find_gitlab_issue_note,
@@ -44,6 +45,7 @@ from .portal_integrations import (
     test_gitlab_write_configuration,
 )
 from .portal_store import SCREEN_PERMISSIONS, PortalStore, VersionConflict
+from .tracker_subject_sync import TrackerSubjectSynchronizer, fetch_tracker_users
 from .portal_views import (
     PERMISSION_METADATA,
     ROLE_DESCRIPTIONS,
@@ -81,7 +83,14 @@ def _safe_next(value: str) -> str:
 
 def _vulnerability_database_status() -> dict[str, object]:
     value = os.environ.get("KODA_GRYPE_BIN", "").strip()
-    return inspect_grype(Path(value).expanduser() if value else None)
+    from .data_release import pinned_release, release_metadata
+    try:
+        with pinned_release():
+            result = inspect_grype(Path(value).expanduser() if value else None)
+            result["data_release"] = release_metadata()
+            return result
+    except (OSError, ValueError) as exc:
+        return {"available": False, "warning": str(exc), "database": {}}
 
 
 def _run_scan(store: PortalStore, run_id: str) -> None:
@@ -96,7 +105,8 @@ def _run_scan(store: PortalStore, run_id: str) -> None:
         work_root = (Path(source["path"]).parent / "extracted" if snapshot.get("source_type") == "scheduled_server"
                      else Path(source["path"]).parent.parent / "work")
         work_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="koda-portal-", dir=work_root) as extraction:
+        from .data_release import pinned_release, release_metadata
+        with pinned_release(), tempfile.TemporaryDirectory(prefix="koda-portal-", dir=work_root) as extraction:
             from .archive_input import prepare_input_target
             from .server import scan_directory_payload
 
@@ -116,6 +126,7 @@ def _run_scan(store: PortalStore, run_id: str) -> None:
                 enable_local_vulnerabilities=scan_scope in {"all", "library"},
                 cve_only=scan_scope == "library",
             )
+            result["data_release"] = release_metadata()
             result["findings"] = result.get("findings_by_language", {}).get("ko", [])
             result["analysis_stages"] = _analysis_stages(result, scan_scope)
             result["analysis_overall"] = "partial" if any(
@@ -483,7 +494,38 @@ class _PortalServer(ThreadingHTTPServer):
         worker = getattr(self, "portal_worker", None)
         if worker:
             worker.close()
+        identity_worker = getattr(self, "tracker_identity_worker", None)
+        if identity_worker:
+            identity_worker.close()
         super().server_close()
+
+
+class _TrackerIdentityWorker:
+    def __init__(self, store: PortalStore, state_path: Path):
+        self.synchronizer = TrackerSubjectSynchronizer(store, state_path, fetch_tracker_users)
+        try:
+            configured = int(os.environ.get("KODA_TRACKER_IDENTITY_SYNC_INTERVAL_SECONDS", "60"))
+        except ValueError:
+            configured = 60
+        self.interval = min(max(configured, 10), 3600)
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._work, name="koda-tracker-identity", daemon=True)
+        self.thread.start()
+
+    def _work(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.synchronizer.sync()
+            except Exception:
+                pass
+            self.stop_event.wait(self.interval)
+
+    def status(self) -> dict[str, object]:
+        return self.synchronizer.status()
+
+    def close(self) -> None:
+        self.stop_event.set()
+        self.thread.join(timeout=5)
 
 
 def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=None, input_dir=None):
@@ -531,7 +573,10 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     self.end_headers()
                 return None
             subject = store.ensure_subject(identity.subject_id, identity.display)
-            if subject["status"] in {"pending", "disabled"}:
+            # Without a configured Tracker authority, retain the legacy
+            # trusted-SSO bootstrap path. When Tracker sync is configured,
+            # pending identities stay blocked until an approved snapshot.
+            if subject["status"] == "pending" and getattr(self.server, "tracker_identity_worker", None) is None:
                 subject = store.set_subject(identity.subject_id, status="enabled", actor="tracker-sso")
             return identity, subject
 
@@ -805,6 +850,11 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     return self._json(403, {"code": "forbidden"})
                 from .schedule_settings import get_settings
                 return self._json(200, get_settings(store))
+            if path == "/koda/api/v1/admin/subjects/sync":
+                if not admin:
+                    return self._json(403, {"code": "forbidden"})
+                worker = getattr(self.server, "tracker_identity_worker", None)
+                return self._json(200, worker.status() if worker else {"configured": False, "pending": False})
             if path == "/koda/api/v1/admin/schedules":
                 if not admin:
                     return self._json(403, {"code": "forbidden"})
@@ -957,7 +1007,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     filename = f"koda-round-{run['round_number']}-cyclonedx-1.6.json"
                     return self._send(200, raw, "application/vnd.cyclonedx+json; charset=utf-8", {"Content-Disposition": f'attachment; filename="{filename}"'})
                 return self._json(422, {"code": "unsupported_sbom_format"})
-            match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/(report|report(?:-detail)?\.html)", path)
+            match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/(report|report(?:-detail|-vulnerabilities)?\.html)", path)
             if match:
                 try:
                     run = store.run(match.group(1))
@@ -985,7 +1035,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 scan.setdefault("standard_category", run.get("standard_category") or snapshot.get("standard_category"))
                 result["scan"] = scan
                 filename = f"koda-round-{run['round_number']}-report"
-                if match.group(2) in {"report.html", "report-detail.html"}:
+                if match.group(2) in {"report.html", "report-detail.html", "report-vulnerabilities.html"}:
                     archive = render_html_pair_zip_from_payload(result, language)
                     with zipfile.ZipFile(io.BytesIO(archive)) as reports:
                         return self._send(200, reports.read(match.group(2)), "text/html; charset=utf-8")
@@ -1071,9 +1121,10 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     for m in memberships
                 ) or "<tr><td colspan='4' class='empty'>배정된 프로젝트 접근 권한이 없습니다.</td></tr>"
                 form = f"<section class='panel'><div class='panel-head'><div><h2>KODA 관리자</h2><p class='muted'>KODA SBOM Tracker에서 허용한 사용자는 바로 접근하며, 여기서는 시스템 관리자 역할만 부여합니다.</p></div></div><div class='panel-body'><form id='subject'><div class='toolbar subject-controls'><label>공유 계정<select name='subject_id'>{subject_options}</select></label><label class='check-label'><input type='checkbox' name='system_admin'>KODA 시스템 관리자</label><button>저장</button></div></form></div></section>"
-                membership_subjects = "".join(f"<label class='check-label'><input type='checkbox' name='subject_ids' value='{esc(s['subject_id'])}'>{esc(s['display'] or s['subject_id'])}</label>" for s in enabled_subjects)
+                membership_state = [{"project_id": m["project_id"], "subject_id": m["subject_id"], "role": m["role"]} for m in memberships]
+                membership_subjects = "".join(f"<label class='check-label'><input type='checkbox' name='subject_ids' value='{esc(s['subject_id'])}' data-membership-subject='{esc(s['subject_id'])}'>{esc(s['display'] or s['subject_id'])}</label>" for s in enabled_subjects)
                 access = f"<section class='panel'><div class='panel-head'><div><h2>사용자별 프로젝트 접근</h2><p class='muted'>역할 정의는 KODA 전체에 공통으로 적용되고, 접근 가능한 프로젝트와 역할은 사용자별로 배정합니다.</p></div></div><div class='panel-body'><form id='membership' class='toolbar'><label>프로젝트<select name='project_id'>{project_options}</select></label><details class='subject-picker'><summary>공유 계정 선택 <span id='membership-selection-count' class='muted'>0명 선택</span></summary><div class='subject-picker-options'><label class='check-label'><input id='membership-select-all' type='checkbox'>전체 선택</label>{membership_subjects}</div></details><label>역할<select name='role'>{role_options}</select></label><button>적용</button></form></div><div class='table-wrap' data-pager data-page-size='10'><table id='membership-table'><thead><tr><th><button type='button' class='table-sort' data-sort-key='project_name' aria-sort='none'>프로젝트</button></th><th><button type='button' class='table-sort' data-sort-key='display' aria-sort='none'>계정</button></th><th><button type='button' class='table-sort' data-sort-key='role' aria-sort='none'>역할</button></th><th>관리</th></tr></thead><tbody>{access_rows}</tbody></table></div></section>"
-                script = "<script>const subjectForm=document.querySelector('#subject'),subjectSelect=subjectForm.elements.subject_id;function syncSubject(){const option=subjectSelect.selectedOptions[0];subjectForm.elements.system_admin.checked=option?.dataset.admin==='1'}subjectSelect.addEventListener('change',syncSubject);syncSubject();subjectForm.addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await json('/koda/api/v1/admin/subjects',{method:'POST',body:JSON.stringify({subject_id:f.get('subject_id'),system_admin:f.get('system_admin')==='on'})});location.reload()}catch(x){alert(x.message)}});document.querySelectorAll('[data-delete-subject]').forEach(button=>button.addEventListener('click',async()=>{const subjectId=button.dataset.deleteSubject;if(!confirm(`${button.dataset.display} 계정의 KODA 등록과 프로젝트 역할을 삭제하시겠습니까? Tracker 계정과 점검 결과는 유지되며, 다음 Tracker 로그인 시 역할 없이 다시 등록됩니다.`))return;try{await json('/koda/api/v1/admin/subjects/'+encodeURIComponent(subjectId),{method:'DELETE'});location.reload()}catch(x){alert(x.message)}}));const membershipPicker=document.querySelector('#membership'),membershipChecks=[...document.querySelectorAll('#membership input[name=subject_ids]')],selectionCount=document.querySelector('#membership-selection-count'),selectAll=document.querySelector('#membership-select-all');function syncMembershipSelection(){const checked=membershipChecks.filter(x=>x.checked).length;selectionCount.textContent=`${checked}명 선택`;selectAll.checked=membershipChecks.length>0&&checked===membershipChecks.length;selectAll.indeterminate=checked>0&&checked<membershipChecks.length}membershipChecks.forEach(x=>x.addEventListener('change',syncMembershipSelection));selectAll?.addEventListener('change',()=>{membershipChecks.forEach(x=>x.checked=selectAll.checked);syncMembershipSelection()});syncMembershipSelection();membershipPicker?.addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.currentTarget),subjectIds=f.getAll('subject_ids');if(!subjectIds.length){alert('공유 계정을 하나 이상 선택하세요.');return}try{for(const subjectId of subjectIds)await json('/koda/api/v1/admin/memberships',{method:'POST',body:JSON.stringify({project_id:f.get('project_id'),subject_id:subjectId,role:f.get('role')})});location.reload()}catch(x){alert(x.message)}});document.querySelectorAll('[data-remove-membership-project]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm(`${button.dataset.removeMembershipDisplay} 계정의 프로젝트 접근을 해제하시겠습니까?`))return;try{await json('/koda/api/v1/admin/memberships',{method:'POST',body:JSON.stringify({project_id:button.dataset.removeMembershipProject,subject_id:button.dataset.removeMembershipSubject,role:''})});location.reload()}catch(x){alert(x.message)}}));function sortTable(table,key,button){const rows=[...table.tBodies[0].querySelectorAll('tr[data-page-item]')];const direction=button.getAttribute('aria-sort')==='ascending'?'descending':'ascending';rows.sort((a,b)=>a.dataset[key].localeCompare(b.dataset[key],'ko',{numeric:true,sensitivity:'base'})*(direction==='ascending'?1:-1));rows.forEach(row=>table.tBodies[0].append(row));table.querySelectorAll('.table-sort').forEach(x=>x.setAttribute('aria-sort','none'));button.setAttribute('aria-sort',direction);table.closest('[data-pager]')._paginate()}document.querySelectorAll('.table-sort').forEach(button=>button.addEventListener('click',()=>sortTable(button.closest('table'),button.dataset.sortKey,button)));</script>"
+                script = "<script>const subjectForm=document.querySelector('#subject'),subjectSelect=subjectForm.elements.subject_id;function syncSubject(){const option=subjectSelect.selectedOptions[0];subjectForm.elements.system_admin.checked=option?.dataset.admin==='1'}subjectSelect.addEventListener('change',syncSubject);syncSubject();subjectForm.addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await json('/koda/api/v1/admin/subjects',{method:'POST',body:JSON.stringify({subject_id:f.get('subject_id'),system_admin:f.get('system_admin')==='on'})});location.reload()}catch(x){alert(x.message)}});document.querySelectorAll('[data-delete-subject]').forEach(button=>button.addEventListener('click',async()=>{const subjectId=button.dataset.deleteSubject;if(!confirm(`${button.dataset.display} 계정의 KODA 등록과 프로젝트 역할을 삭제하시겠습니까? Tracker 계정과 점검 결과는 유지되며, 다음 Tracker 로그인 시 역할 없이 다시 등록됩니다.`))return;try{await json('/koda/api/v1/admin/subjects/'+encodeURIComponent(subjectId),{method:'DELETE'});location.reload()}catch(x){alert(x.message)}}));const membershipPicker=document.querySelector('#membership'),membershipChecks=[...document.querySelectorAll('#membership input[name=subject_ids]')],selectionCount=document.querySelector('#membership-selection-count'),selectAll=document.querySelector('#membership-select-all'),membershipState=" + script_json(membership_state) + ";function syncMembershipSelection(){const checked=membershipChecks.filter(x=>x.checked).length;selectionCount.textContent=`${checked}명 선택`;selectAll.checked=membershipChecks.length>0&&checked===membershipChecks.length;selectAll.indeterminate=checked>0&&checked<membershipChecks.length}function syncMembershipForProject(){const active=membershipState.filter(x=>x.project_id===membershipPicker.elements.project_id.value),roles=[...new Set(active.map(x=>x.role))];membershipChecks.forEach(x=>x.checked=active.some(m=>m.subject_id===x.dataset.membershipSubject));if(roles.length===1)membershipPicker.elements.role.value=roles[0];syncMembershipSelection()}membershipChecks.forEach(x=>x.addEventListener('change',syncMembershipSelection));selectAll?.addEventListener('change',()=>{membershipChecks.forEach(x=>x.checked=selectAll.checked);syncMembershipSelection()});membershipPicker?.elements.project_id.addEventListener('change',syncMembershipForProject);syncMembershipForProject();membershipPicker?.addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.currentTarget),subjectIds=f.getAll('subject_ids');if(!subjectIds.length){alert('공유 계정을 하나 이상 선택하세요.');return}try{for(const subjectId of subjectIds)await json('/koda/api/v1/admin/memberships',{method:'POST',body:JSON.stringify({project_id:f.get('project_id'),subject_id:subjectId,role:f.get('role')})});location.reload()}catch(x){alert(x.message)}});document.querySelectorAll('[data-remove-membership-project]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm(`${button.dataset.removeMembershipDisplay} 계정의 프로젝트 접근을 해제하시겠습니까?`))return;try{await json('/koda/api/v1/admin/memberships',{method:'POST',body:JSON.stringify({project_id:button.dataset.removeMembershipProject,subject_id:button.dataset.removeMembershipSubject,role:''})});location.reload()}catch(x){alert(x.message)}}));function sortTable(table,key,button){const rows=[...table.tBodies[0].querySelectorAll('tr[data-page-item]')];const direction=button.getAttribute('aria-sort')==='ascending'?'descending':'ascending';rows.sort((a,b)=>a.dataset[key].localeCompare(b.dataset[key],'ko',{numeric:true,sensitivity:'base'})*(direction==='ascending'?1:-1));rows.forEach(row=>table.tBodies[0].append(row));table.querySelectorAll('.table-sort').forEach(x=>x.setAttribute('aria-sort','none'));button.setAttribute('aria-sort',direction);table.closest('[data-pager]')._paginate()}document.querySelectorAll('.table-sort').forEach(button=>button.addEventListener('click',()=>sortTable(button.closest('table'),button.dataset.sortKey,button)));</script>"
                 role_filters = "<option value=''>전체 역할</option><option value='none'>역할 없음</option>" + "".join(f"<option value='{esc(role)}'>{esc(ROLE_LABELS.get(role, role))}</option>" for role in policy['roles'])
                 body = form + access + f"<section class='panel'><div class='panel-head'><div><h2>계정 현황</h2><p class='muted'>KODA에 등록된 계정과 프로젝트 역할을 확인합니다.</p></div><div class='toolbar'><input id='subject-search' type='search' placeholder='계정 검색'><select id='subject-admin-filter' aria-label='시스템 관리자 필터'><option value=''>전체</option><option value='1'>관리자</option><option value='0'>비관리자</option></select><select id='subject-role-filter' aria-label='프로젝트 역할 필터'>{role_filters}</select></div></div><div class='table-wrap' data-pager data-page-size='10'><table id='subject-table'><thead><tr><th><button type='button' class='table-sort' data-sort-key='display' aria-sort='none'>표시</button></th><th><button type='button' class='table-sort' data-sort-key='status' aria-sort='none'>KODA 상태</button></th><th><button type='button' class='table-sort' data-sort-key='admin' aria-sort='none'>관리자</button></th><th><button type='button' class='table-sort' data-sort-key='roles' aria-sort='none'>프로젝트 역할</button></th><th>관리</th></tr></thead><tbody>{rows}</tbody></table></div></section>" + script + "<script>const subjectTable=document.querySelector('#subject-table'),subjectFilter=()=>{const q=document.querySelector('#subject-search').value.toLowerCase(),admin=document.querySelector('#subject-admin-filter').value,role=document.querySelector('#subject-role-filter').value;subjectTable.querySelectorAll('tbody tr').forEach(r=>{const text=r.textContent.toLowerCase(),roles=(r.dataset.roles||'').split(' ').filter(Boolean),hidden=!text.includes(q)||(admin&&r.dataset.admin!==admin)||(role==='none'&&roles.length>0)||(role&&role!=='none'&&!roles.includes(role));r.dataset.filtered=String(Boolean(hidden))});subjectTable.closest('[data-pager]')._paginate()};document.querySelectorAll('#subject-search,#subject-admin-filter,#subject-role-filter').forEach(x=>x.addEventListener('input',subjectFilter));document.querySelectorAll('#subject-admin-filter,#subject-role-filter').forEach(x=>x.addEventListener('change',subjectFilter))</script>"
                 body += "<style>#membership .subject-picker{position:relative;min-width:240px}#membership .subject-picker[open] .subject-picker-options{position:absolute;top:calc(100% + 6px);left:0;z-index:10;width:100%;min-width:260px;padding:12px;border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--surface);box-shadow:var(--shadow-md)}#membership .subject-picker summary{list-style:none;font-size:13px;height:42px;min-height:42px;box-sizing:border-box;display:flex;align-items:center;gap:4px}#membership .subject-picker summary:after{margin-left:auto}#membership-table .table-sort,#subject-table .table-sort{background:transparent;border:0;box-shadow:none;padding:0;min-height:0;color:inherit;font:inherit;border-radius:0}#membership .subject-picker summary::-webkit-details-marker{display:none}#membership .subject-picker summary:after{content:'⌄';float:right;color:var(--muted);transition:transform .18s ease}#membership .subject-picker[open] summary:after{transform:rotate(180deg)}#membership .subject-picker-options{max-height:240px;overflow:auto}</style><script>document.querySelectorAll('.table-sort').forEach(button=>button.addEventListener('click',event=>{event.stopImmediatePropagation();const table=button.closest('table'),headers=[...button.closest('tr').children],index=headers.indexOf(button.closest('th')),rows=[...table.tBodies[0].querySelectorAll('tr[data-page-item]')],ascending=button.getAttribute('aria-sort')!=='ascending';rows.sort((a,b)=>a.cells[index].textContent.trim().localeCompare(b.cells[index].textContent.trim(),'ko',{numeric:true,sensitivity:'base'})*(ascending?1:-1));rows.forEach(row=>table.tBodies[0].append(row));table.querySelectorAll('.table-sort').forEach(x=>x.setAttribute('aria-sort','none'));button.setAttribute('aria-sort',ascending?'ascending':'descending');table.closest('[data-pager]')._paginate()},true));const picker=document.querySelector('#membership .subject-picker');document.addEventListener('pointerdown',event=>{if(picker?.open&&!picker.contains(event.target))picker.open=false});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&picker?.open){picker.open=false;picker.querySelector('summary').focus()}});</script>"
@@ -1092,7 +1143,9 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 status = _vulnerability_database_status()
                 available = bool(status.get("available"))
                 label = "점검 가능" if available else "점검 불가"
-                body = f"<section class='panel'><div class='panel-head'><div><h2>취약점 DB</h2><p class='muted'>KODA가 라이브러리 취약점 점검에 실제 사용하는 Grype와 DB 상태입니다.</p></div><span class='status status-{'completed' if available else 'failed'}'>{label}</span></div><div class='panel-body'><ul class='summary-list'><li><span>설정</span><strong>{'예' if status.get('configured') else '아니오'}</strong></li><li><span>Grype 버전</span><strong>{esc(status.get('version') or '확인 불가')}</strong></li></ul><h3>DB 정보</h3><pre>{esc(json.dumps(status.get('database') or {}, ensure_ascii=False, indent=2))}</pre><p class='error'>{esc(status.get('warning') or '')}</p><a class='button primary' href='/koda/admin/vulnerability-db'>다시 확인</a></div></section>"
+                tracker_page = urlparse(os.environ.get("KODA_SSBOM_TRACKER_URL", "/"))
+                update_url = tracker_page._replace(query="page=settings&settingsTab=vulnerability", fragment="").geturl() if tracker_page.scheme in {"", "http", "https"} else "/?page=settings&settingsTab=vulnerability"
+                body = f"<section class='panel'><div class='panel-head'><div><h2>취약점 DB</h2><p class='muted'>KODA가 라이브러리 취약점 점검에 실제 사용하는 Grype와 DB 상태입니다.</p></div><span class='status status-{'completed' if available else 'failed'}'>{label}</span></div><div class='panel-body'><ul class='summary-list'><li><span>설정</span><strong>{'예' if status.get('configured') else '아니오'}</strong></li><li><span>Grype 버전</span><strong>{esc(status.get('version') or '확인 불가')}</strong></li></ul><h3>DB 정보</h3><pre>{esc(json.dumps(status.get('database') or {}, ensure_ascii=False, indent=2))}</pre><p class='error'>{esc(status.get('warning') or '')}</p><a class='button primary' href='/koda/admin/vulnerability-db'>다시 확인</a> <a class='button primary' href='{esc(update_url)}'>Grype DB · vuln-data 업데이트</a><pre>{esc(json.dumps(status.get('data_release') or {}, ensure_ascii=False, indent=2))}</pre></div></section>"
                 return self._html(200, admin_page("취약점 DB", body, active="vulnerability-db", nav_permissions=nav_permissions))
             project_id = parse_qs(parsed.query).get("project", [projects[0]["project_id"] if projects else ""])[0]
             options = "".join(f"<option value='{esc(p['project_id'])}' {'selected' if p['project_id']==project_id else ''}>{esc(p['name'])}</option>" for p in projects)
@@ -1110,8 +1163,9 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                             f"<td class='permission-check'><input type='checkbox' name='{esc(role)}' value='{esc(permission)}' {'checked' if permission in values else ''} aria-label='{esc(ROLE_LABELS.get(role, role))} · {esc(screen)} · {esc(feature)}'></td>"
                             for role, values in policy["roles"].items()
                         )
-                        rows.append(f"<tr><th><strong>{esc(screen)}</strong><br><small>{esc(feature)}</small><br><code>{esc(permission)}</code></th><td class='wrap'>{esc(description)}</td>{cells}</tr>")
-                    return f"<h3 class='panel-body'>{esc(title)}</h3><div class='table-wrap'><table><thead><tr><th>화면·기능</th><th>설명</th>{role_headers}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+                        rows.append(f"<tr><th><details class='permission-screen'><summary><strong>{esc(screen)}</strong></summary><small>{esc(feature)}</small><br><code>{esc(permission)}</code></details></th><td class='wrap'>{esc(description)}</td>{cells}</tr>")
+                    table = f"<div class='table-wrap'><table><thead><tr><th>화면·기능</th><th>설명</th>{role_headers}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+                    return f"<details open class='permission-accordion'><summary>{esc(title)}</summary>{table}</details>" if title == "기능 실행 권한" else f"<h3 class='panel-body'>{esc(title)}</h3>{table}"
                 screen_table = permission_table("화면 접근 권한", (
                     "dashboard.view", "scan.library.view", "scan.source.view", "runs.view", "compare.view", "projects.view",
                 ))
@@ -1239,6 +1293,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                                 mapping["gitlab_project_id"], commit_sha, target, max_bytes=MAX_INPUT_BYTES,
                                 settings_dir=gitlab_settings_dir,
                             )
+                            archive_root = gitlab_archive_root(target)
                             input_id = store.add_input(
                                 payload["project_id"], f"{mapping['name']}-{commit_sha[:12]}.tar.gz",
                                 target, identity.subject_id, digest,
@@ -1253,6 +1308,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                             "gitlab_path_with_namespace": mapping["path_with_namespace"],
                             "gitlab_ref_type": ref_type, "gitlab_ref_name": ref_name,
                             "gitlab_commit_sha": commit_sha, "gitlab_archive_sha256": digest,
+                            "gitlab_archive_root": archive_root,
                             "gitlab_default_branch": mapping["default_branch"],
                             "gitlab_fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                             "tracker_service_id": mapping["tracker_service_id"],
@@ -1550,6 +1606,12 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
     server.daemon_threads = True
     server.portal_store = store
     server.portal_worker = _PortalWorker(store)
+    tracker_url = (os.environ.get("KODA_TRACKER_URL") or os.environ.get("KODA_SSBOM_TRACKER_URL") or "").strip()
+    tracker_token_file = os.environ.get("KODA_TRACKER_PROVISIONING_TOKEN_FILE", "").strip()
+    server.tracker_identity_worker = (
+        _TrackerIdentityWorker(store, portal_data / "tracker-identity-sync.json")
+        if tracker_url and tracker_token_file else None
+    )
     return server
 
 
@@ -1617,9 +1679,35 @@ def _comparison_data(store: PortalStore, subject_id: str, left: str, right: str)
         raise ValueError("GitLab runs must belong to the same repository")
     if before["status"] != "completed" or after["status"] != "completed":
         raise ValueError("completed runs are required")
+    def repository_relative_path(run, value):
+        path = str(value or "")
+        if not path or path.startswith("/"):
+            return path
+        snapshot = run.get("snapshot") or {}
+        roots = {str(snapshot.get(key) or "").strip("/") for key in ("archive_root", "gitlab_archive_root", "repository_root")}
+        input_id = str(snapshot.get("input_id") or "")
+        if input_id and hasattr(store, "input"):
+            try:
+                input_name = str((store.input(input_id) or {}).get("name") or "").strip("/")
+            except (KeyError, TypeError, ValueError):
+                input_name = ""
+            if input_name:
+                roots.update({input_name, input_name + ".extracted"})
+        for root in sorted((root for root in roots if root), key=len, reverse=True):
+            if path == root:
+                return ""
+            if path.startswith(root + "/"):
+                return path[len(root) + 1:]
+        return path
+
     def mapped(run):
         values = (run.get("result") or {}).get("findings", [])
-        return {(item.get("rule_id"), item.get("path"), item.get("line")): item for item in values}
+        normalized = []
+        for item in values:
+            copy = dict(item)
+            copy["path"] = repository_relative_path(run, item.get("path"))
+            normalized.append(copy)
+        return {(item.get("rule_id"), item.get("path"), item.get("line")): item for item in normalized}
     old, new = mapped(before), mapped(after)
     rows = []
     for key in sorted(set(old) | set(new), key=lambda value: tuple(str(item or "") for item in value)):

@@ -407,6 +407,9 @@ class ScheduleRunner:
             "schedule_max_files": target["max_files"], "schedule_max_bytes": target["max_bytes"],
             "gitlab_mapping_id": target.get("gitlab_mapping_id") or "",
             "gitlab_target_branch": target.get("gitlab_target_branch") or "",
+            # _archive() writes collector paths as relative tar members, so
+            # the actual scheduled scan archive has no top-level root.
+            "gitlab_archive_root": "" if target.get("source_kind") == "gitlab" else None,
         }
         if target.get("gitlab_mapping_id"):
             try:

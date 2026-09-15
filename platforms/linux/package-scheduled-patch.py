@@ -23,22 +23,27 @@ def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--tracker-repo', type=Path, required=True)
+    parser.add_argument('--revision', default='20260914-ui-data1')
+    parser.add_argument('--image-tag', default='20260914-ui-data1')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
-    name = 'koda-scheduled-offline-patch-x86_64-20260910-ui1'
+    name = f'koda-scheduled-offline-patch-x86_64-{args.revision}'
     args.output_dir.mkdir(parents=True, exist_ok=True)
     stage = args.output_dir / name
     stage.mkdir()  # Existing releases are never silently overwritten.
     shutil.copytree(repo / 'platforms/linux/scheduled-release', stage, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store', '._*', '.omc'))
+    if (repo / 'platforms/linux/update-release').is_dir():
+        shutil.copytree(repo / 'platforms/linux/update-release', stage / 'build')
     launchers = stage / 'launchers'
     launchers.mkdir()
     for source, dest in [('platforms/linux/suite/koda-suite', 'koda-suite'),
                          ('platforms/linux/docker/koda-docker.sh', 'koda-docker')]:
         shutil.copy2(repo / source, launchers / dest)
         (launchers / dest).chmod(0o755)
-    refs = ['local/koda-scheduled:20260910-ui1', 'local/koda-tracker-api-scheduled:20260910-ui1',
-            'local/koda-tracker-web-scheduled:20260910-ui1']
+    refs = [f'local/koda-scheduled:{args.image_tag}',
+            f'local/koda-tracker-api-scheduled:{args.image_tag}',
+            f'local/koda-tracker-web-scheduled:{args.image_tag}']
     inventory = []
     for ref in refs:
         item = json.loads(command('docker', 'image', 'inspect', ref))[0]
@@ -58,17 +63,47 @@ def main():
         path = args.tracker_repo / 'apps/web' / file
         if path.is_file():
             shutil.copy2(path, sources / 'tracker/web' / file)
+    # The patch applies the reviewed Compose data-updater migration while
+    # retaining the installed .env and named volumes.
+    migration = stage / 'migration' / 'tracker'
+    migration.mkdir(parents=True)
+    for relative in ('compose.yaml', 'compose.airgap.yaml', 'compose.integration.yaml'):
+        source = (repo / 'platforms/linux/suite/compose.integration.yaml') if relative == 'compose.integration.yaml' else args.tracker_repo / relative
+        if source.is_file():
+            shutil.copy2(source, migration / relative)
+    gateway = repo / 'platforms/linux/suite/gateway.conf.template'
+    if gateway.is_file():
+        (migration / 'gateway').mkdir()
+        shutil.copy2(gateway, migration / 'gateway/gateway.conf.template')
+    for source, relative in (
+        (args.tracker_repo / 'scripts/build-data-update.py', 'scripts/build-data-update.py'),
+        (args.tracker_repo / 'scripts/nvd-alias-index.py', 'scripts/nvd-alias-index.py'),
+        (repo / 'platforms/linux/package-offline.sh', 'koda/platforms/linux/package-offline.sh'),
+    ):
+        if source.is_file():
+            destination = stage / 'external-tools' / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
     shutil.copy2(args.tracker_repo / 'apps/api/pyproject.toml', sources / 'tracker/pyproject.toml')
     for directory, project in ((repo, 'koda'), (args.tracker_repo, 'tracker')):
         for file in ('LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md'):
             if (directory / file).exists():
                 shutil.copy2(directory / file, stage / (project + '-' + file))
-    shutil.copy2(repo / 'docs/schedule-implementation-2026-09-08.md', stage / 'implementation-verification.ko.md')
+    implementation_doc = repo / 'docs/schedule-implementation-2026-09-08.md'
+    if implementation_doc.is_file():
+        shutil.copy2(implementation_doc, stage / 'implementation-verification.ko.md')
+    delivery_doc = repo / 'docs/linux-update-2026-09-14.md'
+    if delivery_doc.is_file():
+        shutil.copy2(delivery_doc, stage / 'linux-update.ko.md')
+    verification = repo / '.build/linux-update/delivery-verification.json'
+    if verification.is_file():
+        shutil.copy2(verification, stage / 'verification.json')
     shutil.copy2(Path(__file__), stage / 'package-scheduled-patch.py')
     provenance = {'built_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   'source_kind': 'working-tree-snapshot', 'target_platform': 'linux/amd64',
                   'base_suite': '0.1.1-20260902 with compatible 20260906/07 patches',
-                  'vulnerability_data_refreshed': False, 'koda_grype_db_built': '2026-09-01T06:32:09Z',
+                  'vulnerability_data_refreshed': False, 'data_update_uploads': 'grype-db,vuln-data',
+                  'koda_grype_db_built': '2026-09-10T06:30:24Z',
                   'tracker_web_vite_demo_mode': False,
                   'repositories': {key: {'head': command('git', '-C', str(path), 'rev-parse', 'HEAD'),
                                           'dirty': bool(command('git', '-C', str(path), 'status', '--porcelain'))}

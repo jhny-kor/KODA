@@ -153,6 +153,7 @@ def scan_directory_payload(
         # hygiene and other advisory sources remain available to normal scans.
         raw_findings = [item for item in raw_findings if item.category != "dependencies"]
     scan_warnings = list(scanner.warnings)
+    library_vulnerabilities: list[dict[str, object]] = []
     local_vulnerability: dict[str, object] = {
         "status": "disabled",
         "queried_components": 0,
@@ -173,6 +174,7 @@ def scan_directory_payload(
         )
         grype_matches = tuple(match for match in grype.matches if not cve_only or match.cve_ids)
         raw_findings.extend(_grype_findings(grype_matches, components))
+        library_vulnerabilities = _grype_vulnerability_payloads(grype_matches, components, binary)
         local_vulnerability["matched_vulnerabilities"] = len(grype_matches)
         local_vulnerability["status"] = "failed" if grype.fatal or not local_vulnerability.get("available") else ("warning" if grype.warning or local_vulnerability.get("warning") else "completed")
         for warning in (local_vulnerability.get("warning"), grype.warning):
@@ -207,6 +209,8 @@ def scan_directory_payload(
     payload["scan"]["enable_local_vulnerabilities"] = enable_local_vulnerabilities
     payload["scan"]["local_vulnerability"] = local_vulnerability
     payload["scan"]["scope"] = scan_scope or "all"
+    if library_vulnerabilities:
+        payload["vulnerabilities"] = library_vulnerabilities
     return _replace_upload_path(payload, str(target_path.resolve()), display_path) if display_path else payload
 
 
@@ -246,6 +250,90 @@ def _grype_findings(matches: tuple[GrypeMatch, ...], components) -> list[Finding
             issue_key=f"dependency.osv-known-vulnerability|{component.purl}|{','.join(sorted(identifiers))}",
         ))
     return findings
+
+
+def _grype_vulnerability_payloads(matches: tuple[GrypeMatch, ...], components, grype_binary: Path | None = None) -> list[dict[str, object]]:
+    """Build report-ready library records from the pinned offline feeds."""
+    try:
+        from .data_release import vulnerability_paths
+        from .offline_vuln_data import load_offline_data
+        nvd_path, kev_path = vulnerability_paths()
+        ids = tuple(identifier for match in matches for identifier in match.cve_ids)
+        data = load_offline_data(nvd_path, kev_path, ids)
+    except (ImportError, OSError, TypeError, ValueError):
+        data = None
+    by_purl = {component.purl: component for component in components if component.purl}
+    records = []
+    for match in matches:
+        component = by_purl.get(match.purl) or next((item for item in components if item.name == match.package_name and item.version == match.installed_version), None)
+        if component is None:
+            continue
+        cve_ids = tuple(match.cve_ids or (match.vulnerability_id,))
+        nvd_records = {cve: data.nvd.get(cve, {}) for cve in cve_ids} if data is not None else {}
+        nvd = next((value for value in nvd_records.values() if isinstance(value, dict) and value), {})
+        kev = next((data.cisa_kev.get(cve, {}) for cve in cve_ids), {}) if data is not None else {}
+        cvss_score = max((_nvd_cvss(record) for record in nvd_records.values()), default=None)
+        advisories = [{
+            "vulnerability_id": cve, "vulnerability_ids": [cve], "cve_ids": [cve],
+            "fixed_versions": list(match.fixed_versions), "severity": match.severity,
+            "cvss_score": _nvd_cvss(nvd_records.get(cve, {})),
+            "known_exploited": bool(data and data.cisa_kev.get(cve)),
+            "nvd": nvd_records.get(cve, {}), "cisa_kev": data.cisa_kev.get(cve, {}) if data else {},
+            "locations": list(match.locations or (str(component.path),)), "match_details": list(match.match_details),
+        } for cve in cve_ids]
+        final_version = ""
+        final_status = "unresolved"
+        final_checked_versions: tuple[str, ...] = ()
+        if grype_binary is not None and match.fixed_versions and getattr(component, "purl", ""):
+            # Reuse the Windows library-report verifier at scan time so the
+            # Linux payload remains complete when exported after the target
+            # checkout or Grype process is gone.
+            from types import SimpleNamespace
+            from .java_vulnerability_scan import _resolve_final_version
+            final_version, final_status, final_checked_versions, _ = _resolve_final_version(
+                SimpleNamespace(
+                    component_purl=component.purl,
+                    component_name=component.name,
+                    installed_version=component.version,
+                    fixed_versions=tuple(match.fixed_versions),
+                ),
+                grype_binary,
+                300.0,
+            )
+        records.append({
+            "vulnerability_id": match.vulnerability_id, "vulnerability_ids": list(match.vulnerability_ids or (match.vulnerability_id,)), "cve_ids": list(match.cve_ids),
+            "component_name": component.name, "installed_version": component.version, "fixed_versions": list(match.fixed_versions),
+            "severity": match.severity, "cvss_score": cvss_score, "known_exploited": bool(kev), "nvd": nvd, "cisa_kev": kev,
+            "locations": list(match.locations or (str(component.path),)), "identity_status": getattr(component, "identity_status", "resolved"),
+            "recommendation": f"Upgrade to {', '.join(match.fixed_versions)}." if match.fixed_versions else "Review the advisory and remediate with the vendor-supported release.",
+            "match_details": list(match.match_details),
+            "advisories": advisories,
+            "final_version": final_version,
+            "final_status": final_status,
+            "final_checked_versions": list(final_checked_versions),
+        })
+    return records
+
+
+def _nvd_cvss(record: object) -> float | None:
+    if not isinstance(record, dict):
+        return None
+    cvss = record.get("cvss")
+    if isinstance(cvss, dict):
+        values = [value.get("baseScore") for value in cvss.values() if isinstance(value, dict)]
+        numeric = [float(value) for value in values if isinstance(value, (int, float))]
+        if numeric:
+            return max(numeric)
+    metrics = record.get("metrics")
+    if isinstance(metrics, dict):
+        values = []
+        for entries in metrics.values():
+            if isinstance(entries, list):
+                values.extend(entry.get("cvssData", {}).get("baseScore") for entry in entries if isinstance(entry, dict) and isinstance(entry.get("cvssData"), dict))
+        numeric = [float(value) for value in values if isinstance(value, (int, float))]
+        if numeric:
+            return max(numeric)
+    return None
 
 
 def _replace_upload_path(value: Any, private_path: str, public_path: str) -> Any:

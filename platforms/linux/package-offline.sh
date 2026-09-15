@@ -15,6 +15,7 @@ grype_db_latest_url="${KODA_GRYPE_DB_LATEST_URL:-https://grype.anchore.io/databa
 
 refresh=0
 vuln_data_only=0
+data_cache_only=0
 vuln_data_dir="${KODA_VULN_DATA_DIR:-$repo_root/dist/Windows}"
 
 usage() {
@@ -27,6 +28,7 @@ macOS/Linux host.
 Options:
   --refresh         re-validate cached yearly NVD feeds against their .meta
                     files and re-download the Grype DB latest metadata
+  --data-cache-only download/verify NVD and KEV only, for Linux update packages
   --vuln-data-only  download only NVD and CISA KEV, then write
                     dist/Windows/koda-vuln-data-<date>.zip for the Windows
                     installer. Skips Syft, Grype, the Grype DB, and the Linux
@@ -51,6 +53,11 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --refresh)
       refresh=1
+      shift
+      ;;
+    --data-cache-only)
+      vuln_data_only=1
+      data_cache_only=1
       shift
       ;;
     --vuln-data-only)
@@ -267,6 +274,11 @@ done
 cisa_file="$asset_dir/vuln-data/known_exploited_vulnerabilities.json"
 invalidate "$cisa_file"
 download "$cisa_url" "$cisa_file"
+
+if [ "$data_cache_only" -eq 1 ]; then
+  echo "$asset_dir/vuln-data"
+  exit 0
+fi
 
 # The Windows installer already bundles Syft, Grype, and the Grype DB, so its
 # data package carries only the feeds that change daily.

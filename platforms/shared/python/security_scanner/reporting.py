@@ -7,6 +7,7 @@ import json
 import os
 import re
 import zipfile
+import hashlib
 from dataclasses import asdict, is_dataclass
 from functools import lru_cache
 from collections import Counter, defaultdict
@@ -1793,6 +1794,11 @@ def _web_audit_markdown_escape(value: str) -> str:
 def render_html_pair_zip_from_payload(payload: dict[str, object], language: str = "ko") -> bytes:
     """Export the dashboard findings as a linked main/detail HTML pair."""
     findings = [_finding_from_payload(item) for item in _payload_findings(payload, language)]
+    stored_contexts = {
+        _finding_identity(finding): item.get("source_context")
+        for finding, item in zip(findings, _payload_findings(payload, language))
+        if isinstance(item.get("source_context"), (dict, list))
+    }
     target_names, target_paths, components, scan = _payload_report_context(payload, findings)
     standard = str(scan.get("standard") or DEFAULT_STANDARD)
     standard_category = str(scan.get("standard_category") or DEFAULT_STANDARD_CATEGORY)
@@ -1815,7 +1821,14 @@ def render_html_pair_zip_from_payload(payload: dict[str, object], language: str 
         enable_osv=bool(scan.get("enable_osv", False)),
         scanned_categories=tuple(str(item) for item in scan.get("scanned_categories", ()) if str(item).strip()),
         source_analysis=payload.get("source_analysis"),
+        stored_source_contexts=stored_contexts,
     )
+    # Keep the report-safe source window that was persisted with the scan.  A
+    # later export may run after the original checkout has been removed.
+    vulnerability_html = _render_java_library_reports(payload, language) if _is_library_payload(payload) else ""
+    if vulnerability_html:
+        from .java_vulnerability_reporting import render_main_html
+        main_html = render_main_html(_java_library_payload(payload), "ko", "report-detail.html", vulnerability_detail_href="report-vulnerabilities.html")
     web_audit = payload.get("web_audit")
     if isinstance(web_audit, dict):
         audit_html = _web_audit_html(web_audit, language)
@@ -1825,7 +1838,91 @@ def render_html_pair_zip_from_payload(payload: dict[str, object], language: str 
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("report.html", main_html)
         archive.writestr("report-detail.html", detail_html)
+        if vulnerability_html:
+            archive.writestr("report-vulnerabilities.html", vulnerability_html)
     return buffer.getvalue()
+
+
+def _restore_stored_source_context(dashboard: dict[str, object], stored: list[dict[str, object]]) -> None:
+    """Overlay persisted context by stable finding identity, never reread paths."""
+    by_key = {
+        (str(item.get("rule_id") or ""), str(item.get("path") or ""), item.get("line"), str(item.get("evidence") or "")): item.get("source_context")
+        for item in stored if isinstance(item.get("source_context"), (dict, list))
+    }
+    localized = dashboard.get("findings_by_language")
+    if not isinstance(localized, dict):
+        return
+    for values in localized.values():
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            key = (str(item.get("rule_id") or ""), str(item.get("path") or ""), item.get("line"), str(item.get("evidence") or ""))
+            if key in by_key:
+                item["source_context"] = by_key[key]
+
+
+def _is_library_payload(payload: dict[str, object]) -> bool:
+    scan = payload.get("scan") if isinstance(payload.get("scan"), dict) else {}
+    return str(scan.get("scope") or scan.get("kind") or "").lower() == "library" or bool(payload.get("vulnerabilities"))
+
+
+def _java_library_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Adapt the Linux Grype payload to the Windows report contract."""
+    values = _linux_vulnerabilities(payload)
+    vulnerabilities = []
+    for raw in values:
+        item = dict(raw)
+        ids = item.get("vulnerability_ids") or item.get("cve_ids") or [item.get("vulnerability_id") or item.get("rule_id") or "UNKNOWN"]
+        item.setdefault("vulnerability_id", str(ids[0]))
+        item["vulnerability_ids"] = [str(value) for value in ids]
+        item["cve_ids"] = [str(value) for value in (item.get("cve_ids") or ids)]
+        item.setdefault("component_name", item.get("package_name") or item.get("name") or "—")
+        item.setdefault("installed_version", item.get("version") or "—")
+        item.setdefault("fixed_versions", [])
+        item.setdefault("identity_status", "resolved")
+        item.setdefault("locations", [])
+        item.setdefault("match_details", [])
+        item.setdefault("known_exploited", bool(item.get("cisa_kev")))
+        item.setdefault("final_version", "")
+        item.setdefault("final_status", "unresolved")
+        item.setdefault("final_checked_versions", [])
+        item.setdefault("advisories", [{
+            "vulnerability_ids": item["vulnerability_ids"], "cve_ids": item["cve_ids"],
+            "severity": item.get("severity", "info"), "cvss_score": item.get("cvss_score"),
+            "known_exploited": item.get("known_exploited", False), "fixed_versions": item.get("fixed_versions", []),
+            "locations": item.get("locations", []), "match_details": item.get("match_details", []),
+            "nvd": item.get("nvd", {}), "cisa_kev": item.get("cisa_kev", {}),
+        }])
+        vulnerabilities.append(item)
+    components = payload.get("components", []) if isinstance(payload.get("components"), list) else []
+    severity_counts: dict[str, int] = {}
+    cve_ids: set[str] = set()
+    affected_versions: set[tuple[str, str]] = set()
+    for item in vulnerabilities:
+        severity = str(item.get("severity") or "info").lower()
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        cve_ids.update(str(value).upper() for value in (item.get("cve_ids") or item.get("vulnerability_ids") or ()) if str(value).strip())
+        affected_versions.add((str(item.get("component_name") or ""), str(item.get("installed_version") or "")))
+    unresolved = sum(1 for item in components if isinstance(item, dict) and str(item.get("identity_status") or "resolved") != "resolved")
+    database = (((payload.get("scan") or {}).get("local_vulnerability") or {}).get("database") or {})
+    data_as_of = str(payload.get("data_as_of") or database.get("built") or "unknown")
+    summary = {"archive_count": 0, "component_count": len(components) or len(affected_versions), "unresolved_component_count": unresolved, "duplicate_file_count": sum(max(0, len(item.get("locations", ())) - 1) for item in components if isinstance(item, dict)), "severity_counts": severity_counts, "kev_count": sum(bool(item.get("known_exploited")) for item in vulnerabilities), "raw_match_count": len(vulnerabilities), "unique_vulnerability_count": len(cve_ids), "affected_library_version_count": len(affected_versions)}
+    return {"summary": summary, "target": str((payload.get("scan") or {}).get("path") or "Linux library scan"), "targets": [], "completed_at": str(payload.get("generated_at") or ""), "data_as_of": data_as_of, "components": components, "vulnerabilities": vulnerabilities, "vulnerabilities_available": "vulnerabilities" in payload, "warnings": (payload.get("scan") or {}).get("warnings", [])}
+
+
+def _render_java_library_reports(payload: dict[str, object], language: str) -> str:
+    from .java_vulnerability_reporting import render_vulnerability_details_html
+    return render_vulnerability_details_html(_java_library_payload(payload), "ko" if language == "ko" else "en")
+
+
+def _linux_vulnerabilities(payload: dict[str, object]) -> list[dict[str, object]]:
+    values = payload.get("vulnerabilities")
+    if isinstance(values, list):
+        return [dict(item) for item in values if isinstance(item, dict)]
+    findings = payload.get("findings")
+    return [dict(item) for item in findings if isinstance(item, dict) and str(item.get("category") or "").lower() == "dependencies"] if isinstance(findings, list) else []
 
 
 def _payload_sw49(payload: dict[str, object]) -> dict[str, object] | None:
@@ -2314,6 +2411,7 @@ def render_html_pair(
     enable_osv: bool = False,
     scanned_categories: tuple[str, ...] = (),
     source_analysis: object | None = None,
+    stored_source_contexts: dict[tuple[str, str, object, str], object] | None = None,
 ) -> tuple[str, str]:
     """Render a compact landing page and the full source findings page.
 
@@ -2335,6 +2433,7 @@ def render_html_pair(
         enable_osv=enable_osv,
         scanned_categories=scanned_categories,
         source_analysis=source_analysis,
+        stored_source_contexts=stored_source_contexts,
     )
     # File reports are Korean-only for now. The summary links to the sibling
     # detail artifact, while the detail page remains independently openable.
@@ -2840,6 +2939,7 @@ def build_dashboard_payload(
     enable_osv: bool = False,
     scanned_categories: tuple[str, ...] = (),
     source_analysis: object | None = None,
+    stored_source_contexts: dict[tuple[str, str, object, str], object] | None = None,
 ) -> dict[str, object]:
     generated, generated_display = _generated_at()
     summary = _summary(findings, target_names, target_paths, source_analysis)
@@ -2877,7 +2977,7 @@ def build_dashboard_payload(
         },
         "findings_by_language": {
             "en": [
-                _finding_payload(finding, rule_mappings.get(finding.rule_id, ()))
+                _finding_payload(finding, rule_mappings.get(finding.rule_id, ()), (stored_source_contexts or {}).get(_finding_identity(finding)))
                 for finding in findings
             ],
             "ko": [
@@ -2885,6 +2985,7 @@ def build_dashboard_payload(
                     finding,
                     "ko",
                     rule_mappings.get(finding.rule_id, ()),
+                    (stored_source_contexts or {}).get(_finding_identity(finding)),
                 )
                 for finding in findings
             ],
@@ -3090,9 +3191,14 @@ def _source_context_payload(finding: Finding) -> dict[str, object]:
     }
 
 
+def _finding_identity(finding: Finding) -> tuple[str, str, object, str]:
+    return finding.rule_id, str(finding.path), finding.line, finding.evidence
+
+
 def _finding_payload(
     finding: Finding,
     standard_mappings: tuple[dict[str, object], ...] | list[dict[str, object]] = (),
+    stored_source_context: object | None = None,
 ) -> dict[str, object]:
     payload = {
         "rule_id": finding.rule_id,
@@ -3122,7 +3228,9 @@ def _finding_payload(
         "issue_key": finding.issue_key,
         "standard_mappings": [dict(mapping) for mapping in standard_mappings],
     }
-    if finding.line is not None and not finding.resource:
+    if stored_source_context is not None:
+        payload["source_context"] = stored_source_context
+    elif finding.line is not None and not finding.resource:
         payload["source_context"] = _source_context_payload(finding)
     return payload
 
@@ -3131,8 +3239,9 @@ def _localized_finding_payload(
     finding: Finding,
     language: str,
     standard_mappings: tuple[dict[str, object], ...] | list[dict[str, object]] = (),
+    stored_source_context: object | None = None,
 ) -> dict[str, object]:
-    payload = _finding_payload(finding, standard_mappings)
+    payload = _finding_payload(finding, standard_mappings, stored_source_context)
     if language != "ko":
         return payload
 

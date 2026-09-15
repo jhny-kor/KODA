@@ -8,6 +8,7 @@ import json
 import os
 import re
 import ssl
+import tarfile
 import time
 import uuid
 from pathlib import Path
@@ -385,6 +386,19 @@ def resolve_gitlab_ref(project_id: int, ref_type: str, ref_name: str, settings_d
     return sha.lower()
 
 
+def gitlab_archive_root(path: Path) -> str:
+    """Return the top-level directory observed in GitLab's tar archive."""
+    try:
+        with tarfile.open(path, mode="r:gz") as archive:
+            for member in archive:
+                parts = [part for part in str(member.name).split("/") if part]
+                if parts:
+                    return parts[0]
+    except (OSError, tarfile.TarError) as exc:
+        raise IntegrationError("GitLab 저장소 압축파일의 루트를 확인할 수 없습니다") from exc
+    raise IntegrationError("GitLab 저장소 압축파일에 파일이 없습니다")
+
+
 def download_gitlab_archive(project_id: int, commit_sha: str, target: Path, *, max_bytes: int, settings_dir: str | Path | None = None) -> tuple[str, int]:
     if not re.fullmatch(r"[0-9a-f]{40,64}", commit_sha):
         raise ValueError("올바른 commit SHA가 아닙니다")
@@ -737,7 +751,7 @@ def publish_tracker_result(mapping: dict, run: dict, tracker_run_id: str, tracke
         schedule_run_id = str(snapshot.get("schedule_run_id") or "")
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", target_id) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", schedule_run_id):
             raise IntegrationError("스케줄 결과 식별자가 올바르지 않습니다")
-        source_branch = f"koda/scheduled/{target_id}/{schedule_run_id}"
+        source_branch = str(snapshot.get("gitlab_result_branch") or f"koda/scheduled/{target_id}/{schedule_run_id}")
         file_path = f".koda/scheduled-results/{target_id}/{schedule_run_id}.json"
         short_sha = schedule_run_id[:12]
     else:

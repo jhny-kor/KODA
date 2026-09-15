@@ -164,6 +164,9 @@ def _job_context(store, target, scheduled):
         "rule_policy_version": policy["version"], "rule_policy_hash": policy["hash"],
         "gitlab_mapping_id": target.get("gitlab_mapping_id") or "",
         "gitlab_target_branch": target.get("gitlab_target_branch") or "",
+        # Scheduled GitLab archives are re-packed with relative member names;
+        # the scan input therefore has no synthetic top-level archive root.
+        "gitlab_archive_root": "",
     }
     if target.get("source_kind") == "gitlab":
         source = store.gitlab_repository(target["source_gitlab_mapping_id"], target["project_id"])

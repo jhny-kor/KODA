@@ -187,6 +187,13 @@ def _run(binary: Path, arguments: tuple[str, ...], timeout: float) -> subprocess
     env["GRYPE_DB_AUTO_UPDATE"] = "false"
     env["GRYPE_DB_VALIDATE_AGE"] = "false"
     try:
+        from .data_release import grype_cache_dir
+        cache_dir = grype_cache_dir()
+    except (ImportError, OSError):
+        cache_dir = None
+    if cache_dir is not None:
+        env["GRYPE_DB_CACHE_DIR"] = str(cache_dir)
+    try:
         return subprocess.run(
             [str(binary), *arguments],
             check=False,

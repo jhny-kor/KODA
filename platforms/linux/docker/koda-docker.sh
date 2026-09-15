@@ -324,6 +324,12 @@ dashboard_start() {
   if [ -n "$schedule_ssh_dir" ]; then
     filtered+=(-v "$schedule_ssh_dir:/run/koda/ssh:ro")
   fi
+  local data_volume="${KODA_VULN_DATA_VOLUME:-}"
+  if [ -n "$data_volume" ]; then
+    [[ "$data_volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "error: invalid KODA_VULN_DATA_VOLUME" >&2; exit 2; }
+    docker volume inspect "$data_volume" >/dev/null || { echo "error: vulnerability data volume is missing" >&2; exit 2; }
+    filtered+=(-v "$data_volume:/var/lib/koda-vuln-data:ro" -e KODA_VULN_DATA_ROOT=/var/lib/koda-vuln-data)
+  fi
   local schedule_auth="$portal_data/schedule-auth"
   local schedule_state="${KODA_SCHEDULE_STATE_DIR:-${portal_data}-schedule}"
   if [ "${KODA_SCHEDULE_ENABLED:-0}" = "1" ]; then
@@ -407,6 +413,9 @@ dashboard_start() {
       -e KODA_SCHEDULE_STATE_DIR=/var/lib/koda-schedule
       -e KODA_SCHEDULE_WORK_DIR=/var/lib/koda-schedule/work
     )
+    if [ -n "$data_volume" ]; then
+      worker_opts+=(-v "$data_volume:/var/lib/koda-vuln-data:ro" -e KODA_VULN_DATA_ROOT=/var/lib/koda-vuln-data)
+    fi
     if ! docker run "${worker_opts[@]}" "$image" schedule-worker >/dev/null; then
       docker rm -f "$schedule_worker_name" >/dev/null 2>&1 || true
       echo "error: could not start $schedule_worker_name" >&2

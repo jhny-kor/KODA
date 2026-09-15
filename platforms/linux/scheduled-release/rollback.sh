@@ -9,6 +9,10 @@ prefix="${KODA_SUITE_PREFIX:-${HOME:-$PWD}/koda-suite}"
 backup="$(head -n1 "$prefix/.koda-scheduled-last-backup")"
 [[ -d "$backup" && -f "$backup/rollback-image-refs.txt" ]] || { echo "error: backup is incomplete: $backup" >&2; exit 2; }
 [[ -x "$backup/koda-suite.previous" && -x "$backup/koda-docker.previous" ]] || { echo "error: launcher backup is incomplete: $backup" >&2; exit 2; }
+for relative in tracker/compose.yaml tracker/compose.airgap.yaml tracker/compose.integration.yaml \
+  tracker/gateway/gateway.conf.template tracker/.env; do
+  [[ -f "$backup/$relative" ]] || { echo "error: configuration backup is incomplete: $relative" >&2; exit 2; }
+done
 command -v docker >/dev/null || { echo "error: docker is required" >&2; exit 2; }
 exec 9>"$prefix/.koda-suite-operation.lock"
 flock -n 9 || { echo "error: another Suite operation is running" >&2; exit 2; }
@@ -17,6 +21,9 @@ compose() {
     -f "$prefix/tracker/compose.yaml" -f "$prefix/tracker/compose.airgap.yaml" \
     -f "$prefix/tracker/compose.integration.yaml" "$@"
 }
+if compose config --services 2>/dev/null | grep -qx 'portal-data-updater'; then
+  compose stop portal-data-updater >/dev/null || { echo "error: could not stop Tracker data updater" >&2; exit 2; }
+fi
 "$prefix/koda/koda-docker" dashboard stop >/dev/null
 compose stop portal-web portal-api portal-worker gateway >/dev/null
 refs=() rollback=()
@@ -24,6 +31,23 @@ while IFS= read -r ref; do [[ -n "$ref" ]] && refs+=("$ref"); done <"$backup/old
 while IFS= read -r ref; do [[ -n "$ref" ]] && rollback+=("$ref"); done <"$backup/rollback-image-refs.txt"
 [[ "${#refs[@]}" == "${#rollback[@]}" && "${#refs[@]}" -gt 0 ]] || { echo "error: invalid rollback metadata" >&2; exit 2; }
 for i in "${!refs[@]}"; do docker tag "${rollback[$i]}" "${refs[$i]}"; done
+for relative in tracker/compose.yaml tracker/compose.airgap.yaml tracker/compose.integration.yaml \
+  tracker/gateway/gateway.conf.template tracker/.env; do
+  install -m 0644 "$backup/$relative" "$prefix/$relative"
+done
+chmod 600 "$prefix/tracker/.env"
+if [[ -d "$backup/tracker/gateway" ]]; then
+  cp -a "$backup/tracker/gateway/." "$prefix/tracker/gateway/"
+fi
+if [[ -f "$backup/legacy-current-target" && -s "$backup/legacy-current-target" && -f "$backup/metadata.env" ]]; then
+  migration_image="$(awk -F= '$1=="migration_image" {print substr($0,index($0,"=")+1)}' "$backup/metadata.env")"
+  vuln_volume="$(awk -F= '$1=="vuln_volume" {print substr($0,index($0,"=")+1)}' "$backup/metadata.env")"
+  [[ -n "$migration_image" && -n "$vuln_volume" ]] || { echo "error: migration rollback metadata is missing" >&2; exit 2; }
+  docker run --rm --user 0 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --network none \
+    -v "$backup:/backup:ro" -v "$vuln_volume:/data" "$migration_image" python -c \
+    'from pathlib import Path; import os, uuid; target=Path("/backup/legacy-current-target").read_text().strip(); tmp=Path("/data")/(".current.rollback."+uuid.uuid4().hex); os.symlink(target,tmp); os.replace(tmp,"/data/current")' \
+    || { echo "error: could not restore the original Tracker current pointer" >&2; exit 2; }
+fi
 install -m 0755 "$backup/koda-suite.previous" "$prefix/koda-suite"
 install -m 0755 "$backup/koda-docker.previous" "$prefix/koda/koda-docker"
 resource_env=()
@@ -46,6 +70,9 @@ if [[ -f "$backup/metadata.env" ]]; then
 fi
 env "${resource_env[@]}" "${schedule_env[@]}" "$prefix/koda-suite" start --prefix "$prefix" >/dev/null
 compose up -d --no-build --pull never --no-deps --force-recreate portal-web portal-api portal-worker >/dev/null
+if compose config --services 2>/dev/null | grep -qx 'portal-data-updater'; then
+  compose up -d --no-build --pull never --no-deps --force-recreate portal-data-updater >/dev/null
+fi
 compose up -d --no-build --pull never --no-deps gateway >/dev/null
 env "${resource_env[@]}" KODA_SCHEDULE_ENABLED=0 "$prefix/koda-suite" status --prefix "$prefix"
 echo "rolled back application images; data volumes and databases were preserved; backup=$backup"

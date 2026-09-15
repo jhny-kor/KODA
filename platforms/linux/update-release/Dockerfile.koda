@@ -1,0 +1,2 @@
+FROM local/koda-scheduled:20260910-ui1
+COPY platforms/shared/python/security_scanner/ /opt/koda/app/security_scanner/

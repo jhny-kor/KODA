@@ -944,6 +944,16 @@ class PortalStore:
                 "rule_policy_hash": policy["hash"], "scanner_version": _scanner_version(),
                 "requested_by": "schedule-worker", **source_snapshot,
             }
+            if snapshot.get("gitlab_mapping_id"):
+                project_name = db.execute("SELECT name FROM projects WHERE project_id=?", (str(project_id),)).fetchone()[0]
+                slug = re.sub(r"[^\w-]+", "-", project_name, flags=re.UNICODE).strip("-_" )
+                slug = slug.encode("utf-8")[:72].decode("utf-8", errors="ignore") or "project"
+                day = str(snapshot.get("scheduled_for") or self._now())[:10].replace("-", "")
+                previous = db.execute("SELECT snapshot_json FROM scan_runs WHERE project_id=?", (str(project_id),)).fetchall()
+                version = 1 + max((int(json.loads(row[0]).get("gitlab_result_version", 0)) for row in previous
+                                   if str(json.loads(row[0]).get("gitlab_result_date", "")).replace("-", "") == day), default=0)
+                snapshot.update(gitlab_result_date=f"{day[:4]}-{day[4:6]}-{day[6:]}", gitlab_result_version=version,
+                                gitlab_result_branch=f"koda/results/{slug}/{day}/round-{version}")
             run_id, revision_id, now = str(uuid.uuid4()), str(uuid.uuid4()), self._now()
             db.execute(
                 "INSERT INTO scan_runs(run_id,project_id,round_number,status,standard,standard_category,input_id,policy_version,requested_by,snapshot_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -1153,6 +1163,7 @@ class PortalStore:
                     "gitlab_mapping_id", "gitlab_project_id", "gitlab_path_with_namespace",
                     "gitlab_ref_type", "gitlab_ref_name", "gitlab_commit_sha",
                     "gitlab_archive_sha256", "gitlab_default_branch", "gitlab_fetched_at",
+                    "gitlab_archive_root",
                     "tracker_service_id", "tracker_environment_id", "tracker_token_ref",
                 }
                 if not isinstance(source_snapshot, dict) or not set(source_snapshot) <= allowed:
@@ -1165,9 +1176,9 @@ class PortalStore:
                 day = dt.datetime.fromisoformat(now).astimezone(dt.timezone(dt.timedelta(hours=9))).date()
                 start = dt.datetime.combine(day, dt.time(), dt.timezone(dt.timedelta(hours=9)))
                 previous = db.execute(
-                    "SELECT snapshot_json FROM scan_runs WHERE project_id=? AND requested_by=? "
+                    "SELECT snapshot_json FROM scan_runs WHERE project_id=? "
                     "AND created_at>=? AND created_at<?",
-                    (str(project_id), str(subject_id), start.astimezone(dt.timezone.utc).isoformat(),
+                    (str(project_id), start.astimezone(dt.timezone.utc).isoformat(),
                      (start + dt.timedelta(days=1)).astimezone(dt.timezone.utc).isoformat()),
                 ).fetchall()
                 version = 1 + max((int(json.loads(row[0]).get("gitlab_result_version", 0)) for row in previous), default=0)
@@ -1180,7 +1191,7 @@ class PortalStore:
                 snapshot.update({
                     "project_name": project_name, "requested_by_display": display,
                     "gitlab_result_date": day.isoformat(), "gitlab_result_version": version,
-                    "gitlab_result_branch": f"koda/results/{day:%Y%m%d}/{slug}-{str(project_id)[:8]}/{subject_id}/v{version}",
+                    "gitlab_result_branch": f"koda/results/{slug}/{day:%Y%m%d}/round-{version}",
                 })
             db.execute(
                 "INSERT INTO scan_runs(run_id,project_id,round_number,status,standard,standard_category,input_id,policy_version,requested_by,snapshot_json,created_at) "

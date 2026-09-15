@@ -91,6 +91,5 @@ class PatchPreflightTests(unittest.TestCase):
                 self.assertEqual(preflight.main(["--prefix", str(self.root / "installed")]), 0)
                 self.assertIn("compatibility=passed", [call.args[0] for call in output.call_args_list])
 
-
 if __name__ == "__main__":
     unittest.main()

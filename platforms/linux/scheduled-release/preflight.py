@@ -35,6 +35,10 @@ class PreflightError(RuntimeError):
 
 def check_dashboard_mount(mount: dict, prefix: Path) -> None:
     destination = str(mount.get("Destination", ""))
+    if destination == "/var/lib/koda-vuln-data":
+        if mount.get("Type") != "volume" or mount.get("RW") is not False:
+            raise PreflightError("KODA vulnerability data mount must be a read-only volume")
+        return
     if destination in ("/run/koda/ssh", "/run/koda/schedule"):
         source = Path(str(mount.get("Source", "")))
         if mount.get("Type") != "bind" or mount.get("RW") is not False or not source.is_dir():
@@ -80,10 +84,14 @@ KNOWN_LAUNCHER_HASHES = {
     "koda-suite": {
         "455e3ed02c2612fee3af012be28989c561a3f7c3750df455a85a0b488f497652",
         "3f66d2b530cf08391fd8421c0baac2a97340cb7d95f491584bb5ec20c4df4f18",
+        # Launcher shipped in the reviewed 20260910-ui1 offline patch.
+        "3243e6a1a7f29b5f8a8197ec8d2d2107cde6496716ad1dfd900262bee553a3b6",
     },
     "koda-docker": {
         "5d48e5b6a7ec1d287a7681c35469bd728c674e05d83cbce1097871d66dc25826",
         "008fa4cdd4a53646ddcfa208611c193e92169e47f13d58cbfd7f45b5cd47017d",
+        # Launcher shipped in the reviewed 20260910-ui1 offline patch.
+        "6790dc49414110a086ba30c4a4058db5acc1000bfb3551b5c63e4ab195a9739c",
     },
 }
 
@@ -146,6 +154,15 @@ def check_backend_hashes(contract: Path, containers: dict[str, str], release_roo
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise PreflightError("invalid tracker-backend-sha256.json") from exc
     accepted = {json.dumps(expected, sort_keys=True)}
+    baseline_path = contract / "tracker-backend-baselines.json"
+    if baseline_path.is_file():
+        try:
+            baselines = json.loads(baseline_path.read_text(encoding="utf-8"))
+            if not isinstance(baselines, dict) or any(not isinstance(value, dict) or not value for value in baselines.values()):
+                raise ValueError
+            accepted.update(json.dumps(value, sort_keys=True) for value in baselines.values())
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise PreflightError("invalid tracker-backend-baselines.json") from exc
     bundled = release_root / "source" / "tracker" / "koda_tracker"
     if bundled.is_dir():
         accepted.add(json.dumps({str(p.relative_to(bundled)): hashlib.sha256(p.read_bytes()).hexdigest()

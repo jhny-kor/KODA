@@ -1,0 +1,7 @@
+FROM local/koda-scheduled:20260910-ui1 AS koda
+FROM local/koda-tracker-api-scheduled:20260910-ui1
+USER root
+COPY --from=koda /opt/koda/tools/grype /usr/local/bin/koda-grype
+COPY apps/api/koda_tracker/ /app/koda_tracker/
+RUN mkdir -p /var/lib/sbom-tracker/data-updates && chown tracker:tracker /var/lib/sbom-tracker/data-updates
+USER tracker

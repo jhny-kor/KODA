@@ -36,18 +36,28 @@ previous_schedule_ssh_dir="${previous_schedule_ssh_dir:-${KODA_SCHEDULE_SSH_DIR:
 python3 - "$root/image-inventory.json" <<'PYINV'
 import json, pathlib, sys
 inventory = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-expected = {
-    "koda": "local/koda-scheduled:20260910-ui1",
-    "portal-web": "local/koda-tracker-web-scheduled:20260910-ui1",
-    "portal-api": "local/koda-tracker-api-scheduled:20260910-ui1",
-}
 items = inventory if isinstance(inventory, list) else list(inventory.values()) if isinstance(inventory, dict) else []
+expected = {
+    "koda": next((i.get("reference") for i in items if i.get("reference", "").startswith("local/koda-scheduled:")), ""),
+    "portal-web": next((i.get("reference") for i in items if i.get("reference", "").startswith("local/koda-tracker-web-scheduled:")), ""),
+    "portal-api": next((i.get("reference") for i in items if i.get("reference", "").startswith("local/koda-tracker-api-scheduled:")), ""),
+}
 by_ref = {item.get("reference"): item for item in items if isinstance(item, dict)}
 for name, ref in expected.items():
     item = by_ref.get(ref)
     if not item or item.get("platform") != "linux/amd64" or not isinstance(item.get("id"), str) or not item["id"].startswith("sha256:"):
         raise SystemExit(f"image inventory mismatch: {name}")
 PYINV
+refs_json="$(python3 - "$root/image-inventory.json" <<'PYREFS'
+import json, pathlib, sys
+items = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+by = {str(item.get("reference", "")).split(":", 1)[0]: item.get("reference", "") for item in items if isinstance(item, dict)}
+print(json.dumps(by))
+PYREFS
+)"
+koda_release_ref="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["local/koda-scheduled"])' <<<"$refs_json")"
+portal_web_release_ref="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["local/koda-tracker-web-scheduled"])' <<<"$refs_json")"
+portal_api_release_ref="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["local/koda-tracker-api-scheduled"])' <<<"$refs_json")"
 exec 9>"$prefix/.koda-suite-operation.lock"
 flock -n 9 || fail "another Suite operation is running"
 python3 "$root/preflight.py" --prefix "$prefix" || fail "existing Suite preflight failed"
@@ -92,14 +102,43 @@ stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup="$prefix/backups/scheduled-release/$stamp"
 mkdir -p "$backup/sqlite" "$backup"
 chmod 700 "$backup" "$backup/sqlite"
-
-# The Suite is stopped before copying SQLite files and before pg_dump. Volumes
-# and the database containers remain intact throughout this operation.
 compose() {
   docker compose --project-directory "$prefix/tracker" --env-file "$prefix/tracker/.env" \
     -f "$prefix/tracker/compose.yaml" -f "$prefix/tracker/compose.airgap.yaml" \
     -f "$prefix/tracker/compose.integration.yaml" "$@"
 }
+for relative in tracker/compose.yaml tracker/compose.airgap.yaml tracker/compose.integration.yaml \
+  tracker/gateway/gateway.conf.template tracker/.env; do
+  [[ -f "$prefix/$relative" ]] || fail "existing Tracker configuration is missing: $relative"
+  mkdir -p "$backup/$(dirname -- "$relative")"
+  cp -p "$prefix/$relative" "$backup/$relative"
+done
+cp -a "$prefix/tracker/gateway/." "$backup/tracker/gateway/"
+
+# Identify and archive the existing Tracker vulnerability volume while it is
+# still mounted read-only by the running API. The archive is independent of
+# the database backup and is retained for recovery even if migration fails.
+if compose config --services 2>/dev/null | grep -qx 'portal-data-updater'; then
+  compose stop portal-data-updater >/dev/null || fail "could not quiesce Tracker data updater"
+fi
+portal_api_container="$(compose ps -q portal-api 2>/dev/null || true)"
+vuln_volume="$(docker inspect "$portal_api_container" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/sbom-tracker/vuln-data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null || true)"
+[[ -n "$vuln_volume" ]] || fail "existing Tracker vulnerability-data volume could not be identified"
+docker run --rm --user 0 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --network none \
+  -v "$vuln_volume:/data:ro" -v "$backup:/backup" "$portal_api_release_ref" \
+  tar -czf /backup/tracker-vuln-data-volume.tar.gz -C /data . \
+  || fail "Tracker vulnerability-data volume backup failed"
+chmod 600 "$backup/tracker-vuln-data-volume.tar.gz"
+printf 'vuln_volume=%s\n' "$vuln_volume" >>"$backup/metadata.env.pending"
+docker run --rm --user 0 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --network none \
+  -v "$vuln_volume:/data:ro" -v "$backup:/backup:rw" "$portal_api_release_ref" python -c \
+  'from pathlib import Path; import os; p=Path("/data/current"); Path("/backup/legacy-current-target").write_text(os.readlink(p) if p.is_symlink() else "")' \
+  || fail "could not record the legacy Tracker current pointer"
+printf 'migration_image=%s\n' "$portal_api_release_ref" >>"$backup/metadata.env.pending"
+
+# The Suite is stopped before copying SQLite files and before pg_dump. Volumes
+# and the database containers remain intact throughout this operation.
 declare -a old_refs=() rollback_refs=()
 resource_json="$(docker inspect koda-dashboard --format '{{json .HostConfig}}' 2>/dev/null || true)"
 [[ -n "$resource_json" ]] || fail "koda-dashboard is not inspectable"
@@ -136,6 +175,8 @@ compose exec -T postgres sh -c 'exec pg_dumpall -U "$POSTGRES_USER" --clean --if
 chmod 600 "$backup/tracker.pg_dump.sql"
 printf 'created_at=%s\nsqlite_found=%s\nschedule_enabled=%s\nschedule_ssh_dir=%s\n' \
   "$stamp" "$sqlite_found" "$previous_schedule_enabled" "$previous_schedule_ssh_dir" >"$backup/metadata.env"
+cat "$backup/metadata.env.pending" >>"$backup/metadata.env"
+rm -f "$backup/metadata.env.pending"
 
 env_value() { awk -F= -v k="$2" '$1==k {v=$0; sub(/^[^=]*=/,"",v)} END{print v}' "$1"; }
 tag_image() {
@@ -178,10 +219,52 @@ cp -p "$prefix/koda-suite" "$backup/koda-suite.previous"
 cp -p "$prefix/koda/koda-docker" "$backup/koda-docker.previous"
 printf '%s\n' "$backup" >"$prefix/.koda-scheduled-last-backup"
 echo "rollback backup ready: $backup"
-tag_image local/koda-scheduled:20260910-ui1 "$koda_ref"
-tag_image local/koda-tracker-web-scheduled:20260910-ui1 "$web_ref"
-tag_image local/koda-tracker-api-scheduled:20260910-ui1 "$api_ref"
-tag_image local/koda-tracker-api-scheduled:20260910-ui1 "$worker_ref"
+# Install the reviewed data-updater Compose wiring only after the old files and
+# .env have been backed up. The env file remains authoritative for all secrets.
+if [[ -d "$root/migration/tracker" ]]; then
+  for relative in compose.yaml compose.airgap.yaml compose.integration.yaml; do
+    [[ -f "$root/migration/tracker/$relative" ]] || fail "migration file is missing: $relative"
+    install -m 0644 "$root/migration/tracker/$relative" "$prefix/tracker/$relative"
+  done
+  if [[ -f "$root/migration/tracker/gateway/gateway.conf.template" ]]; then
+    install -m 0644 "$root/migration/tracker/gateway/gateway.conf.template" \
+      "$prefix/tracker/gateway/gateway.conf.template"
+  fi
+  if ! grep -q '^VULN_DATA_VOLUME_NAME=' "$prefix/tracker/.env"; then
+    printf '\n# Added by scheduled release data-update migration; existing volume preserved.\nVULN_DATA_VOLUME_NAME=%s\n' "$vuln_volume" >>"$prefix/tracker/.env"
+  fi
+  if ! grep -q '^KODA_VULN_DATA_VOLUME=' "$prefix/tracker/.env"; then
+    printf 'KODA_VULN_DATA_VOLUME=%s\n' "$vuln_volume" >>"$prefix/tracker/.env"
+  fi
+  # Normalize the legacy current tree into an immutable composite release
+  # before any new scan can observe the switched layout. The engine validates
+  # both datasets and leaves current untouched when validation fails.
+  docker run --rm --user 0 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+    --network none \
+    -v "$vuln_volume:/var/lib/sbom-tracker/vuln-data" \
+    -e TRACKER_GRYPE_DB_DIR=/var/lib/sbom-tracker/vuln-data/current/grype-db \
+    -e TRACKER_DATA_UPDATE_KODA_GRYPE_BINARY=/usr/local/bin/koda-grype \
+    "$portal_api_release_ref" python -c \
+    'from koda_tracker.config import Settings; from koda_tracker.data_updates import DataUpdateEngine; print(DataUpdateEngine(Settings()).migrate_legacy(version="legacy-20260914").version)' \
+    || fail "legacy Tracker vulnerability data migration failed; original volume is preserved"
+  docker run --rm --user 0 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+    --network none \
+    -v "$vuln_volume:/data" "$portal_api_release_ref" python -c \
+    'from pathlib import Path; import os, pwd; root=Path("/data"); uid=pwd.getpwnam("tracker").pw_uid; gid=pwd.getpwnam("tracker").pw_gid; [os.chown(p,uid,gid) for p in (root, root/"releases", root/"staging", root/".update.lock") if p.exists() and not p.is_symlink()]' \
+    || fail "Tracker updater runtime ownership preparation failed"
+  data_updates_volume="$(awk -F= '$1=="DATA_UPDATES_VOLUME_NAME" {print substr($0,index($0,"=")+1)}' "$prefix/tracker/.env")"
+  data_updates_volume="${data_updates_volume:-koda-sbom-data-updates}"
+  docker volume create "$data_updates_volume" >/dev/null
+  docker run --rm --user 0 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+    --network none \
+    -v "$data_updates_volume:/spool" "$portal_api_release_ref" python -c \
+    'from pathlib import Path; import os, pwd; p=Path("/spool"); u=pwd.getpwnam("tracker"); os.chown(p,u.pw_uid,u.pw_gid)' \
+    || fail "Tracker updater spool ownership preparation failed"
+fi
+tag_image "$koda_release_ref" "$koda_ref"
+tag_image "$portal_web_release_ref" "$web_ref"
+tag_image "$portal_api_release_ref" "$api_ref"
+tag_image "$portal_api_release_ref" "$worker_ref"
 install -m 0755 "$root/launchers/koda-suite" "$prefix/koda-suite"
 install -m 0755 "$root/launchers/koda-docker" "$prefix/koda/koda-docker"
 printf '%s\n' "$backup" >"$prefix/.koda-scheduled-last-backup"
@@ -197,6 +280,10 @@ if [[ "$saved_pids" != 0 ]]; then schedule_env+=(KODA_PIDS_LIMIT="$saved_pids");
 env "${schedule_env[@]}" "$prefix/koda-suite" start --prefix "$prefix" >/dev/null || fail "could not start KODA Suite"
 compose up -d --no-build --pull never --no-deps --force-recreate portal-web portal-api portal-worker >/dev/null \
   || fail "could not start Tracker application"
+if [[ -f "$root/migration/tracker/compose.yaml" ]]; then
+  compose up -d --no-build --pull never --no-deps --force-recreate portal-data-updater >/dev/null \
+    || fail "could not start Tracker data updater"
+fi
 compose up -d --no-build --pull never --no-deps gateway >/dev/null || fail "could not start Tracker gateway"
 env "${schedule_env[@]}" "$prefix/koda-suite" status --prefix "$prefix"
 if [[ "$enable" == 1 ]]; then

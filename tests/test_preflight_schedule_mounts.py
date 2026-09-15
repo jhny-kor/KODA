@@ -10,6 +10,14 @@ spec.loader.exec_module(preflight)
 
 
 class ScheduleMountTests(unittest.TestCase):
+    def test_vulnerability_data_volume_is_read_only(self):
+        mount = dict(Type='volume', Name='koda-vuln-data', Destination='/var/lib/koda-vuln-data', RW=False)
+        preflight.check_dashboard_mount(mount, Path('/tmp'))
+        for change in (dict(RW=True), dict(Type='bind'), dict(Destination='/var/lib/koda-vuln-data/extra')):
+            with self.subTest(change=change):
+                with self.assertRaises(preflight.PreflightError):
+                    preflight.check_dashboard_mount({**mount, **change}, Path('/tmp'))
+
     def test_standard_mounts_and_rejected_variants(self):
         with tempfile.TemporaryDirectory() as directory:
             prefix = Path(directory)

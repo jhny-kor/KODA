@@ -74,12 +74,16 @@ def _load_nvd(
             payload = _read_json(path)
             dates.extend(_date_values(payload, ("lastModifiedDate", "lastModified")))
             vulnerabilities = payload.get("vulnerabilities", payload.get("CVE_Items", []))
+            if isinstance(vulnerabilities, dict):
+                # Tracker's compact offline index stores CVE records by ID.
+                vulnerabilities = [dict(value, id=str(key)) for key, value in vulnerabilities.items() if isinstance(value, dict)]
             if not isinstance(vulnerabilities, list):
                 continue
             for entry in vulnerabilities:
                 cve = entry.get("cve") if isinstance(entry, dict) and isinstance(entry.get("cve"), dict) else entry
                 if not isinstance(cve, dict):
                     continue
+                cve = _normalize_nvd_record(cve)
                 metadata = cve.get("CVE_data_meta")
                 legacy_id = metadata.get("ID", "") if isinstance(metadata, dict) else ""
                 cve_id = str(cve.get("id", legacy_id)).upper()
@@ -89,6 +93,25 @@ def _load_nvd(
         warnings.append(f"Could not load NVD data {source}: {exc}")
         return records, _source_info(source, "invalid", {"name": "nvd"}), tuple(dates), True
     return records, _source_info(source, "loaded", {"name": "nvd"}), tuple(dates), False
+
+
+def _normalize_nvd_record(record: dict[str, object]) -> dict[str, object]:
+    """Expose compact tracker records through the NVD shape used by KODA."""
+    if "metrics" in record or "descriptions" in record:
+        return record
+    normalized = dict(record)
+    description = normalized.get("description")
+    if isinstance(description, str) and description.strip():
+        normalized["descriptions"] = [description.strip()]
+    cvss = normalized.get("cvss")
+    if isinstance(cvss, dict):
+        metrics: dict[str, list[dict[str, object]]] = {}
+        for name, value in cvss.items():
+            if isinstance(value, dict):
+                metrics.setdefault({"cvssV4": "cvssMetricV40", "cvssV3": "cvssMetricV31", "cvssV2": "cvssMetricV2"}.get(str(name), str(name)), []).append({"cvssData": value})
+        if metrics:
+            normalized["metrics"] = metrics
+    return normalized
 
 
 def _load_kev(
@@ -101,11 +124,15 @@ def _load_kev(
     try:
         payload = _read_json(source)
         values = payload.get("vulnerabilities", [])
-        records = {
+        compact = payload.get("vulnerabilities")
+        if isinstance(compact, dict):
+            records = {str(key).upper(): dict(value, cveID=str(key)) for key, value in compact.items() if isinstance(value, dict) and str(key).upper() in requested}
+        else:
+            records = {
             str(entry.get("cveID", "")).upper(): entry
             for entry in values
             if isinstance(entry, dict) and str(entry.get("cveID", "")).upper() in requested
-        } if isinstance(values, list) else {}
+            } if isinstance(values, list) else {}
         dates = _date_values(payload, ("dateReleased", "catalogVersion"))
         metadata = {"name": "cisa_kev", "catalog_version": payload.get("catalogVersion", ""), "date_released": payload.get("dateReleased", "")}
         return records, _source_info(source, "loaded", metadata), dates, False
