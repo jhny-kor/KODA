@@ -1,12 +1,12 @@
-# KODA 스케줄 점검 — 폐쇄망 Docker 패치 (2026-09-10)
+# KODA Linux 폐쇄망 업데이트 패치 (2026-09-16)
 
-**기존 Linux x86_64 KODA Suite용 호환성 패치입니다.** Docker Engine, Compose v2, Python 3, Bash, `sha256sum`, `flock`이 설치되어 있어야 합니다. 2026-09-02 통합본과 호환되는 9월 6~7일 패치의 설치 계약을 검사하며, 다르면 적용 전에 중단합니다. 신규 설치용 DB·Dependency-Track 이미지는 포함하지 않습니다. 이 배포본은 반입할 파일 `koda-scheduled-offline-patch-x86_64-20260910.tar.gz`와 `.sha256` 파일을 사용합니다.
+**기존 Linux x86_64 KODA Suite용 호환성 패치입니다.** Docker Engine, Compose v2, Python 3, Bash, `sha256sum`, `flock`이 설치되어 있어야 합니다. 2026-09-02 통합본과 호환되는 9월 6~7일 패치의 설치 계약을 검사하며, 다르면 적용 전에 중단합니다. 신규 설치용 DB·Dependency-Track 이미지는 포함하지 않습니다.
 
 포함 이미지 3종은 KODA/스케줄 worker, Tracker API/worker, Tracker 화면에 사용됩니다. 실행에 필요한 기존 KODA 도구·취약점 DB와 Tracker 의존성이 이미지에 들어 있어 서버에서 다운로드하거나 빌드하지 않습니다. 취약점 데이터는 이번 패치에서 갱신하지 않았으며 KODA Grype DB 기준은 2026-09-01입니다. 작업 폴더의 검증된 변경을 포함한 스냅샷으로, 출처는 `provenance.json`과 `image-inventory.json`에 기록했습니다.
 
-## 이번 UI 수정본의 설치 변경
+## 이번 수정본의 설치 변경
 
-공유 계정 선택 팝업·정렬 헤더·13px/42px 크기, GitLab 브랜치 선택/생성, 점검 기준·분류, MB 입력과 사이드바 애니메이션을 포함합니다. 이미지 태그는 `20260910-ui1`로 기존 반입본과 구분됩니다.
+대용량 서버 디렉터리 점검을 위해 KODA JSON을 500MiB, 직접 업로드를 2GiB, 압축 해제를 40만 파일·4GiB, 예약 대상을 20만 파일·4GiB·24시간으로 확장합니다. Tracker SBOM 업로드는 500MiB입니다. 이미지 태그는 `20260916-limits1`입니다. Grype DB와 Tracker vuln-data는 각각 별도 업로드·검증·활성화·롤백할 수 있지만 이번 이미지 빌드에서 외부 피드를 새로 내려받지는 않았습니다.
 
 이전에 확인한 LDAP 네트워크 및 DNS 두 항목 추가, 검토된 이전 launcher와 이번 launcher는 사전 검사에서 허용합니다. 기존 compose.yaml이나 manifest.sha256를 복사·수정해 검사를 우회할 필요가 없습니다. 다른 설정 차이는 계속 중단하며, 차이를 확인한 후 별도로 처리해야 합니다.
 
@@ -14,14 +14,15 @@ Docker 27의 config digest와 새 Docker의 이미지 저장소 ID를 함께 검
 
 ## 반입·확인·적용
 
-압축파일 `koda-scheduled-offline-patch-x86_64-20260910-ui1.tar.gz`와 `.sha256` 파일을 `/home/user0/koda-release`에 반입합니다. **기존 KODA 데이터 소유자(user0)로 실행하고 sudo/root로 바꾸지 않습니다.** `/home/user0/koda-suite`에 압축을 풀거나 기존 설치를 지우지 않습니다. 압축 해제·이미지 적재에 약 15GB와 DB 백업 크기만큼의 여유 공간을 준비합니다.
+압축파일과 같은 이름의 `.sha256` 파일을 `/home/user0/koda-release`에 반입합니다. **기존 KODA 데이터 소유자(user0)로 실행하고 sudo/root로 바꾸지 않습니다.** `/home/user0/koda-suite`에 압축을 풀거나 기존 설치를 지우지 않습니다. 압축 해제·이미지 적재에 약 15GB와 DB 백업 크기만큼의 여유 공간을 준비합니다.
 
 ```bash
 cd /home/user0/koda-release
-sha256sum -c koda-scheduled-offline-patch-x86_64-20260910-ui1.tar.gz.sha256
-test ! -e koda-scheduled-offline-patch-x86_64-20260910-ui1
-tar -xzf koda-scheduled-offline-patch-x86_64-20260910-ui1.tar.gz
-cd koda-scheduled-offline-patch-x86_64-20260910-ui1
+ARCHIVE=koda-scheduled-offline-patch-x86_64-20260916-limits1.tar.gz
+sha256sum -c "$ARCHIVE.sha256"
+test ! -e "${ARCHIVE%.tar.gz}"
+tar -xzf "$ARCHIVE"
+cd "${ARCHIVE%.tar.gz}"
 sha256sum -c manifest.sha256
 python3 preflight.py --prefix /home/user0/koda-suite
 bash apply.sh --prefix /home/user0/koda-suite
