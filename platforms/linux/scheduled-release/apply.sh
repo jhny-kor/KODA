@@ -236,6 +236,13 @@ if [[ -d "$root/migration/tracker" ]]; then
   if ! grep -q '^KODA_VULN_DATA_VOLUME=' "$prefix/tracker/.env"; then
     printf 'KODA_VULN_DATA_VOLUME=%s\n' "$vuln_volume" >>"$prefix/tracker/.env"
   fi
+  # Lift only the former shipped default. Explicit operator overrides remain authoritative.
+  if grep -q '^UPLOAD_MAX_BYTES=104857600$' "$prefix/tracker/.env"; then
+    sed -i 's/^UPLOAD_MAX_BYTES=104857600$/UPLOAD_MAX_BYTES=524288000/' "$prefix/tracker/.env"
+  fi
+  if ! grep -q '^KODA_JSON_MAX_BYTES=' "$prefix/tracker/.env"; then
+    printf 'KODA_JSON_MAX_BYTES=524288000\n' >>"$prefix/tracker/.env"
+  fi
   # Normalize the legacy current tree into an immutable composite release
   # before any new scan can observe the switched layout. The engine validates
   # both datasets and leaves current untouched when validation fails.

@@ -1489,8 +1489,8 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual(self.server.portal_store.list_inputs(project_id)[0]["name"], "demo.zip")
         status, scan_page = self.request("/koda/scans/new", headers=self.headers())
         self.assertEqual(status, 200)
-        self.assertIn("최대 1 GB", scan_page)
-        self.assertNotIn("최대 1 GiB", scan_page)
+        self.assertIn("최대 2 GiB", scan_page)
+        self.assertNotIn("최대 1 GB", scan_page)
         self.assertIn("application/octet-stream", scan_page)
         self.assertIn("/koda/api/v1/vulnerability-db", scan_page)
         self.assertEqual(

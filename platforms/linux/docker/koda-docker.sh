@@ -78,6 +78,7 @@ Environment:
   KODA_TRACKER_TOKEN_DIR host directory for per-repository Tracker token files
   KODA_TRACKER_PROVISIONING_TOKEN_FILE shared Tracker provisioning token file
   KODA_TRACKER_RESULT_TIMEOUT_SECONDS analysis-result wait limit, default 900
+  KODA_JSON_MAX_BYTES  scheduled API JSON limit, default 524288000
   KODA_TRACKER_CA_FILE   optional private CA bundle for Tracker
   KODA_SCHEDULE_ENABLED  set 1 to start the nightly remote-directory worker (default 0)
   KODA_SCHEDULE_SSH_DIR  host directory containing read-only SSH keys and known_hosts
@@ -348,6 +349,7 @@ dashboard_start() {
   [ -z "${KODA_GITLAB_URL:-}" ] || filtered+=(-e "KODA_GITLAB_URL=${KODA_GITLAB_URL}")
   [ -z "${KODA_TRACKER_URL:-}" ] || filtered+=(-e "KODA_TRACKER_URL=${KODA_TRACKER_URL}")
   [ -z "${KODA_TRACKER_RESULT_TIMEOUT_SECONDS:-}" ] || filtered+=(-e "KODA_TRACKER_RESULT_TIMEOUT_SECONDS=${KODA_TRACKER_RESULT_TIMEOUT_SECONDS}")
+  [ -z "${KODA_JSON_MAX_BYTES:-}" ] || filtered+=(-e "KODA_JSON_MAX_BYTES=${KODA_JSON_MAX_BYTES}")
   local source_path
   if [ -n "${KODA_GITLAB_TOKEN_FILE:-}" ]; then
     source_path="$(realpath "$KODA_GITLAB_TOKEN_FILE")"
@@ -412,6 +414,7 @@ dashboard_start() {
       -e KODA_SCHEDULE_API_TOKEN_FILE=/run/koda/schedule/token
       -e KODA_SCHEDULE_STATE_DIR=/var/lib/koda-schedule
       -e KODA_SCHEDULE_WORK_DIR=/var/lib/koda-schedule/work
+      -e "KODA_JSON_MAX_BYTES=${KODA_JSON_MAX_BYTES:-524288000}"
     )
     if [ -n "$data_volume" ]; then
       worker_opts+=(-v "$data_volume:/var/lib/koda-vuln-data:ro" -e KODA_VULN_DATA_ROOT=/var/lib/koda-vuln-data)

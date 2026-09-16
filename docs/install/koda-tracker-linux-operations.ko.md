@@ -201,9 +201,9 @@ TRACKER_UUID='Tracker 화면에 표시된 UUID'
   새 압축파일의 `install`을 반복하기보다 `./koda-suite status`와
   `docker compose ... logs gateway dtrack-frontend`를 먼저 확인합니다.
 
-Tracker SBOM 업로드 기본 한도는 100MiB이고, KODA 입력 파일은 `/koda/api/`에서
-1GiB까지 스트리밍 업로드합니다. 413이 계속되면 앞단 TLS reverse proxy의
-`client_max_body_size` 또는 요청 본문 제한도 `/koda/api/` 기준 1GiB 이상으로 맞춥니다.
+Tracker SBOM 업로드 기본 한도는 500MiB이고, KODA 입력 파일은 `/koda/api/`에서
+2GiB까지 스트리밍 업로드합니다. 413이 계속되면 앞단 TLS reverse proxy의
+`client_max_body_size` 또는 요청 본문 제한도 `/koda/api/` 기준 2GiB 이상으로 맞춥니다.
 대용량 업로드가 503으로 끝나지 않도록 통합 gateway에는 `/koda/api/` 전용
 1시간 body·proxy timeout과 요청 스트리밍 설정이 포함되어 있습니다. 외부 TLS
 reverse proxy도 같은 경로에 `client_body_timeout 1h`, `proxy_send_timeout 1h`,
@@ -759,7 +759,7 @@ server {
     server_name koda.example.internal;
     ssl_certificate /etc/nginx/ssl/fullchain.pem;
     ssl_certificate_key /etc/nginx/ssl/privkey.pem;
-    client_max_body_size 1g;
+    client_max_body_size 2049m;
     location = /koda { return 308 /koda/; }
     location / {
         proxy_pass http://192.0.2.10:8088;
@@ -1093,7 +1093,7 @@ docker inspect koda-sbom-portal-web \
 
 ### 3MiB 파일인데 `413 Request Entity Too Large`
 
-현재 Suite의 Tracker API 제한은 100MiB이고 KODA 입력 파일 제한은 1GiB입니다.
+현재 Suite의 Tracker API 제한은 500MiB이고 KODA 입력 파일 제한은 2GiB입니다.
 작은 파일에서 413이면 대부분 앞단 TLS reverse proxy 또는 구형 gateway가 더 작은
 제한을 적용하고 있습니다.
 
@@ -1108,9 +1108,9 @@ docker compose --project-directory "$PREFIX/tracker" \
   exec gateway nginx -T 2>/dev/null | grep client_max_body_size
 ```
 
-정상값은 Tracker의 `UPLOAD_MAX_BYTES=104857600`, 서버 기본값
-`client_max_body_size 100m;`, `/koda/api/`의 `client_max_body_size 1g;`입니다. 외부
-Nginx·Apache·L7 장비도 KODA 경로는 1GiB 이상이어야 합니다.
+정상값은 Tracker의 `UPLOAD_MAX_BYTES=524288000`, 서버 기본값
+`client_max_body_size 501m;`, `/koda/api/`의 `client_max_body_size 2049m;`입니다. 외부
+Nginx·Apache·L7 장비도 KODA 경로는 2GiB 이상이어야 합니다.
 설정 변경 후 gateway와 API만 오프라인 모드로 재생성합니다.
 
 ```bash
@@ -1160,7 +1160,7 @@ docker compose --project-directory "$PREFIX/tracker" \
 
 ```nginx
 location ^~ /koda/api/ {
-    client_max_body_size 1g;
+    client_max_body_size 2049m;
     client_body_timeout 1h;
     proxy_connect_timeout 30s;
     proxy_send_timeout 1h;

@@ -65,11 +65,12 @@ from .portal_views import (
     runs_page,
     script_json,
 )
-from .schedule_api import API_PREFIX, ScheduleApiError, authorize as authorize_schedule_api, dispatch as dispatch_schedule_api
+from .schedule_api import API_PREFIX, ScheduleApiError, authorize as authorize_schedule_api, configured_json_bytes, dispatch as dispatch_schedule_api
 
-MAX_JSON_BYTES = 36 * 1024 * 1024
-MAX_INPUT_BYTES = 1024 * 1024 * 1024
-MAX_ARCHIVE_FILES = 200_000
+# MAX_JSON_BYTES is the source-level hard ceiling; configured_json_bytes() supplies the same safe default.
+MAX_JSON_BYTES = 500 * 1024 * 1024
+MAX_INPUT_BYTES = 2 * 1024 * 1024 * 1024
+MAX_ARCHIVE_FILES = 400_000
 MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
 _KODA_ICON = Path(__file__).with_name("assets") / "KODA.ico"
 
@@ -630,11 +631,12 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
             if self.headers.get_content_type() != "application/json":
                 self._json(415, {"code": "json_required", "detail": "Content-Type application/json이 필요합니다"})
                 return None
+            json_limit = configured_json_bytes()
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
-                length = MAX_JSON_BYTES + 1
-            if length < 0 or length > MAX_JSON_BYTES:
+                length = json_limit + 1
+            if length < 0 or length > json_limit:
                 self._json(413, {"code": "payload_too_large"})
                 return None
             try:

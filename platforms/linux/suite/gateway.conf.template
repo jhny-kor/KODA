@@ -1,7 +1,7 @@
 server {
     listen 8080;
     server_name ${GATEWAY_SERVER_NAME};
-    client_max_body_size 100m;
+    client_max_body_size 501m;
 
     # Large offline datasets stream to the bounded API upload spool.
     location = /api/v1/vulnerability-data-bundles/upload {
@@ -76,7 +76,7 @@ server {
     }
 
     location ^~ /koda/api/ {
-        client_max_body_size 1g;
+        client_max_body_size 2049m;
         # KODA streams uploads to disk.  The defaults are only 60 seconds and
         # turn a slow, valid upload into a gateway 504 (then the old broad
         # error mapping misreported it as authentication failure).

@@ -92,7 +92,7 @@ def main():
     implementation_doc = repo / 'docs/schedule-implementation-2026-09-08.md'
     if implementation_doc.is_file():
         shutil.copy2(implementation_doc, stage / 'implementation-verification.ko.md')
-    delivery_doc = repo / 'docs/linux-update-2026-09-14.md'
+    delivery_doc = repo / 'docs/linux-update-2026-09-16.md'
     if delivery_doc.is_file():
         shutil.copy2(delivery_doc, stage / 'linux-update.ko.md')
     verification = repo / '.build/linux-update/delivery-verification.json'

@@ -17,7 +17,19 @@ from typing import Any
 
 
 API_PREFIX = "/internal/koda/schedule/v1"
-MAX_RESPONSE_BYTES = 36 * 1024 * 1024
+DEFAULT_JSON_BYTES = 500 * 1024 * 1024
+MAX_RESPONSE_BYTES = 500 * 1024 * 1024
+
+
+def configured_json_bytes() -> int:
+    """Return the JSON body limit, bounded by the source-level hard maximum."""
+    raw = os.environ.get("KODA_JSON_MAX_BYTES", "").strip()
+    if not raw:
+        return DEFAULT_JSON_BYTES
+    try:
+        return max(1, min(int(raw), MAX_RESPONSE_BYTES))
+    except ValueError as exc:
+        raise ScheduleApiError(503, "KODA_JSON_MAX_BYTES must be an integer") from exc
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -81,7 +93,8 @@ class ScheduleApiClient:
         if not path.startswith(API_PREFIX + "/"):
             raise ValueError("schedule API path is not allow-listed")
         body = _json_bytes(payload) if payload is not None else None
-        if body and len(body) > MAX_RESPONSE_BYTES:
+        json_limit = configured_json_bytes()
+        if body and len(body) > json_limit:
             raise ScheduleApiError(413, "scheduled payload exceeds API size limit")
         request = urllib.request.Request(
             self.base_url + path, data=body, method=method.upper(),
@@ -89,11 +102,11 @@ class ScheduleApiClient:
         )
         try:
             with _OPENER.open(request, timeout=self.timeout) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                raw = response.read(json_limit + 1)
                 status = response.status
         except urllib.error.HTTPError as exc:
             try:
-                raw = exc.read(MAX_RESPONSE_BYTES + 1)
+                raw = exc.read(json_limit + 1)
             finally:
                 exc.close()
             try:
@@ -103,7 +116,7 @@ class ScheduleApiClient:
             raise ScheduleApiError(exc.code, str(detail)[:500]) from exc
         except (OSError, TimeoutError) as exc:
             raise ScheduleApiError(503, "schedule API unavailable") from exc
-        if len(raw) > MAX_RESPONSE_BYTES:
+        if len(raw) > json_limit:
             raise ScheduleApiError(502, "schedule API response too large")
         try:
             value = json.loads(raw or b"null")

@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from security_scanner.portal_store import PortalStore
-from security_scanner.schedule_worker import RemoteFile, ScheduleRunner
+from security_scanner.schedule_worker import RemoteFile, ScheduleRunner, schedule_probe_target
 
 
 class FakeCollector:
@@ -48,6 +48,7 @@ class ScheduleWorkerTests(unittest.TestCase):
             "standard_category": "all",
             "enabled": True,
         }, self.admin)
+        self.assertEqual(self.target["max_files"], 200_000)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -269,6 +270,16 @@ class ScheduleWorkerTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "ssh")
         with self.assertRaises(ValueError):
             collector.test_connection({**self.target, "username": "-oProxyCommand=evil"})
+
+    def test_probe_accepts_the_persisted_24_hour_timeout_ceiling(self):
+        payload = {key: self.target[key] for key in (
+            "host", "port", "username", "ssh_key_ref", "known_hosts_file", "remote_directory",
+            "exclude_paths", "max_files", "max_bytes",
+        )} | {"timeout_seconds": 86_400}
+        probed = schedule_probe_target(payload)
+        self.assertEqual(probed["timeout_seconds"], 86_400)
+        with self.assertRaises(ValueError):
+            schedule_probe_target(payload | {"timeout_seconds": 86_401})
 
     def test_file_limit_failure_moves_to_next_target_without_retrying_forever(self):
         runner = self.runner()

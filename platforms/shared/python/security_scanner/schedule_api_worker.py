@@ -13,7 +13,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .schedule_api import API_PREFIX, ScheduleApiClient, ScheduleApiError
+from .schedule_api import API_PREFIX, ScheduleApiClient, ScheduleApiError, configured_json_bytes
 from .schedule_transport import OpenSSHCollector, RemoteFile, _retryable_remote_error
 
 
@@ -139,7 +139,7 @@ class ApiScheduleRunner:
             if process.returncode:
                 raise RuntimeError(f'scheduled analyzer exited {process.returncode}')
             result_path = root / 'result.json'
-            if result_path.stat().st_size > 32 * 1024 * 1024:
+            if result_path.stat().st_size > configured_json_bytes():
                 raise ValueError('scheduled result exceeds API result size limit')
             return json.loads(result_path.read_text())
         finally:

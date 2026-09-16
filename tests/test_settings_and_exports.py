@@ -34,7 +34,10 @@ from security_scanner.reporting import (
     render_pdf,
     render_xlsx,
 )
-from security_scanner.server import create_dashboard_server, scan_directory_payload, zap_scan_payload
+from security_scanner.server import (
+    DEFAULT_UPLOAD_MAX_BYTES, DEFAULT_UPLOAD_MAX_EXTRACTED_BYTES, DEFAULT_UPLOAD_MAX_FILES,
+    create_dashboard_server, scan_directory_payload, zap_scan_payload,
+)
 from security_scanner.sbom import NIS_SBOM_COLUMNS, cyclonedx_payload, render_nis_sbom
 from security_scanner.standards import standards_payload
 
@@ -554,6 +557,11 @@ class ZapScanTests(unittest.TestCase):
 
 
 class UploadScanTests(unittest.TestCase):
+    def test_linux_upload_defaults_match_the_large_portal_limits(self) -> None:
+        self.assertEqual(DEFAULT_UPLOAD_MAX_BYTES, 2 * 1024 * 1024 * 1024)
+        self.assertEqual(DEFAULT_UPLOAD_MAX_EXTRACTED_BYTES, 4 * 1024 * 1024 * 1024)
+        self.assertEqual(DEFAULT_UPLOAD_MAX_FILES, 400_000)
+
     def _upload(self, server, filename: str, body: bytes):
         connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
         connection.request("GET", "/api/health")

@@ -180,7 +180,7 @@ docker inspect koda-sbom-portal-web \
 
 ### 3MiB 파일인데 `413 Request Entity Too Large`
 
-현재 Suite의 Tracker API 제한은 100MiB이고 KODA 입력 파일 제한은 1GiB입니다.
+현재 Suite의 Tracker API 제한은 500MiB이고 KODA 입력 파일 제한은 2GiB입니다.
 작은 파일에서 413이면 대부분 앞단 TLS reverse proxy 또는 구형 gateway가 더 작은
 제한을 적용하고 있습니다.
 
@@ -195,9 +195,9 @@ docker compose --project-directory "$PREFIX/tracker" \
   exec gateway nginx -T 2>/dev/null | grep client_max_body_size
 ```
 
-정상값은 Tracker의 `UPLOAD_MAX_BYTES=104857600`, 서버 기본값
-`client_max_body_size 100m;`, `/koda/api/`의 `client_max_body_size 1g;`입니다. 외부
-Nginx·Apache·L7 장비도 KODA 경로는 1GiB 이상이어야 합니다.
+정상값은 Tracker의 `UPLOAD_MAX_BYTES=524288000`, 서버 기본값
+`client_max_body_size 501m;`, `/koda/api/`의 `client_max_body_size 2049m;`입니다. 외부
+Nginx·Apache·L7 장비도 KODA 경로는 2GiB 이상이어야 합니다.
 설정 변경 후 gateway와 API만 오프라인 모드로 재생성합니다.
 
 ```bash
@@ -247,7 +247,7 @@ docker compose --project-directory "$PREFIX/tracker" \
 
 ```nginx
 location ^~ /koda/api/ {
-    client_max_body_size 1g;
+    client_max_body_size 2049m;
     client_body_timeout 1h;
     proxy_connect_timeout 30s;
     proxy_send_timeout 1h;

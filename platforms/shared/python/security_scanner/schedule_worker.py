@@ -75,7 +75,7 @@ def schedule_probe_target(payload: dict) -> dict:
     try:
         port = int(payload.get("port", 22))
         max_files = int(payload.get("max_files", 200_000))
-        max_bytes = int(payload.get("max_bytes", 1024 * 1024 * 1024))
+        max_bytes = int(payload.get("max_bytes", 2 * 1024 * 1024 * 1024))
         timeout_seconds = int(payload.get("timeout_seconds", 60))
     except (TypeError, ValueError) as exc:
         raise ValueError("schedule probe numeric fields are invalid") from exc
@@ -83,7 +83,7 @@ def schedule_probe_target(payload: dict) -> dict:
         raise ValueError("invalid SSH port")
     if not 1 <= max_files <= 200_000 or not 1 <= max_bytes <= 4 * 1024 * 1024 * 1024:
         raise ValueError("invalid schedule probe resource limit")
-    if not 1 <= timeout_seconds <= 300:
+    if not 1 <= timeout_seconds <= 86_400:
         raise ValueError("invalid schedule probe timeout")
     excludes = payload.get("exclude_paths") or []
     if isinstance(excludes, str):

@@ -10,7 +10,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from security_scanner.linux_portal import create_portal_server
-from security_scanner.schedule_api import API_PREFIX, ScheduleApiClient, ScheduleApiError, authorize
+from security_scanner.schedule_api import (
+    API_PREFIX, DEFAULT_JSON_BYTES, MAX_RESPONSE_BYTES, ScheduleApiClient, ScheduleApiError,
+    authorize, configured_json_bytes,
+)
 from security_scanner.schedule_api_worker import ApiScheduleRunner
 from security_scanner.schedule_settings import save_settings
 from security_scanner.schedule_transport import RemoteFile
@@ -28,6 +31,13 @@ class Collector:
 
 
 class ScheduleApiTests(unittest.TestCase):
+    def test_json_limit_defaults_to_the_bounded_500_mib_ceiling(self):
+        with patch.dict(os.environ, {"KODA_JSON_MAX_BYTES": ""}):
+            self.assertEqual(configured_json_bytes(), 500 * 1024 * 1024)
+        with patch.dict(os.environ, {"KODA_JSON_MAX_BYTES": str(600 * 1024 * 1024)}):
+            self.assertEqual(configured_json_bytes(), MAX_RESPONSE_BYTES)
+        self.assertEqual(DEFAULT_JSON_BYTES, MAX_RESPONSE_BYTES)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

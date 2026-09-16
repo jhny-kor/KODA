@@ -160,7 +160,7 @@ class PortalStore:
                   server_connection_id TEXT,
                   enabled INTEGER NOT NULL DEFAULT 0, order_index INTEGER NOT NULL DEFAULT 0,
                   config_version INTEGER NOT NULL DEFAULT 1, max_files INTEGER NOT NULL DEFAULT 200000,
-                  max_bytes INTEGER NOT NULL DEFAULT 1073741824, timeout_seconds INTEGER NOT NULL DEFAULT 14400,
+                  max_bytes INTEGER NOT NULL DEFAULT 2147483648, timeout_seconds INTEGER NOT NULL DEFAULT 21600,
                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                   FOREIGN KEY(project_id) REFERENCES projects(project_id));
                 CREATE INDEX IF NOT EXISTS idx_schedule_targets_order ON schedule_targets(enabled,order_index,target_id);
@@ -679,8 +679,8 @@ class PortalStore:
         ):
             raise ValueError("invalid disabled rule list")
         max_files, max_bytes, timeout_seconds = (
-            int(config.get("max_files", 200_000)), int(config.get("max_bytes", 1024 * 1024 * 1024)),
-            int(config.get("timeout_seconds", 14_400)),
+            int(config.get("max_files", 200_000)), int(config.get("max_bytes", 2 * 1024 * 1024 * 1024)),
+            int(config.get("timeout_seconds", 21_600)),
         )
         if not 1 <= max_files <= 200_000 or not 1 <= max_bytes <= 4 * 1024 * 1024 * 1024 or not 60 <= timeout_seconds <= 86_400:
             raise ValueError("invalid schedule resource limit")

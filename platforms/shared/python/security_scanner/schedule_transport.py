@@ -134,7 +134,7 @@ class OpenSSHCollector:
 
     @staticmethod
     def _timeout(target: dict) -> float:
-        return max(1.0, float(target.get("timeout_seconds", 300)))
+        return max(1.0, float(target.get("timeout_seconds", 21_600)))
 
     @staticmethod
     def _manifest_limit(target: dict) -> int:

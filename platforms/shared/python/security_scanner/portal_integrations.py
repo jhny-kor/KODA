@@ -16,14 +16,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
+from .schedule_api import configured_json_bytes
 
 MAX_GITLAB_PROJECTS = 50_000
 MAX_GITLAB_REFS = 10_000
 MAX_GITLAB_MARKER_ITEMS = 50_000
 MAX_GITLAB_PAGES = 500
-MAX_GITLAB_JSON_BYTES = 32 * 1024 * 1024
+MAX_GITLAB_JSON_BYTES = 500 * 1024 * 1024
 MAX_GITLAB_CA_BYTES = 1024 * 1024
-MAX_TRACKER_SCHEDULE_CHANGED_FILES = 2_000
+MAX_TRACKER_SCHEDULE_CHANGED_FILES = 20_000
 _GITLAB_CONFIG = "gitlab.json"
 _GITLAB_TOKEN = "gitlab.token"
 _GITLAB_WRITE_TOKEN = "gitlab-write.token"
@@ -232,8 +233,9 @@ def _gitlab_open(path: str, query: dict[str, object] | None = None, *, timeout: 
 
 def _gitlab_json(path: str, query: dict[str, object] | None = None, *, settings_dir: str | Path | None = None, settings=None, method: str = "GET", payload: dict | None = None, write: bool = False) -> tuple[object, object]:
     with _gitlab_open(path, query, settings_dir=settings_dir, settings=settings, method=method, payload=payload, write=write) as response:
-        raw = response.read(MAX_GITLAB_JSON_BYTES + 1)
-        if len(raw) > MAX_GITLAB_JSON_BYTES:
+        json_limit = configured_json_bytes()
+        raw = response.read(json_limit + 1)
+        if len(raw) > json_limit:
             raise IntegrationError("GitLab 응답이 너무 큽니다")
         try:
             return json.loads(raw), response.headers
@@ -447,8 +449,9 @@ def _tracker_request_json(path: str, token: str, *, method: str = "GET", payload
     opener = build_opener(_NoRedirect(), *([HTTPSHandler(context=context)] if context else []))
     try:
         with opener.open(request, timeout=timeout) as response:
-            body = response.read(MAX_GITLAB_JSON_BYTES + 1)
-            if len(body) > MAX_GITLAB_JSON_BYTES:
+            json_limit = configured_json_bytes()
+            body = response.read(json_limit + 1)
+            if len(body) > json_limit:
                 raise IntegrationError("Tracker 응답이 너무 큽니다")
             value = json.loads(body)
             if not isinstance(value, dict):
@@ -614,6 +617,10 @@ def _gitlab_scan_report(run: dict, tracker_run_id: str, tracker_result: dict) ->
         "pathWithNamespace": snapshot.get("gitlab_path_with_namespace"),
     }
     if scheduled:
+        changed_files = snapshot.get("changed_files", [])
+        if not isinstance(changed_files, list):
+            changed_files = []
+        changed_files = [item for item in changed_files if isinstance(item, str)]
         source.update({
             "type": "scheduled_server",
             "server": snapshot.get("remote_server"),
@@ -621,7 +628,8 @@ def _gitlab_scan_report(run: dict, tracker_run_id: str, tracker_result: dict) ->
             "targetId": snapshot.get("schedule_target_id"),
             "scheduleRunId": snapshot.get("schedule_run_id"),
             "mode": snapshot.get("scan_mode"),
-            "changedFiles": snapshot.get("changed_files", []),
+            "changedFiles": changed_files[:MAX_TRACKER_SCHEDULE_CHANGED_FILES],
+            "changedFilesTruncated": len(changed_files) > MAX_TRACKER_SCHEDULE_CHANGED_FILES,
             "rulePolicyVersion": snapshot.get("rule_policy_version"),
         })
         if snapshot.get("scheduled_source_kind") == "gitlab":
@@ -1010,7 +1018,11 @@ def send_tracker_sbom(mapping: dict, run: dict) -> str:
     for attempt in range(3):
         try:
             with opener.open(request, timeout=60) as response:
-                payload = json.loads(response.read(MAX_GITLAB_JSON_BYTES))
+                json_limit = configured_json_bytes()
+                body = response.read(json_limit + 1)
+                if len(body) > json_limit:
+                    raise IntegrationError("Tracker 응답이 너무 큽니다")
+                payload = json.loads(body)
                 run_id = payload.get("runId") if isinstance(payload, dict) else None
                 if not run_id:
                     raise IntegrationError("Tracker 응답에 runId가 없습니다")
