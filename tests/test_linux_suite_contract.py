@@ -40,6 +40,17 @@ class LinuxSuiteContractTests(unittest.TestCase):
     def test_lifecycle_uses_one_integrated_offline_compose_contract(self) -> None:
         self.assertIn('suite_compose "$prefix" up -d --no-build --pull never', self.launcher)
 
+    def test_dashboard_resource_limits_are_loaded_from_suite_env(self) -> None:
+        variables = {
+            "KODA_CPUS": "dashboard_cpus",
+            "KODA_MEMORY": "dashboard_memory",
+            "KODA_PIDS_LIMIT": "dashboard_pids",
+            "KODA_TMPFS_SIZE": "dashboard_tmpfs",
+        }
+        for name, variable in variables.items():
+            self.assertIn(f'env_value "$env_file" {name}', self.launcher)
+            self.assertIn(f'{name}="${variable}"', self.launcher)
+
     def test_tracker_transfer_uses_gateway_only_koda_network(self) -> None:
         self.assertIn("KODA_TRACKER_URL=http://koda-sbom-gateway:8080", self.suite_env)
         self.assertIn("KODA_TRACKER_PROVISIONING_TOKEN_FILE=", self.suite_env)

@@ -305,6 +305,10 @@ runtime_values() {
   tracker_provisioning_file="${KODA_TRACKER_PROVISIONING_TOKEN_FILE:-$(env_value "$env_file" KODA_TRACKER_PROVISIONING_TOKEN_FILE "")}"
   tracker_result_timeout="${KODA_TRACKER_RESULT_TIMEOUT_SECONDS:-$(env_value "$env_file" KODA_TRACKER_RESULT_TIMEOUT_SECONDS 900)}"
   json_max_bytes="${KODA_JSON_MAX_BYTES:-$(env_value "$env_file" KODA_JSON_MAX_BYTES 524288000)}"
+  dashboard_cpus="${KODA_CPUS:-$(env_value "$env_file" KODA_CPUS 2)}"
+  dashboard_memory="${KODA_MEMORY:-$(env_value "$env_file" KODA_MEMORY 4g)}"
+  dashboard_pids="${KODA_PIDS_LIMIT:-$(env_value "$env_file" KODA_PIDS_LIMIT 256)}"
+  dashboard_tmpfs="${KODA_TMPFS_SIZE:-$(env_value "$env_file" KODA_TMPFS_SIZE 512m)}"
   vuln_data_volume="${KODA_VULN_DATA_VOLUME:-$(env_value "$env_file" KODA_VULN_DATA_VOLUME "")}"
   tracker_ca_file="${KODA_TRACKER_CA_FILE:-$(env_value "$env_file" KODA_TRACKER_CA_FILE "")}"
   schedule_enabled="${KODA_SCHEDULE_ENABLED:-$(env_value "$env_file" KODA_SCHEDULE_ENABLED 0)}"
@@ -377,6 +381,10 @@ start_dashboard() {
   KODA_TRACKER_PROVISIONING_TOKEN_FILE="$tracker_provisioning_file" \
   KODA_TRACKER_RESULT_TIMEOUT_SECONDS="$tracker_result_timeout" \
   KODA_JSON_MAX_BYTES="$json_max_bytes" \
+  KODA_CPUS="$dashboard_cpus" \
+  KODA_MEMORY="$dashboard_memory" \
+  KODA_PIDS_LIMIT="$dashboard_pids" \
+  KODA_TMPFS_SIZE="$dashboard_tmpfs" \
   KODA_TRACKER_CA_FILE="$tracker_ca_file" \
   KODA_VULN_DATA_VOLUME="$vuln_data_volume" \
   KODA_SCHEDULE_ENABLED="$schedule_enabled" \
