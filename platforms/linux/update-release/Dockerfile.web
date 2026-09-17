@@ -1,2 +1,3 @@
 FROM local/koda-tracker-web-scheduled:20260910-ui1
 COPY ./ /usr/share/nginx/html/
+USER 101

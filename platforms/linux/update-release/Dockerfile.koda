@@ -1,3 +1,4 @@
 ARG KODA_BASE_IMAGE=local/koda-scheduled:20260914-ui-data1
 FROM ${KODA_BASE_IMAGE}
 COPY platforms/shared/python/security_scanner/ /opt/koda/app/security_scanner/
+USER 1000:1000

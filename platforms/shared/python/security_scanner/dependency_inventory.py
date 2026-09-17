@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import re
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from .checks.common import find_line_containing, read_text_lines
 from .models import DependencyComponent, TargetConfig
+from .xml_safe import XmlInputError, parse_xml
 
 
 PYTHON_EXACT_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*==\s*([A-Za-z0-9][^\s;#]*)")
@@ -628,8 +628,8 @@ def _components_from_composer_lock(path: Path, target: TargetConfig) -> list[Dep
 def _components_from_pom(path: Path, target: TargetConfig) -> list[DependencyComponent]:
     text = path.read_text(encoding="utf-8", errors="ignore")
     try:
-        root = ET.fromstring(text)
-    except ET.ParseError:
+        root = parse_xml(text)
+    except XmlInputError:
         return []
 
     components: list[DependencyComponent] = []

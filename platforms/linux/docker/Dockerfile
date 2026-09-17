@@ -20,6 +20,8 @@ RUN mkdir -p /tmp/koda-bundle \
       /tmp/koda-bundle /tmp/koda-bundle.tar.gz \
  && chmod -R a+rX /opt/koda
 
+USER 1000:1000
+
 FROM ${PYTHON_IMAGE} AS runtime
 
 COPY --from=installer /opt/koda /opt/koda

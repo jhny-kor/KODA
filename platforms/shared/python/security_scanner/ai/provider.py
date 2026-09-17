@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -88,7 +89,7 @@ def _complete_ollama(
     json_mode: bool,
     timeout_seconds: float,
 ) -> LLMResult:
-    base = os.environ.get("KODA_LLM_API_BASE", DEFAULT_OLLAMA_BASE).rstrip("/")
+    base = _ollama_base(os.environ.get("KODA_LLM_API_BASE", DEFAULT_OLLAMA_BASE))
     payload: dict[str, object] = {
         "model": model,
         "prompt": prompt,
@@ -107,12 +108,30 @@ def _complete_ollama(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             data = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
         raise LLMUnavailable(f"Local Ollama request failed ({base}): {exc}") from exc
     text = str(data.get("response", "")).strip() if isinstance(data, dict) else ""
     return LLMResult(text=text, backend="ollama", sent_externally=False)
+
+
+def _ollama_base(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value.strip())
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise LLMUnavailable("KODA_LLM_API_BASE must use a valid HTTP(S) port") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise LLMUnavailable("KODA_LLM_API_BASE must be an HTTP(S) URL without credentials or query data")
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
 
 
 def _complete_anthropic(model: str, prompt: str, *, system: str, timeout_seconds: float) -> LLMResult:

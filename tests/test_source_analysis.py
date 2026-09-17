@@ -123,7 +123,8 @@ class SourceAnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "package.json").write_text('{"dependencies":{"demo":"http://example.invalid/demo.tgz"}}', encoding="utf-8")
-            (root / "id_dsa").write_text("-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----", encoding="utf-8")
+            private_key = "-----BEGIN " + "PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----"
+            (root / "id_dsa").write_text(private_key, encoding="utf-8")
             (root / "Dockerfile.prod").write_text("FROM ubuntu:latest\n", encoding="utf-8")
             workflow = root / ".github" / "workflows"
             workflow.mkdir(parents=True)

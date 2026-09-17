@@ -31,6 +31,12 @@ class ScheduledReleasePreflightTests(unittest.TestCase):
                 with self.assertRaises(preflight.PreflightError):
                     preflight.check_backend_hashes(contract, {"portal-api": "api", "portal-worker": "worker"}, root)
 
+    def test_chunked_digest_contract_is_normalized(self):
+        self.assertEqual(
+            preflight.normalize_digest_map({"app.py": ["0123456789abcdef", "fedcba9876543210"]}),
+            {"app.py": "0123456789abcdeffedcba9876543210"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

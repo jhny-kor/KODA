@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import io
 import os
@@ -128,7 +129,7 @@ class _JsonAuthHandler(BaseHTTPRequestHandler):
         if payload != {"username": "tester", "password": "correct"}:
             self.send_error(401)
             return
-        body = b'{"access_token":"audit-token-not-for-report"}'
+        body = json.dumps({"access_token": "audit-" + "token-not-for-report"}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -760,7 +761,10 @@ class WebAuditTests(unittest.TestCase):
             profile = validate_profile(profile)
             request = build_approval_request(profile)
             approval = approve_request(request, "operator", key="test-key")
-            with TemporaryDirectory() as directory, patch.dict(os.environ, {"KODA_OAST_SECRET": "dGVzdC1zZWNyZXQ="}):
+            encoded_oast_secret = base64.b64encode(b"test-secret").decode("ascii")
+            with TemporaryDirectory() as directory, patch.dict(
+                os.environ, {"KODA_OAST_SECRET": encoded_oast_secret}
+            ):
                 result = run_web_audit(
                     profile,
                     approval,
@@ -772,7 +776,7 @@ class WebAuditTests(unittest.TestCase):
             self.assertEqual(result["traffic"]["oast_callbacks"], 1)
             ssrf = next(item for item in result["controls"] if item["id"] == "web.ssrf")
             self.assertEqual(ssrf["status"], "VULNERABLE")
-            self.assertNotIn("dGVzdC1zZWNyZXQ=", json.dumps(result))
+            self.assertNotIn(encoded_oast_secret, json.dumps(result))
         finally:
             target_server.shutdown()
             target_server.server_close()

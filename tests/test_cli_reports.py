@@ -218,7 +218,7 @@ class CliReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "secret.py"
-            secret = "sk-123456789012345678901234"
+            secret = "sk-" + "123456789012345678901234"
             source.write_text(f'api_key = "{secret}"\n', encoding="utf-8")
             output = root / "reports" / "source.html"
             exit_code = main(

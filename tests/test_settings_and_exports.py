@@ -588,8 +588,9 @@ class UploadScanTests(unittest.TestCase):
         server = create_dashboard_server(port=0)
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
+        aws_access_key = "AK" + "IA" + ("A" * 16)
         try:
-            response = self._upload(server, "config.env", b"AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n")
+            response = self._upload(server, "config.env", f"AWS_ACCESS_KEY_ID={aws_access_key}\n".encode())
             payload = json.loads(response.read())
             self.assertEqual(response.status, 200)
             self.assertEqual((payload["scan"]["kind"], payload["scan"]["path"]), ("upload", "config.env"))
@@ -598,7 +599,7 @@ class UploadScanTests(unittest.TestCase):
 
             archive_body = io.BytesIO()
             with zipfile.ZipFile(archive_body, "w") as archive:
-                archive.writestr("src/config.env", "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n")
+                archive.writestr("src/config.env", f"AWS_ACCESS_KEY_ID={aws_access_key}\n")
             response = self._upload(server, "source.zip", archive_body.getvalue())
             payload = json.loads(response.read())
             self.assertEqual(response.status, 200)

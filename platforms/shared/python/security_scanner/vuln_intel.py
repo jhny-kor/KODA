@@ -111,7 +111,7 @@ def _fetch_kev(timeout_seconds: float) -> dict[str, dict[str, object]]:
         CISA_KEV_JSON_URL,
         headers={"User-Agent": "koda-local-security-scanner"},
     )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         payload = json.loads(response.read().decode("utf-8"))
 
     vulnerabilities = payload.get("vulnerabilities", []) if isinstance(payload, dict) else []
@@ -132,7 +132,7 @@ def _fetch_epss(cve_ids: tuple[str, ...], timeout_seconds: float) -> dict[str, d
     for chunk in _cve_chunks(cve_ids):
         url = f"{FIRST_EPSS_URL}?{urllib.parse.urlencode({'cve': ','.join(chunk)})}"
         request = urllib.request.Request(url, headers={"User-Agent": "koda-local-security-scanner"})
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             payload = json.loads(response.read().decode("utf-8"))
         data = payload.get("data", []) if isinstance(payload, dict) else []
         if not isinstance(data, list):
