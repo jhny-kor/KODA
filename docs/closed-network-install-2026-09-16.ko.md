@@ -205,6 +205,26 @@ bash rollback.sh --prefix "$PREFIX"
 
 롤백은 이전 launcher, Compose·gateway 설정과 애플리케이션 이미지 태그를 복원하고 예약 worker를 정지합니다. 데이터베이스와 named volume은 삭제하지 않습니다. SQL이나 SQLite 백업의 수동 복원은 패치 이후 데이터를 잃을 수 있으므로 별도 장애복구 판단이 있을 때만 수행합니다.
 
+### `tracker-vuln-data-volume.tar.gz: Operation not permitted`가 나온 경우
+
+초기 `20260916-limits1` 설치 스크립트는 컨테이너가 백업 파일을 root 소유로 만든 뒤 일반 계정에서 권한을 바꾸어 이 오류가 발생할 수 있습니다. 이 시점에는 KODA와 Tracker 주요 서비스 및 기존 데이터가 변경되지 않았습니다. 기존 설치에 `portal-data-updater`가 있었다면 그것만 정지됐을 수 있으며, 수정본 적용을 완료하면 함께 기동됩니다.
+
+`koda-apply-hotfix-20260917.tar.gz`를 같은 반입 디렉터리에 복사하고 체크섬을 검증한 뒤, 압축 해제한 배포 디렉터리에 적용합니다.
+
+```bash
+cd /home/user0/koda-release
+sha256sum -c koda-apply-hotfix-20260917.tar.gz.sha256
+tar -xzf koda-apply-hotfix-20260917.tar.gz
+bash koda-apply-hotfix-20260917/install.sh \
+  /home/user0/koda-release/koda-scheduled-offline-patch-x86_64-20260916-limits1
+
+cd /home/user0/koda-release/koda-scheduled-offline-patch-x86_64-20260916-limits1
+sha256sum -c manifest.sha256
+bash apply.sh --prefix "$PREFIX"
+```
+
+핫픽스는 기존 `apply.sh`와 manifest의 해당 항목만 검증 후 교체합니다. `sudo`, `chmod -R 777`, Docker volume 삭제로 우회하지 않습니다. 실패한 실행이 만든 시각별 백업 디렉터리는 기존 데이터에 영향을 주지 않으므로 성공 적용과 롤백 확인이 끝날 때까지 보존합니다.
+
 ## 12. 금지 사항
 
 다음 명령이나 조치는 적용·복구 절차에 사용하지 않습니다.

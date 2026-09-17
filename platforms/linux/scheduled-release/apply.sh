@@ -124,17 +124,23 @@ fi
 portal_api_container="$(compose ps -q portal-api 2>/dev/null || true)"
 vuln_volume="$(docker inspect "$portal_api_container" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/sbom-tracker/vuln-data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null || true)"
 [[ -n "$vuln_volume" ]] || fail "existing Tracker vulnerability-data volume could not be identified"
-docker run --rm --user 0 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-  --network none \
-  -v "$vuln_volume:/data:ro" -v "$backup:/backup" "$portal_api_release_ref" \
-  tar -czf /backup/tracker-vuln-data-volume.tar.gz -C /data . \
-  || fail "Tracker vulnerability-data volume backup failed"
-chmod 600 "$backup/tracker-vuln-data-volume.tar.gz"
+vuln_archive="$backup/tracker-vuln-data-volume.tar.gz"
+if ! docker run --rm --user 0 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --network none -v "$vuln_volume:/data:ro" "$portal_api_release_ref" \
+  tar -czf - -C /data . >"$vuln_archive"; then
+  rm -f "$vuln_archive"
+  fail "Tracker vulnerability-data volume backup failed"
+fi
+chmod 600 "$vuln_archive"
 printf 'vuln_volume=%s\n' "$vuln_volume" >>"$backup/metadata.env.pending"
-docker run --rm --user 0 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --network none \
-  -v "$vuln_volume:/data:ro" -v "$backup:/backup:rw" "$portal_api_release_ref" python -c \
-  'from pathlib import Path; import os; p=Path("/data/current"); Path("/backup/legacy-current-target").write_text(os.readlink(p) if p.is_symlink() else "")' \
-  || fail "could not record the legacy Tracker current pointer"
+legacy_target="$backup/legacy-current-target"
+if ! docker run --rm --user 0 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --network none \
+  -v "$vuln_volume:/data:ro" "$portal_api_release_ref" python -c \
+  'from pathlib import Path; import os, sys; p=Path("/data/current"); sys.stdout.write(os.readlink(p) if p.is_symlink() else "")' \
+  >"$legacy_target"; then
+  rm -f "$legacy_target"
+  fail "could not record the legacy Tracker current pointer"
+fi
 printf 'migration_image=%s\n' "$portal_api_release_ref" >>"$backup/metadata.env.pending"
 
 # The Suite is stopped before copying SQLite files and before pg_dump. Volumes
