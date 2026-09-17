@@ -115,6 +115,39 @@ for relative in tracker/compose.yaml tracker/compose.airgap.yaml tracker/compose
 done
 cp -a "$prefix/tracker/gateway/." "$backup/tracker/gateway/"
 
+# The supported LDAP installation adds a dedicated egress network and DNS
+# servers to portal-api. Preserve those reviewed additions when replacing the
+# Compose file with the data-updater migration.
+next_compose="$backup/tracker/compose.next.yaml"
+if [[ -f "$root/migration/tracker/compose.yaml" ]]; then
+  cp -p "$root/migration/tracker/compose.yaml" "$next_compose"
+  python3 - "$backup/tracker/compose.yaml" "$next_compose" <<'PYLDAP' \
+    || fail "could not preserve Tracker LDAP Compose networking"
+from pathlib import Path
+import sys
+
+previous, replacement = map(Path, sys.argv[1:])
+old = previous.read_text(encoding="utf-8")
+new = replacement.read_text(encoding="utf-8")
+if "\n  ldap-egress:\n    name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-ldap-egress\n" in old:
+    service_anchor = "    networks:\n      - app\n    restart: unless-stopped\n\n  portal-worker:"
+    network_anchor = "\nvolumes:\n"
+    if new.count(service_anchor) != 1 or new.count(network_anchor) != 1:
+        raise SystemExit("updated Compose layout does not support the reviewed LDAP network")
+    new = new.replace(
+        service_anchor,
+        "    networks:\n      - app\n      - ldap-egress\n    restart: unless-stopped\n"
+        "    dns:\n      - 10.95.58.206\n      - 10.95.58.207\n\n  portal-worker:",
+        1,
+    ).replace(
+        network_anchor,
+        "\n  ldap-egress:\n    name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-ldap-egress\n\nvolumes:\n",
+        1,
+    )
+    replacement.write_text(new, encoding="utf-8")
+PYLDAP
+fi
+
 # Identify and archive the existing Tracker vulnerability volume while it is
 # still mounted read-only by the running API. The archive is independent of
 # the database backup and is retained for recovery even if migration fails.
@@ -230,7 +263,9 @@ echo "rollback backup ready: $backup"
 if [[ -d "$root/migration/tracker" ]]; then
   for relative in compose.yaml compose.airgap.yaml compose.integration.yaml; do
     [[ -f "$root/migration/tracker/$relative" ]] || fail "migration file is missing: $relative"
-    install -m 0644 "$root/migration/tracker/$relative" "$prefix/tracker/$relative"
+    source="$root/migration/tracker/$relative"
+    [[ "$relative" != compose.yaml ]] || source="$next_compose"
+    install -m 0644 "$source" "$prefix/tracker/$relative"
   done
   if [[ -f "$root/migration/tracker/gateway/gateway.conf.template" ]]; then
     install -m 0644 "$root/migration/tracker/gateway/gateway.conf.template" \
