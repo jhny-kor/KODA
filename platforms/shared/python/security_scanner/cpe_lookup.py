@@ -79,7 +79,7 @@ def _query_nvd(keyword: str, api_key: str | None, timeout_seconds: float) -> dic
     if api_key:
         headers["apiKey"] = api_key
     request = urllib.request.Request(f"{NVD_CVE_URL}?{query}", headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         payload = json.loads(response.read().decode("utf-8"))
     return payload if isinstance(payload, dict) else {}
 

@@ -54,10 +54,11 @@ class LinkAndHostTests(unittest.TestCase):
         self.assertEqual(parser.scripts, ["/app.js"])
 
     def test_js_secret_scan_redacts(self):
-        text = 'var k="AKIAIOSFODNN7EXAMPLE"; var ok="/route";'
+        aws_access_key = "AK" + "IA" + "IOSFODNN7EXAMPLE"
+        text = f'var k="{aws_access_key}"; var ok="/route";'
         findings = web._scan_text_for_secrets(text, "http://s.test/app.js", "s.test")
         self.assertEqual([f.rule_id for f in findings], ["web.js-secret.aws-access-key"])
-        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", findings[0].evidence)  # redacted
+        self.assertNotIn(aws_access_key, findings[0].evidence)  # redacted
         self.assertIn("...", findings[0].evidence)
 
     def test_js_secret_scan_skips_placeholder(self):

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, replace
 from io import BytesIO
@@ -9,6 +8,7 @@ from typing import Iterable
 from urllib.parse import quote
 
 from .java_archives import ArchiveArtifact, ArchiveScan
+from .xml_safe import XmlInputError, parse_xml
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +100,7 @@ def identify_archive(artifact: ArchiveArtifact) -> JavaComponent:
                     # leave it in the review queue.
                     if version:
                         source, status = "manifest", "resolved"
-    except (OSError, zipfile.BadZipFile, UnicodeError, ET.ParseError):
+    except (OSError, zipfile.BadZipFile, UnicodeError, XmlInputError):
         source = "filename-unresolved"
 
     if not version and filename_version:
@@ -171,7 +171,7 @@ def _filename_coordinates(filename: str) -> tuple[str, str]:
 
 
 def _pom_xml_coordinates(payload: bytes) -> tuple[str, str, str]:
-    root = ET.fromstring(payload)
+    root = parse_xml(payload)
     values: dict[str, str] = {}
     for element in root.iter():
         local_name = element.tag.rsplit("}", 1)[-1]

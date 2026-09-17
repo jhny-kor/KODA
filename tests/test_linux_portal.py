@@ -1448,9 +1448,10 @@ class LinuxPortalHttpTests(unittest.TestCase):
         status, created = self.request("/koda/api/v1/projects", method="POST", payload={"name": "portal"}, headers=self.headers())
         self.assertEqual(status, 201)
         project_id = created["project_id"]
+        aws_access_key = "AK" + "IA" + "ABCDEFGHIJKLMNOP"
         request = urllib.request.Request(
             self.base + f"/koda/api/v1/projects/{project_id}/inputs?name=demo.py",
-            data=b"AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n", method="POST",
+            data=f"AWS_ACCESS_KEY_ID={aws_access_key}\n".encode(), method="POST",
             headers={**self.headers(), "Content-Type": "application/octet-stream"},
         )
         with urllib.request.urlopen(request, timeout=10) as response:

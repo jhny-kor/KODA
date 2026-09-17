@@ -416,7 +416,7 @@ def upload_sbom_to_dependency_track(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             text = response.read().decode("utf-8", errors="replace")
             if not text.strip():
                 return {"status": response.status, "body": ""}

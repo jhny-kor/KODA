@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import date
@@ -81,8 +82,11 @@ def _parse_date(value: str) -> date | None:
 
 
 def _fetch(url: str, timeout_seconds: float) -> object:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname != "endoflife.date":
+        raise ValueError("unexpected endoflife.date URL")
     request = urllib.request.Request(url, headers={"User-Agent": "koda-local-security-scanner"})
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         return json.loads(response.read().decode("utf-8"))
 
 

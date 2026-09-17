@@ -91,17 +91,27 @@ def inspect_image(reference: str) -> dict:
         raise PreflightError("docker image inspect returned invalid data") from exc
 
 
+def normalize_digest_map(payload: object) -> dict[str, str]:
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError
+    normalized: dict[str, str] = {}
+    for name, digest in payload.items():
+        if isinstance(digest, list) and digest and all(isinstance(part, str) for part in digest):
+            digest = "".join(digest)
+        if not isinstance(name, str) or not isinstance(digest, str):
+            raise ValueError
+        normalized[name] = digest
+    return normalized
+
+
 def check_backend_hashes(contract: Path, containers: dict[str, str]) -> None:
     path = contract / "tracker-backend-sha256.json"
     if not path.exists():
         raise PreflightError("tracker-backend-sha256.json is missing")
     try:
-        expected = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(expected, dict) or not expected:
-            raise ValueError
+        normalized = normalize_digest_map(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise PreflightError("invalid tracker-backend-sha256.json") from exc
-    normalized = expected
     script = (
         "import hashlib,json,pathlib,koda_tracker; "
         "root=pathlib.Path(koda_tracker.__file__).parent; "

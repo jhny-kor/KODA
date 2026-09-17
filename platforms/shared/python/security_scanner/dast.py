@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,21 @@ class ZAPRunResult:
     stderr: str = ""
 
 
+def _run_zap_command(command: str, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+    """Run the validated Docker command without invoking a shell."""
+    _, separator, docker_command = command.partition("&&")
+    if not separator:
+        raise ValueError("ZAP command is missing its Docker command")
+    docker_command = docker_command.strip().replace("$PWD/", f"{Path.cwd()}/", 1)
+    return subprocess.run(
+        shlex.split(docker_command),
+        text=True,
+        capture_output=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+
+
 def run_zap_scan(
     target_url: str,
     *,
@@ -62,14 +78,7 @@ def run_zap_scan(
     if dry_run:
         return ZAPRunResult(exit_code=0, command=command, output_dir=output_dir, findings=())
 
-    completed = subprocess.run(
-        command,
-        shell=True,
-        text=True,
-        capture_output=True,
-        timeout=timeout_seconds,
-        check=False,
-    )
+    completed = _run_zap_command(command, timeout_seconds)
     json_path = output_dir / f"{ZAP_REPORT_PREFIX[mode]}.json"
     findings = tuple(findings_from_zap_json(json_path, target_url=target_url)) if json_path.exists() else ()
     return ZAPRunResult(
@@ -135,9 +144,7 @@ def run_zap_automation(
     if dry_run:
         return ZAPRunResult(exit_code=0, command=command, output_dir=output_dir, findings=())
 
-    completed = subprocess.run(
-        command, shell=True, text=True, capture_output=True, timeout=timeout_seconds, check=False
-    )
+    completed = _run_zap_command(command, timeout_seconds)
     json_path = output_dir / f"{ZAP_AUTOMATION_REPORT_PREFIX}.json"
     findings = tuple(findings_from_zap_json(json_path, target_url=target_url)) if json_path.exists() else ()
     return ZAPRunResult(
