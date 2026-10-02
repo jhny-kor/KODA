@@ -10,8 +10,9 @@ vulnerability data packages.
 
 | Area | Observed state | Meaning |
 | --- | --- | --- |
-| GitHub `main` baseline | `95297eb76c781cbe579b41b5e3f2b91bcd13e9ee` at the start of the refresh | Published source before the development changes below |
+| GitHub `main` baseline | `e322fd6816ea4d37cfc46820b5717794db4cf938` at the start of the refresh | Published source before the development changes below |
 | This refresh | Documentation only | Local implementation changes, tests, and development scripts are excluded from this documentation commit |
+| Sequential Linux execution | Shared manual/scheduled ownership and multi-user queue implemented and tested locally | Only guidance is published here; image rebuild and live Linux deployment remain unverified |
 | macOS local AI | Implementation files, fixtures, and an app script exist in the local worktree | Availability in a fresh GitHub clone or the Mac App Store app is not established |
 | Security boundary work | Local changes to portal, gateway, web, Java, reports, and regression checks | Availability in installed binaries is not established |
 | Dated delivery guides and validation records | Evidence for their stated dates | They do not prove current deployment success or a passing full suite |
@@ -28,6 +29,7 @@ changes, rather than only the published GitHub `main` source.
 | Shared AI triage | Default OFF; adds `triage_*` without changing severity. Default Ollama address is loopback; a custom API base can be remote | [Privacy policy](../PRIVACY.md), [roadmap](roadmap-ai-augmentation.en.md) |
 | Separate macOS AI development | Loopback OpenAI-compatible connections, explanation, source review, candidate fixes and re-scan, test/impact drafts, AI reports; candidates remain separate from originals | [Local AI development](macos-local-ai.md) |
 | Development portal and gateway | Gateway proof, project/feature permissions, request origin checks, upload/JSON/archive resource limits | [Combined suite guide (Korean)](../platforms/linux/suite/README.ko.md), [Docker guide](../platforms/linux/docker/README.en.md) |
+| Development Linux queue | One analysis engine or scheduled collection/analysis/cleanup at a time. Manual FIFO across users/projects; manual priority at the next dispatch | [Sequential scan guide](linux-scan-queue.en.md) |
 | Development local dashboard | Work POST requests require same-origin headers and a session token; built-in UI supplies them | [CLI and local usage](usage.md) |
 | Development web boundaries | Origin-scoped credentials and redirect restrictions; rendering stops when required boundary/WebSocket interception is unavailable | [Web audit](security/WEB_AUDIT.md) |
 | Development Java scans | Bounded archives, metadata, and Syft output; resource-limited incomplete scans exit with code 2 | [Java runbook](security/java-sbom-vulnerability-scan.en.md) |
@@ -38,30 +40,46 @@ origins, cross-origin credential forwarding, and over-budget uploads or archives
 are rejected or marked incomplete. Scanner and syntax checks on an AI candidate
 do not prove functional equivalence; review and regression tests are still needed.
 
-## Fresh verification
+## Latest verification
 
-Run from the repository root on 2026-10-02:
+Run from the repository root in the local development worktree on 2026-10-02.
+The new tests and implementation changes used by these commands are excluded
+from this documentation publication; a fresh GitHub clone is not expected to
+reproduce the same results.
 
 ```bash
 PYTHONPATH=platforms/shared/python python3 -m unittest discover -s tests -q
-python3 -m unittest discover -s platforms/macos/tests -q
-PYTHONPATH=platforms/shared/python python3 -m unittest discover -s tests -p test_project_deletion_and_schedule_labels.py -q
-PYTHONPATH=platforms/shared/python python3 -m unittest discover -s tests -p test_schedule_gitlab_api.py -q
+PYTHONPATH=platforms/shared/python:tests python3 -m unittest test_scan_serialization -q
+PYTHONPATH=platforms/shared/python:tests python3 -m unittest test_project_deletion_and_schedule_labels test_scan_serialization test_schedule_gitlab_api -q
 git diff --check
 ```
 
 | Check | Observed result |
 | --- | --- |
-| Full shared Python suite | 609 tests: **600 passed, 2 failed, 7 skipped**; 65.021 seconds, exit code 1 |
-| Project deletion/schedule label module rerun | 7 passed, 1 failed out of 8. `test_project_delete_is_only_on_admin_detail_page`: list-page HTML includes the `data-delete-project` string |
-| GitLab scheduled API module rerun | 1 passed, 1 failed out of 2. `test_gitlab_http_collection_analysis_persist_and_cleanup`: expected `completed`, observed `queued` |
-| macOS fixtures | Seven Swift fixture success messages for client, profiles, report, fix gates, impact, test plan, and triage; process exit code 0 |
-| macOS archives | Five unittest checks passed |
-| Documents | 29 documents: 235 local file/image targets and 5 internal anchors passed; `git diff --check` passed |
+| Full shared Python suite | 623 tests: **616 passed, 0 failed, 7 skipped**; 70.018 seconds, exit code 0 |
+| Serialization regressions | Eleven passed: execution races across DB connections, manual FIFO, resuming after scheduled cleanup, cancellation, duplicate-worker prevention, leadership handoff |
+| Final deletion UI/serialization/GitLab scheduled API rerun | 29 passed in 4.949 seconds |
+| Skips | Six Linux-only checks on macOS; one PDF renderer check without Playwright |
+| This documentation refresh | Nine documents: 180 local file/image targets and five internal anchors checked; `git diff --check` passed |
+| macOS fixtures and archives | Earlier refresh on the same date: seven Swift fixture success messages (process exit code 0), five archive unittest checks passed. Not rerun after the serialization change |
 
-Both failures reproduced in isolated module reruns. Their fixes are outside this
-documentation publication. The full suite is not passing and release readiness
-has not been established.
+### Original failures and follow-up fixes
+
+Documentation commit `e322fd6` recorded 600 passed, 2 failed, and 7 skipped out
+of 609. Both causes were corrected in subsequent local work, and the full suite
+and focused rerun above passed.
+
+- The deletion UI test matched a CSS selector string rather than an actual delete
+  control. It now inspects HTML elements and attributes. This test correction
+  does not change product deletion permissions or behavior.
+- GitLab scheduled collection held the small control-request slot while streaming
+  an archive, causing heartbeat requests to receive HTTP 429. Archive and control
+  slots are now separate; a slow transfer permits heartbeat and rejects a second
+  archive stream.
+
+Passing local checks do not establish image, installer, or production deployment
+readiness. See [sequential scans](linux-scan-queue.en.md) for dispatch policy and
+resource limits.
 
 ## Unverified areas
 

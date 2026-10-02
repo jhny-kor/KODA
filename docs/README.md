@@ -29,6 +29,7 @@ KODA를 처음 쓰는 사람은 이 페이지에서 목적에 맞는 경로를 �
 | macOS 로컬 AI 개발 기능을 확인 | 로컬 모델 연결, 오탐 검토, 수정 제안·재점검, 테스트 초안·AI 보고서 | [macOS 로컬 AI 개발 가이드](macos-local-ai.ko.md) |
 | macOS 앱을 설치 | 네이티브 KODA 앱 또는 Python 대시보드 도우미 | [macOS 설치](install/macos.ko.md) |
 | Linux 서버에서 실행 | 사용자 경로 CLI 또는 Tracker 계정 기반 인증 포털·배포 게이트 | [Linux 설치·운영](install/linux.ko.md) |
+| Linux 다중 사용자·예약 점검의 대기 방식 확인 | 서버 점검 단일 실행, 수동 FIFO, 예약 대기·취소·복구 | [Linux 점검 순차 실행](linux-scan-queue.ko.md) |
 | Linux KODA 화면과 결과 분류 확인 | 실제 결과 화면, 라이브러리·소스코드·품질 탭, 기능 흐름도 | [KODA 웹 포털 화면과 기능](koda-web-portal.ko.md) |
 | 사내 GitLab 저장소를 선택해 점검 | SHA 고정 점검, Tracker 자동 전송, 확정 취약점별 비공개 Issue 등록 | [GitLab 저장소 연동](gitlab-integration-ko.md) |
 | KODA와 SBOM Tracker를 폐쇄망에 함께 설치 | `koda-suite-offline-x86_64-<version>.tar.gz` 단일 압축파일, SHA-256 검증, 계정·로그아웃 공유와 사이트별 권한 | [통합 폐쇄망 설치](../platforms/linux/suite/README.ko.md) |

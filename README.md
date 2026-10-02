@@ -20,8 +20,9 @@ KODA keeps scans local by default. The native macOS app has its own Swift scanne
 
 The [current implementation and verification snapshot](docs/current-status.en.md)
 separates committed source, local development changes, and released binaries.
-The documentation update includes local macOS AI and security-boundary work that
-has not yet been published as implementation code. Check that snapshot before
+The documentation update includes local macOS AI, security-boundary, and sequential
+Linux scan work that has not yet been published as implementation code. Check that
+snapshot before
 following development-only commands; it does not certify the Mac App Store app
 or an existing offline package.
 
@@ -32,6 +33,7 @@ or an existing offline package.
 | Install the native macOS app | [Mac App Store](https://apps.apple.com/kr/app/koda/id6770264012?mt=12) or [macOS install guide](docs/install/macos.md) |
 | Run KODA on Linux | [Linux install and operation guide](docs/install/linux.md) |
 | Deploy KODA, KODA SBOM Tracker, and Dependency-Track together in an air-gapped network | [Combined Linux suite guide](platforms/linux/suite/README.ko.md) |
+| Review sequential scheduled scans and the multi-user Linux queue (local development) | [Sequential Linux scan guide](docs/linux-scan-queue.en.md) |
 | Diagnose an air-gapped suite installation | [Closed-network troubleshooting guide](platforms/linux/suite/TROUBLESHOOTING.ko.md) |
 | Build or install the Windows desktop app | [Windows install guide](docs/install/windows.md) |
 | Scan JAR/WAR/EAR files on an offline server | [Offline Java SBOM and vulnerability runbook](docs/security/java-sbom-vulnerability-scan.en.md) |

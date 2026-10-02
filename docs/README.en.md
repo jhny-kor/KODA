@@ -20,6 +20,7 @@ that a downloaded installer or the Mac App Store app includes those changes.
 | Review macOS local AI development | [Local AI development guide](macos-local-ai.md) |
 | Install the macOS app | [macOS install](install/macos.md) |
 | Install or build the Linux package | [Linux install and application guide](install/linux.md) |
+| Understand multi-user and scheduled scan queues | [Sequential Linux scans](linux-scan-queue.en.md) |
 | Deploy KODA with KODA SBOM Tracker | [Combined air-gapped Linux suite](../platforms/linux/suite/README.ko.md) |
 | Diagnose a combined air-gapped installation | [Korean troubleshooting runbook](../platforms/linux/suite/TROUBLESHOOTING.ko.md) |
 | Install or build the Windows package | [Windows install](install/windows.md) |
