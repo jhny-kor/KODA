@@ -16,6 +16,15 @@
 
 KODA keeps scans local by default. The native macOS app has its own Swift scanner; Linux, Windows, CI, and server deployments use the shared Python engine in [`platforms/shared/python/`](platforms/shared/python/).
 
+## Documentation status — 2026-10-02
+
+The [current implementation and verification snapshot](docs/current-status.en.md)
+separates committed source, local development changes, and released binaries.
+The documentation update includes local macOS AI and security-boundary work that
+has not yet been published as implementation code. Check that snapshot before
+following development-only commands; it does not certify the Mac App Store app
+or an existing offline package.
+
 ## Choose your path
 
 | I want to… | Start here |
@@ -28,6 +37,7 @@ KODA keeps scans local by default. The native macOS app has its own Swift scanne
 | Scan JAR/WAR/EAR files on an offline server | [Offline Java SBOM and vulnerability runbook](docs/security/java-sbom-vulnerability-scan.en.md) |
 | Choose an air-gapped delivery method | [Offline delivery overview](docs/install/offline-delivery.en.md) |
 | Run scans, configure reports, or set up CI | [CLI and local usage](docs/usage.md) |
+| Review local macOS AI development and proposal validation | [Local AI development guide](docs/macos-local-ai.md) |
 | Run the approval-gated 21-control web audit | [Web audit runbook](docs/security/WEB_AUDIT.md) |
 | Integrate with security tooling | [Security integration docs](docs/README.en.md#security-integrations) |
 
@@ -58,7 +68,8 @@ python3 -m security_scanner app
 ```
 
 This starts the cross-platform local app at `http://127.0.0.1:8765` (loopback
-only; nothing leaves your machine). A Linux server uses the authenticated
+by default). Scanning stays local unless you enable a network-backed feature,
+such as online vulnerability enrichment, cloud AI triage, or an authorized web scan. A Linux server uses the authenticated
 `/koda/` portal instead: KODA SBOM Tracker owns the account and session, while
 KODA applies its own project roles and administrator-only rule settings.
 

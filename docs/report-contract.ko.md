@@ -52,6 +52,15 @@ JSON·HTML·Markdown·SARIF·CycloneDX 변환은 원본 finding의 식별자와 
 Java 리포트는 라이브러리·설치 버전별로 취약점을 통합하고, `Fixed`와 동일한
 Grype DB로 검증한 `Final` 후보를 별도 필드로 제공합니다.
 
+## 개발 CSV 내보내기 동작 — 2026-10-02
+
+미게시 보안 경계 체크아웃의 NIS-SBOM CSV는 셀을 따옴표로 감싸고, 앞쪽
+공백·BOM·NUL 뒤에 `=`, `+`, `-`, `@` 또는 전각 기호로 시작하는 값에는
+탭을 붙여 수식 실행을 억제합니다. 따라서 CSV 문자열은 원래 값과 다를 수
+있습니다. 정확한 기계 처리 값은 JSON·CycloneDX를 사용하고, 스프레드시트에서
+CSV를 열 때 보호 탭을 제거하지 마세요. 원래 finding의 심각도·식별자는
+변경하지 않습니다. 코드 게시 상태는 [현재 상태](current-status.ko.md)를 따릅니다.
+
 ## 검증
 
 공통 Python 직렬화 함수는 `security_scanner.reporting._finding_payload`입니다.

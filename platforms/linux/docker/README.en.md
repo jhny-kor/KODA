@@ -1,9 +1,46 @@
 # KODA Offline Docker Delivery
 
+> Updated 2026-10-02 against the local source checkout, including changes under
+> development. Publishing this documentation does not publish those source changes
+> or establish that GitHub main or previously built release images include them.
+> Confirm the deployed version and rebuild/validate the matching bundle before
+> relying on the checkout behavior described below.
+
 This single bundle runs KODA's JAR/WAR/EAR SBOM and vulnerability workflow on
 an air-gapped Linux x86_64 host. Docker Engine must already be installed. The
 installer does not modify Docker configuration, host security settings, or the
 global `PATH`.
+
+## Additional checkout boundaries
+
+The following changes are under development in the 2026-10-02 checkout. Rebuild
+and validate the corresponding bundle before applying them to an existing
+installation; publishing the docs does not update its images or wrappers.
+
+- The suite generates `KODA_GATEWAY_PROOF` in its `.env`, preserves existing
+  `[A-Za-z0-9_-]` values of 32–128 characters, writes the environment file with
+  mode `0600`, and supplies the same secret to the gateway and portal. The portal
+  rejects duplicate identity headers and invalid proof and fails closed when
+  proof is unconfigured. Do not distribute the secret to browsers.
+- Streaming input is capped at 2 GiB per file. Retained inputs plus active upload
+  reservations have a default 10 GiB quota (`KODA_PORTAL_UPLOAD_QUOTA_BYTES`).
+  Public portal JSON is capped at 1 MiB; internal scheduled API JSON defaults to
+  500 MiB (`KODA_JSON_MAX_BYTES`).
+- Execution checks `scan.library.create` / `scan.source.create` independently;
+  an `all` scan requires both. Input, export, deletion and external publication
+  permissions are separate server-side checks from screen visibility.
+- NIS-SBOM and comparison CSV quote every cell and prefix formula-like values
+  with a tab. CycloneDX/JSON values are unchanged by this display safeguard.
+- Java depth, entry, byte, metadata and Syft output limits may produce partial
+  artifacts with warnings and exit code `2`. See the
+  [Java runbook](../../../docs/security/java-sbom-vulnerability-scan.en.md) for
+  exact checkout limits.
+
+Standalone `dashboard start` provides a compatibility listener/status mode.
+Loopback binding or an SSH tunnel alone does not provide Tracker identity and
+gateway proof for protected portal login; use the integrated suite for users
+and production scans. Source inspection does not establish live Docker/nginx
+integration, upgrade compatibility, or Chromium execution.
 
 ## Bundle contents
 

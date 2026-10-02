@@ -2,21 +2,39 @@
 
 > 목적: 오픈소스 자율 AI 펜테스트 도구 [Strix](https://github.com/usestrix/strix)의 강점을 분석하고,
 > **KODA의 "오프라인·읽기 전용·프라이버시·컴플라이언스" 정체성을 깨지 않으면서** 흡수할 4대 발전 축을 정의한다.
-> 상태: 계획(Planning). 이 문서는 추후 구현의 기준 로드맵이다(무엇을·왜·우선순위).
-> 구현 명세(어떻게·코드 스켈레톤·CLI/Config·프롬프트 체인): [spec-beyond-static-scanner.md](spec-beyond-static-scanner.md)
-> 최종 갱신: 2026-06-14
+> 최초 기획일: 2026-06-14. 현행 상태 대조: **2026-10-02**.
+> 구현 명세: [spec-beyond-static-scanner.md](spec-beyond-static-scanner.md)
 
-> **문서 상태:** 이 문서는 구현 전 기획과 의사결정 이력입니다. 현재는 AI triage,
-> reachability, 자동 교정, changed-file CI action이 구현되어 있습니다. 현재 사용법은
-> [CLI 및 로컬 사용법](usage.ko.md)을, 구현 세부는
-> [구현 명세](spec-beyond-static-scanner.md)를 기준으로 확인하세요. 아래의 미구현
-> 표현과 체크박스는 당시 계획 상태를 보존한 것입니다.
+## 2026-10-02 구현 현황
+
+이 문서의 아래 벤치마킹·Gap Analysis·체크박스는 **2026-06-14 당시 기획과
+의사결정 이력**입니다. 체크박스는 현재 미구현 목록이 아닙니다. 현황은 로컬
+작업 트리의 코드로 대조했으며, 미커밋 개발 변경도 포함합니다. 문서 게시가 기능
+릴리스·App Store 배포를 의미하지 않습니다.
+
+| 축 | 현재 코드로 확인한 범위 | 아직 보장하지 않는 범위 |
+|---|---|---|
+| 공유 Python AI triage | `--ai-triage --llm`, Ollama/Anthropic/OpenAI provider, 원래 심각도를 유지하는 triage 메타데이터 | AI 판단의 정확성·실제 exploit 검증; Ollama API base를 바꾼 경우 로컬 전송만이라는 보장 |
+| 결정론적 교정 | `fix --target ...`의 기본 dry-run diff, 명시적 `--apply`, 기본 `.bak` 백업·Python 구문 검사 | 대화형 승인·git clean 필수 검사·임의 LLM 패치·자동 PR/머지 |
+| reachability | Python AST 및 JS/TS import 검색에 의한 의존성 CVE `reachable`/`unreachable`/`unknown` 라벨 | 실제 실행 도달성·완전한 호출 그래프; 기본 발견 삭제나 심각도 강등 |
+| CI 변경 파일 범위 | `--changed-only --base`, `.github/actions/koda/action.yml` composite 액션과 SARIF 업로드 단계; diff 실패 시 전체 점검 fallback | 변경 줄 단위 필터·PR 인라인 코멘트·Marketplace 배포/실제 업로드 검증 |
+| macOS 네이티브 로컬 AI | loopback OpenAI 호환 연결·설명·오탐 검토·수정본 비교·최대 3회 재생성·회귀 계획·Python 영향 분석·별도 AI 보고서 | 현재는 미게시 개발 파일; App Store 포함·기능 동등성·테스트 초안 실행 |
+
+공유 Python의 Ollama 기본 주소는 `http://localhost:11434`지만
+`KODA_LLM_API_BASE`는 다른 HTTP(S) 호스트도 받습니다. 해당 서버의 전송 범위는
+운영자가 확인해야 합니다. macOS 네이티브 AI 클라이언트의 loopback 제한과
+혼동하지 마세요. 네이티브 후보는 원본을 자동 수정하지 않고 별도 파일로 저장하며,
+공유 CLI의 `fix --apply`는 명시적으로 원본에 쓰는 별도 경로입니다.
+
+현재 명령은 [CLI 및 로컬 사용법](usage.ko.md), 네이티브 개발 상태는
+[macOS 로컬 AI 가이드](macos-local-ai.ko.md)를 확인하세요. 아래의 제안형 CLI,
+`--ai-provider`, git clean/승인 게이트와 계획상의 구성은 현재 계약으로 간주하지 않습니다.
 
 ---
 
-## 0. 두 도구의 성격 차이 (벤치마킹 근거)
+## 0. 2026-06-14 당시 두 도구의 성격 차이 (벤치마킹 근거)
 
-| 축 | KODA (현재) | Strix |
+| 축 | KODA (당시 기획 기준) | Strix (당시 분석) |
 |---|---|---|
 | 탐지 방식 | 정적 **휴리스틱/패턴 매칭** (AI 추론 레이어 없음) | 자율 **AI 멀티에이전트** ("Graph of Agents") |
 | 검증 | 없음 → 오탐 가능 (룰에 "검증 권고" 문구로 회피) | **실제 익스플로잇 PoC로 검증** → 오탐 최소화 |
@@ -33,7 +51,7 @@ Strix를 그대로 복제하지 않는다. Strix는 ① 코드를 클라우드 L
 
 ---
 
-## 0-1. 현재 KODA 기능 요약 (재사용 가능한 자산)
+## 0-1. 당시 KODA 기능 요약 (재사용 가능한 자산)
 
 - 점검 카테고리: `secrets`, `dependencies`, `configuration`, `code`, `prevention`, `host`
   (`models.FILE_CATEGORIES`/`HOST_CATEGORIES`). 파일 단위 `check_file(path)` + `prevention.check_project` + `host` 1회 실행.
@@ -62,7 +80,7 @@ Strix를 그대로 복제하지 않는다. Strix는 ① 코드를 클라우드 L
 
 ---
 
-## 2. 부족분 (Gap Analysis)
+## 2. 당시 부족분 (Gap Analysis)
 
 ### G1. AI 추론 주입 지점 부재 — ① 선결
 - 현재 발견은 룰이 만든 정적 `Finding`이 그대로 리포트로 감. **발견 후 재평가(re-triage) 훅이 없음.**
@@ -128,7 +146,7 @@ platforms/shared/python/security_scanner/
 
 ---
 
-## 4. 단계별 실행 계획 (ROI순)
+## 4. 당시 단계별 실행 계획 (ROI순; 체크박스는 과거 상태)
 
 ### Phase 0 — ④ CI/CD 네이티브 통합 (빠른 승리) — ☐
 가장 기반이 탄탄(SARIF·`--fail-on` 보유). 신규 LLM/쓰기 없음 → 정체성 충돌 0.
@@ -184,3 +202,5 @@ platforms/shared/python/security_scanner/
 - **오탐 역설**: AI triage가 진짜 취약점을 오탐으로 강등할 위험 → 강등은 "참고"로, 심각도 자체는 보존하고 라벨만 부여.
 - **공급망**: 네트워크 LLM SDK 추가는 KODA 자체 SBOM/의존성을 늘림 → 로컬 우선, SDK는 선택적 extra로 격리(`pip install koda[ai]`).
 - **법적 경계**: ③의 DAST/PoC는 "소유·허가 시스템만" — 기존 ZAP 경고 문구 패턴 재사용.
+
+- [English AI augmentation roadmap](roadmap-ai-augmentation.en.md)

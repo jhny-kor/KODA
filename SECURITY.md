@@ -1,26 +1,38 @@
-# Security Policy
+# KODA Security Policy
 
-## Supported Versions
+Reviewed: 2026-10-02
 
-| Version | Supported |
-| --- | --- |
-| main / latest | yes |
+## Supported source
 
-## Reporting a Vulnerability
+Security maintenance targets the latest `main` source. An installed app or offline
+package must be checked against its build revision; this policy does not promise
+that earlier binaries contain changes from a local development checkout.
 
-Please report suspected vulnerabilities privately before opening a public issue.
+## Reporting a vulnerability
 
-- Project: security
-- Contact: security@example.com
-- Expected first response: 3 business days
-- Expected status update: 7 business days
+Do not publish credentials, private source, exploit details, or sensitive scan
+reports in a public issue.
+
+GitHub private vulnerability reporting was **disabled** when checked on
+2026-10-02. The old `security@example.com` address was a placeholder and is not
+a reporting channel. No dedicated private contact address is currently listed
+in this repository.
+
+Use the [repository](https://github.com/jhny-kor/KODA) to check for an updated
+reporting channel. If none is available, open a minimal public issue requesting
+a confidential contact route, without vulnerability details or attachments.
+Share details only after the maintainer provides that route. If private reporting
+is enabled later, use the repository's **Security → Report a vulnerability** form.
 
 ## Handling
 
 1. Confirm the report and assign an owner.
-2. Reproduce the issue in a private branch or isolated environment.
-3. Patch, test, and release the fix.
-4. Rotate exposed credentials when secrets are involved.
-5. Publish an advisory or release note after users have a remediation path.
+2. Reproduce it in an isolated environment.
+3. Prepare a patch and regression evidence; record compatibility changes and
+   integration checks that could not run.
+4. Release the fix and rotate any exposed credentials.
+5. Publish an advisory after users have a remediation path.
 
-For the Korean version, see [SECURITY.ko.md](SECURITY.ko.md).
+For development status and current verification boundaries, see the
+[implementation snapshot](docs/current-status.en.md).
+For Korean, see [SECURITY.ko.md](SECURITY.ko.md).

@@ -1,5 +1,11 @@
 # KODA profile-driven 21-control web audit
 
+> Updated 2026-10-02 against the local source checkout, including changes under
+> development. Publishing this documentation does not publish those source changes
+> or establish that GitHub main or previously built release images include them.
+> Confirm the deployed version and rebuild/validate the matching bundle before
+> relying on the checkout behavior described below.
+
 `web-audit` is the approval-gated path for testing an owned or explicitly
 authorized staging/test service. It is not a generic crawler command and it does
 not infer that an undeclared endpoint is safe. A control is `PASS` only when its
@@ -9,6 +15,41 @@ cleanup, and all of those checks complete without evidence of a violation.
 The existing `web-scan` command remains the lightweight web-posture/crawl path.
 Use `web-audit` when the result must carry a reproducible target scope, approval,
 one-time nonce, bounded traffic, and per-control coverage.
+
+## Checkout authentication and rendering boundaries
+
+The 2026-10-02 checkout contains additional web boundary changes under
+development. They apply to the shared crawl/authentication helpers used by
+`web-scan` and `web-audit`; confirm the installed engine before relying on them.
+
+- Origins compare scheme, lowercase hostname and effective port (default
+  HTTP 80 / HTTPS 443). Matching hostnames with a different scheme or port
+  do not share credentials. Origin allowlisting does not authorize sharing an
+  account's cookie jar or custom credential headers.
+- Crawling follows each redirect only after checking its destination against
+  the allowed origins, blocks HTTPS downgrade, and uses a separate anonymous
+  opener for another approved origin. Cross-origin headers are reduced to
+  `User-Agent` and `Accept`. Forms, JS assets, robots and sitemap requests use
+  these same destination checks; password/file forms are excluded from generic
+  active form probes.
+- Form login requires HTTPS outside loopback HTTP, disables automatic redirects,
+  and keeps discovered actions on the login origin. A cross-origin explicit
+  `login_request_url` must be in the approved origins. Audit authentication also
+  requires all credentialed profile origins to be HTTPS or loopback HTTP; a
+  violation records incomplete authentication rather than silently sending
+  credentials.
+- Playwright blocks service workers and WebSockets and routes requests at
+  BrowserContext scope. Rendering is skipped if the installed Playwright lacks
+  `route_web_socket` support.
+  An unapproved origin, HTTPS downgrade, or rejected audit path/method aborts
+  rendering. Audit HTTP(S) rendering requests are fetched through the approved-IP
+  network opener and fulfilled into the browser with the audit response/time
+  budgets. Redirect responses are aborted. Lightweight rendering also disables
+  redirect following for its fetched HTTP(S) responses.
+
+Browser fallback or skipped rendering is a coverage gap. Neither a successful
+static crawl nor these source checks proves a live Chromium run, ZAP integration,
+or complete application-specific 21-control coverage.
 
 ## Quick start
 

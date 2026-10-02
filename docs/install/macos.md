@@ -1,5 +1,10 @@
 # KODA macOS Install
 
+> As of **2026-10-02**, source behavior below is based on the local working tree,
+> including uncommitted development changes. This docs refresh does not establish
+> an App Store update, notarization, or release validation. Check the installed
+> release before assuming feature availability.
+
 macOS has two lanes:
 
 - `platforms/macos/app/KODA/`: native Swift app with `NativeSecurityScanner.swift`.
@@ -54,8 +59,9 @@ it only against an authorized target. The native crawl defaults to 50 pages and
 depth 3, with at most 100 crawl-frontier URL attempts. Active, asset, and host
 probe requests are separate from that frontier budget. Native active verification
 only covers URL query parameters; it does not submit HTML forms. Budget, asset
-read, and WebKit rendering gaps remain explicit warnings. The App Store build
-keeps the native scan to its GET/HEAD read-only boundary.
+read, and WebKit rendering gaps remain explicit warnings. The `KODA_APP_STORE`
+build condition keeps the native scan to its GET/HEAD read-only boundary. This
+describes the source branch, not a fresh test of the installed Store version.
 
 ## Run Python Dashboard Helper
 
@@ -72,3 +78,15 @@ bash platforms/macos/scripts/install-macos.command
 ```
 
 This installs under `~/Library/Application Support/KODA` and creates `KODA.command` and `KODA-CLI.command` launchers in `~/Applications`. The helper path remains separate from the native Swift app; existing legacy shortcuts continue to work through a compatibility wrapper.
+
+## Local AI development lane
+
+The local working tree includes saved model connections, explanations, risk
+review, Python/Java/XML/JavaScript candidate previews, regression plans, Python
+impact search, and separate AI reports. AI requests use this Mac's loopback server
+and do not automatically change original source. These features require the
+unpublished development files and a separate ad-hoc development build. See the
+[local AI development guide](../macos-local-ai.md) for commands, data sent, tool
+requirements, and verification limits.
+
+- [한국어 macOS 설치](macos.ko.md)

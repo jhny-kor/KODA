@@ -1,5 +1,10 @@
 # KODA + KODA SBOM Tracker 폐쇄망 통합본
 
+> 현행화 기준: 2026-10-02 로컬 소스 checkout(개발 중 변경 포함). 이 문서의
+> 게시가 해당 소스 변경의 게시나 GitHub main·기존 배포 이미지 반영을 뜻하지
+> 않습니다. 아래 checkout 동작을 운영에 적용하기 전에 설치 버전과 대응 번들의
+> 재빌드·검증 여부를 확인해야 합니다.
+
 이 압축파일 하나에 KODA Docker 오프라인 이미지와 KODA SBOM Tracker의
 Dependency-Track·PostgreSQL·포털 이미지를 함께 담았습니다. 실제 비밀번호와 API
 키는 포함하지 않습니다.
@@ -88,6 +93,10 @@ TRACKER_UUID='Tracker 화면에 표시된 UUID'
 Tracker SBOM 업로드 기본 한도는 500MiB이고, KODA 입력 파일은 `/koda/api/`에서
 2GiB까지 스트리밍 업로드합니다. 413이 계속되면 앞단 TLS reverse proxy의
 `client_max_body_size` 또는 요청 본문 제한도 `/koda/api/` 기준 2GiB 이상으로 맞춥니다.
+포털 입력 보관소의 누적 한도는 기본 10GiB이며, `.env`의
+`KODA_PORTAL_UPLOAD_QUOTA_BYTES`로 조정할 수 있습니다. 사용 중인 입력과 진행 중인
+업로드가 한도를 차지하며, 점검 후 원본을 삭제하면 용량을 다시 사용할 수 있습니다.
+일반 포털 JSON 요청은 1MiB로 제한하고, 스케줄 결과 API의 500MiB 한도는 유지합니다.
 대용량 업로드가 503으로 끝나지 않도록 통합 gateway에는 `/koda/api/` 전용
 1시간 body·proxy timeout과 요청 스트리밍 설정이 포함되어 있습니다. 외부 TLS
 reverse proxy도 같은 경로에 `client_body_timeout 1h`, `proxy_send_timeout 1h`,
@@ -101,7 +110,9 @@ KODA 대시보드의 `SBOM Tracker 열기` 버튼은 기본적으로 same-origin
 `KODA_SSBOM_TRACKER_URL`을 해당 HTTPS 주소로 바꿉니다.
 KODA 컨테이너의 8765 포트는 호스트에 게시되지 않고 통합 게이트웨이 전용 Docker
 네트워크에서만 접근됩니다. 인증과 권한은 Tracker 계정 및 게이트웨이의
-`auth_request` 계약으로 처리됩니다.
+`auth_request` 계약으로 처리됩니다. Suite가 `.env`에 생성하는
+`KODA_GATEWAY_PROOF`는 게이트웨이와 포털이 공유하며, 이 값이 없는 직접 포털 요청은
+인증된 사용자로 처리되지 않습니다. 이 비밀값을 브라우저나 다른 컨테이너에 전달하지 마세요.
 
 ## 로그인·계정·권한 계약
 
@@ -126,6 +137,19 @@ Tracker 장애 시 KODA 보호 화면과 API는 이전 인증 결과를 캐시�
 `503`으로 실패합니다. `/healthz`, `/api/v1/healthz`, `/koda/live` 같은 명시된
 상태 확인 경로만 인증 예외입니다.
 
+2026-10-02 checkout에서는 라이브러리·소스코드 실행 권한을 각각
+`scan.library.create`·`scan.source.create`로 검사하고 전체 점검은 두 권한을
+모두 요구합니다. 입력 등록, 결과 내보내기, 회차·프로젝트 삭제, Tracker/GitLab
+게시도 별도 실행 권한입니다. 화면 접근 권한만으로 기능을 실행할 수 없습니다.
+legacy `scan.create` 정책은 scope별 권한으로 마이그레이션합니다. 이 변경은
+개발 중이며 기존 설치본 반영은 확인되지 않았습니다.
+
+Suite의 proof 생성은 `.env`의 `[A-Za-z0-9_-]` 32–128자 값을 유지하고
+부적합한 값은 재생성하며 환경파일을 `0600`으로 기록합니다. 포털은 중복
+identity 헤더·잘못된 proof를 거부하고 미설정 proof에는 실패 폐쇄합니다.
+proof 관련 shell·Compose·nginx template와 포털 이미지가 같은 버전이어야
+하므로 문서 게시만으로 기존 설치본을 업데이트했다고 판단하지 않습니다.
+
 ## KODA 화면·분석·보고서
 
 - `대시보드`: 점검 이력이 있는 프로젝트별 최신 상태와 심각도 분포를 확인합니다.
@@ -145,6 +169,12 @@ Tracker 장애 시 KODA 보호 화면과 API는 이전 인증 결과를 캐시�
 메인·상세 HTML 보기와 HTML ZIP, PDF, Excel, JSON, Markdown을 내려받을 수 있고,
 SBOM은 CycloneDX 1.6 JSON 또는 국정원 NIS-SBOM 1.0 CSV로 내려받습니다. 라이브러리
 회차의 HTML은 구성요소·버전·취약점 식별자 중심의 라이브러리 취약점 보고서입니다.
+
+현재 checkout의 NIS-SBOM·비교 CSV는 모든 셀을 인용하고 수식 시작 값 앞에
+tab을 붙입니다. CycloneDX/JSON 값은 변경하지 않습니다. Java 점검에는 기본
+깊이 8과 전체 대상 합산 엔트리·바이트 한도가 적용되며 자원 제한으로
+불완전하면 부분 보고서와 경고를 남기고 종료 코드 `2`를 반환합니다. 상세
+한도와 운영 해석은 [Java SBOM·취약점 점검](../../../docs/security/java-sbom-vulnerability-scan.md)을 확인합니다.
 
 웹 분석은 manifest/lockfile에서 정확한 이름·버전·PURL을 얻은 의존성을 번들된
 오프라인 Grype DB로 점검합니다. 결과에 라이브러리 취약점이 없으면 입력 파일이

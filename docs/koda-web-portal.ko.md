@@ -1,11 +1,52 @@
 # KODA 웹 포털 화면과 기능
 
+> 현행화 기준: 2026-10-02 로컬 소스 checkout(개발 중 변경 포함). 이 문서의
+> 게시가 해당 소스 변경의 게시나 GitHub main·기존 배포 이미지 반영을 뜻하지
+> 않습니다. 아래 checkout 동작을 운영에 적용하기 전에 설치 버전과 대응 번들의
+> 재빌드·검증 여부를 확인해야 합니다.
+
 Linux KODA는 Tracker의 SBOM 관리 화면이 아니라 KODA 보안·품질 점검 기능을
 브라우저에서 사용하는 포털입니다. 프로젝트별 입력과 분석 회차를 보관하고,
 메뉴에서 라이브러리 취약점과 소스코드 취약점을 각각 실행합니다. 완료 결과 안에서는
 기존 라이브러리·소스코드·품질 분류 탭도 함께 제공합니다. 사이드바 하단의
 `사용 가이드`는 KODA 기능·보안 용어·지원 기준을 설명하고, 우측 상단 계정 메뉴는
 현재 사용자 정보와 로그아웃을 제공합니다.
+
+## Checkout의 권한·업로드·내보내기 계약
+
+아래는 2026-10-02 checkout에 있는 개발 중 변경이며 기존 배포 이미지의
+반영 여부는 확인되지 않았습니다. 화면 접근과 서버 측 기능 실행 권한을 분리합니다.
+
+| 기능 | 실행 권한 |
+| --- | --- |
+| 입력 등록 | `input.manage` |
+| 라이브러리 점검 | `scan.library.create` |
+| 소스코드 점검 | `scan.source.create` |
+| 전체 점검 | 위 두 점검 권한 모두 |
+| 프로젝트 생성 / 삭제 | `project.create` / `project.delete` |
+| 결과 내보내기 / 회차 삭제 | `runs.export` / `runs.delete` |
+| Tracker / GitLab 결과 / Issue 게시 | `runs.tracker.publish` / `runs.gitlab.result.publish` / `runs.gitlab.issues.publish` |
+
+각 화면에는 별도의 `.view` 권한도 필요합니다. legacy `scan.create` 정책은
+scope별 실행 권한으로 마이그레이션되며 시스템 관리자는 모든 기능을 사용할 수
+있습니다. 라이브러리 실행을 소스코드 실행 허용으로 간주하지 않습니다.
+
+파일당 스트리밍 한도는 정확히 2 GiB(2,147,483,648 bytes)이고 화면에서는 `2 GB`로
+표시합니다. 입력 보관소는 기본 10 GiB이며 `KODA_PORTAL_UPLOAD_QUOTA_BYTES`의
+양의 정수 bytes로 조정합니다. 남아 있는 입력과 진행 중인 예약 용량을 합산해
+허용하고 초과하면 `413 upload_quota_exceeded`를 반환합니다. 일반 포털 JSON은
+1 MiB이며 내부 스케줄 API는 기본 500 MiB(`KODA_JSON_MAX_BYTES`)입니다.
+
+인증된 포털 요청은 Tracker의 identity 헤더와 게이트웨이가 덮어쓰는
+`X-KODA-Gateway-Proof`를 함께 검증합니다. Suite는 공유 비밀
+`KODA_GATEWAY_PROOF`를 `.env`에 생성하며 직접 포털 접속은 이 경계를 우회할 수
+없습니다. 단독 loopback dashboard 시작만으로 보호 포털의 로그인 계약이 갖춰지지
+않으므로 운영은 통합 Suite 경로를 사용합니다.
+
+NIS-SBOM과 회차 비교 CSV는 모든 셀을 인용하고, 공백·BOM·NUL 뒤의
+`=`, `+`, `-`, `@` 및 전각 변형으로 시작하는 값 앞에 tab을 붙여 스프레드시트
+수식 해석을 방지합니다. CSV에서 보이는 tab은 이 표현 변경의 일부이며
+CycloneDX/JSON의 원래 값에는 적용하지 않습니다.
 
 ## 화면 예시
 

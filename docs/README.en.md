@@ -5,11 +5,19 @@ the Korean guides and Korean-language links. Within this index, navigation stays
 on English documents; use the language link above only when intentionally
 switching languages.
 
+## Documentation baseline — 2026-10-02
+
+The [current implementation and verification snapshot](current-status.en.md)
+distinguishes committed source, unpublished local development work, and released
+binaries. Development-only commands and old validation records are not evidence
+that a downloaded installer or the Mac App Store app includes those changes.
+
 ## Quick starts
 
 | Goal | Guide |
 | --- | --- |
 | Run the shared scanner and configure reports | [CLI and local usage](usage.md) |
+| Review macOS local AI development | [Local AI development guide](macos-local-ai.md) |
 | Install the macOS app | [macOS install](install/macos.md) |
 | Install or build the Linux package | [Linux install and application guide](install/linux.md) |
 | Deploy KODA with KODA SBOM Tracker | [Combined air-gapped Linux suite](../platforms/linux/suite/README.ko.md) |

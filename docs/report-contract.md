@@ -75,6 +75,16 @@ Current production categories:
 - CI gates must use `severity`, not localized labels or UI text.
 - Report additions should be additive. Do not rename or remove existing keys without a migration.
 
+## Development CSV export behavior — 2026-10-02
+
+In the unpublished security-boundary checkout, NIS-SBOM CSV cells are quoted and
+values beginning with formula characters (`=`, `+`, `-`, `@`, including fullwidth
+forms after leading whitespace/BOM/NUL) are prefixed with a tab. CSV text can
+therefore differ from the original value. Use JSON or CycloneDX for exact machine
+values; do not strip this guard when opening the CSV in a spreadsheet. This
+changes presentation, not original finding severity or identity. See the
+[status snapshot](current-status.en.md) for implementation publication status.
+
 ## Verification
 
 The shared Python serializer is `security_scanner.reporting._finding_payload`.

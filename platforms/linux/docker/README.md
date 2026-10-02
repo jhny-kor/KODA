@@ -1,8 +1,40 @@
 # KODA 폐쇄망 Docker 전달물
 
+> 현행화 기준: 2026-10-02 로컬 소스 checkout(개발 중 변경 포함). 이 문서의
+> 게시가 해당 소스 변경의 게시나 GitHub main·기존 배포 이미지 반영을 뜻하지
+> 않습니다. 아래 checkout 동작을 운영에 적용하기 전에 설치 버전과 대응 번들의
+> 재빌드·검증 여부를 확인해야 합니다.
+
 Linux x86_64 폐쇄망 서버에서 KODA JAR/WAR/EAR SBOM·취약점 점검을 Docker로
 실행하기 위한 단일 전달물입니다. Docker Engine은 서버에 이미 설치되어 있어야
 하며, 이 전달물은 Docker나 호스트 설정을 변경하지 않습니다.
+
+## Checkout의 추가 운영 경계
+
+다음은 2026-10-02 checkout의 개발 중 변경입니다. 기존 이미지나 설치된 wrapper의
+동작을 보장하지 않으므로 대응 번들을 다시 빌드·검증하고 적용해야 합니다.
+
+- 통합 Suite가 `.env`에 `KODA_GATEWAY_PROOF`를 생성합니다. 기존 값이
+  `[A-Za-z0-9_-]` 32–128자이면 유지하고 그 외에는 새 값을 생성합니다.
+  환경파일을 `0600`으로 기록하고 같은 값을 gateway와 포털에 전달합니다.
+  포털은 중복 identity 헤더와 잘못된 proof를 거부하며, proof 미설정 시
+  보호 요청을 실패 폐쇄합니다. 이 값은 사용자 브라우저에 배포하지 않습니다.
+- 파일당 업로드 한도는 2 GiB, 남은 입력과 진행 중인 예약의 합계는 기본 10 GiB
+  (`KODA_PORTAL_UPLOAD_QUOTA_BYTES`)입니다. 일반 포털 JSON은 1 MiB, 내부
+  스케줄 API JSON은 기본 500 MiB(`KODA_JSON_MAX_BYTES`)입니다.
+- 점검 실행은 `scan.library.create`와 `scan.source.create`로 분리합니다.
+  전체 점검은 두 권한을 모두 요구하며, 입력 등록·내보내기·삭제·외부 게시 권한도
+  서버에서 별도로 확인합니다. 화면 접근 허용만으로 실행 권한이 생기지 않습니다.
+- NIS-SBOM·비교 CSV는 셀을 인용하고 수식 시작 값 앞에 tab을 붙입니다.
+  CycloneDX/JSON 데이터 값은 이 CSV 표시 변경의 영향을 받지 않습니다.
+- Java 아카이브는 깊이·엔트리·바이트·메타데이터·Syft 출력 한도를 적용하며
+  자원 한도로 불완전하면 부분 산출물과 경고를 남기고 종료 코드 `2`를 반환합니다.
+  자세한 한도는 [Java SBOM·취약점 점검](../../../docs/security/java-sbom-vulnerability-scan.md)을 확인합니다.
+
+단독 `dashboard start`는 listener·상태 확인용 호환 모드입니다. loopback 바인딩과
+SSH 터널만으로 Tracker identity·gateway proof를 포함한 보호 포털 인증이 구성되지는
+않으므로 사용자 로그인·운영 점검은 통합 Suite를 사용합니다. Docker/nginx 실제
+연동, 기존 설치본의 upgrade, Chromium 실행 검증은 소스 확인과 별개의 검증입니다.
 
 ## 구성
 
@@ -265,3 +297,32 @@ docker inspect <container> --format \
 ```
 
 Docker socket 마운트, privileged, host network/PID/IPC는 사용하지 않습니다.
+
+## 개발 소스의 샘플 UI 확인
+
+저장소 루트에서 아래 명령을 실행하면 임시 DB에 샘플 점검결과, GitLab
+브랜치 비교, 스케줄 성공·실패 사례를 생성합니다. 서버는 localhost에만
+바인딩하며 실제 GitLab·SSH 점검을 실행하지 않습니다.
+
+```bash
+PYTHONPATH=platforms/shared/python python3 tests/schedule_ui_preview.py \
+  --port 60985 --metadata /tmp/koda-sample-preview.json
+```
+
+`http://127.0.0.1:60985/koda/runs`에서 표시 개수와 스케줄 회차를 확인하고,
+상세 화면에서 요청 계정 ID, GitLab 저장소와 MR 정보를 확인할 수 있습니다.
+`/koda/admin/roles`에서 화면별 기능 권한을, `/koda/admin/rules`에서 규칙
+일괄 선택·해제를 확인합니다. 샘플의 설정 변경과 프로젝트 삭제는 임시 DB에만
+적용됩니다. 프로세스를 다시 시작하면 샘플 데이터가 초기화됩니다.
+
+이 미리보기는 현재 Python 소스의 UI 검증용입니다. 폐쇄망 서버 반영에는
+별도의 Linux 이미지 재빌드·반입과 대상 서버 검증이 필요합니다.
+
+권한관리의 화면 접근 권한은 일반 표로 표시하며, 기능 실행 권한만 화면별로
+접고 펼칩니다. 점검결과의 보고서 내보내기·삭제·Tracker 전송 재시도·GitLab
+결과 및 이슈 등록 재시도, 프로젝트 생성·삭제를 역할별로 설정할 수 있습니다.
+새 삭제·게시·생성 권한은 명시적으로 부여해야 하며 시스템 관리자는 모든 기능을
+사용할 수 있습니다. 프로젝트 권한은 사용자에게 배정된 프로젝트에 적용됩니다.
+프로젝트 삭제는 상세 화면에서 실행하며 사용자 역할 연결, 입력, 결과, 스케줄,
+연동 설정을 정리합니다. 공용 계정, 다른 프로젝트, 외부 GitLab 게시물 및 감사
+기록은 유지합니다.

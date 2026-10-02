@@ -31,6 +31,16 @@ python3 -m security_scanner serve
 
 The default binding is `127.0.0.1:8765`. Open `http://127.0.0.1:8765/security-dashboard.html`.
 
+### Development dashboard access changes — 2026-10-02
+
+In the unpublished security-boundary development checkout, scan, directory
+selection, export, prevention, web, and ZAP POST requests require
+`Origin: http://<Host>` and the `X-KODA-Session` value from `/api/health`.
+The built-in dashboard supplies both. A stale exported dashboard or a direct API
+client that omits them receives HTTP 403; use the dashboard served by the same
+running instance. `web-audit` additionally requires a loopback binding and client.
+See the [status snapshot](current-status.en.md) for publication and test scope.
+
 ## Configure a scan
 
 Copy the example configuration and change its target path:

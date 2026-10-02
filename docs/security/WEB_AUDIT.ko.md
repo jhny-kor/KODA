@@ -1,9 +1,44 @@
 # KODA 21개 웹취약점 자동 점검
 
+> 현행화 기준: 2026-10-02 로컬 소스 checkout(개발 중 변경 포함). 이 문서의
+> 게시가 해당 소스 변경의 게시나 GitHub main·기존 배포 이미지 반영을 뜻하지
+> 않습니다. 아래 checkout 동작을 운영에 적용하기 전에 설치 버전과 대응 번들의
+> 재빌드·검증 여부를 확인해야 합니다.
+
 `web-audit`은 프로필에 선언된 대상·리소스·정상/거부 oracle만 실행합니다.
 ZAP·Playwright·BOAST가 없거나 oracle/cleanup이 완전하지 않으면 PASS로 올리지
 않습니다. 대상 소유 또는 명시적 점검 권한이 있는 staging/테스트 환경에서만
 사용하세요.
+
+## Checkout의 인증·크롤링·렌더링 경계
+
+2026-10-02 checkout에는 공유 웹 크롤·인증 helper의 추가 경계 변경이 개발 중입니다.
+`web-scan`과 `web-audit`에서 이 helper를 사용하며, 설치된 엔진이 해당 변경을
+포함하는지 확인한 뒤 적용합니다.
+
+- origin은 scheme·소문자 hostname·실효 port(HTTP 80 / HTTPS 443)로 비교합니다.
+  같은 hostname이라도 scheme·port가 다르면 동일 인증 origin이 아닙니다. 다른
+  origin을 허용 목록에 넣는 것만으로 기본 계정의 cookie jar·임의 인증 헤더를
+  공유하지 않습니다.
+- 크롤은 redirect 목적지를 전송 전에 확인하고 HTTPS downgrade를 차단합니다.
+  다른 허용 origin에는 별도 익명 opener를 사용하며 헤더는 `User-Agent`·`Accept`만
+  유지합니다. form·JS asset·robots·sitemap에도 목적지 경계를 적용합니다. 일반
+  active form probe는 password·file 입력 form을 제출하지 않습니다.
+- form 로그인은 loopback HTTP 외에는 HTTPS를 요구하고 자동 redirect를 막습니다.
+  발견된 form action은 로그인 origin 안에 있어야 하며, 명시한
+  `login_request_url`이 다른 origin이면 승인 origin에 포함되어야 합니다.
+  audit 인증은 인증을 사용하는 profile origin 전체가 HTTPS 또는 loopback HTTP여야
+  하며 위반 시 인증 미완료로 기록합니다.
+- Playwright는 service worker·WebSocket을 차단하고 BrowserContext 범위에서
+  요청을 가로챕니다. 설치된 Playwright가 `route_web_socket`을 지원하지 않으면
+  렌더링을 생략합니다.
+  미승인 origin·HTTPS downgrade·audit의 미승인 path/method는 렌더링을 중단합니다.
+  audit의 HTTP(S) 요청은 승인 IP에 고정된 network opener로 가져와 응답·시간 한도
+  안에서 브라우저에 전달합니다. redirect 응답은 중단하며 lightweight 렌더링도
+  HTTP(S) fetch의 redirect를 따라가지 않습니다.
+
+렌더링 생략·fallback은 점검 범위의 공백입니다. 정적 크롤 성공이나 소스 확인만으로
+실제 Chromium 실행, ZAP 연동, 서비스별 21개 통제의 전체 검증을 증명하지 않습니다.
 
 ## 실행 흐름
 

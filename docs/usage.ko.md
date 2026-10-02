@@ -14,6 +14,15 @@ python3 -m security_scanner app
 대시보드는 기본적으로 `127.0.0.1:8765`에만 바인딩됩니다. 명령별 전체 옵션은
 `python3 -m security_scanner <command> --help`로 확인하세요.
 
+### 개발 대시보드 접근 변경 — 2026-10-02
+
+미게시 보안 경계 개발 체크아웃에서는 점검·폴더 선택·내보내기·예방 템플릿·
+웹·ZAP POST 요청에 `Origin: http://<Host>`와 `/api/health` 응답의
+`X-KODA-Session` 값이 필요합니다. 내장 화면은 이를 자동으로 전달합니다.
+오래된 내보내기 화면 또는 헤더를 생략한 직접 API 호출은 HTTP 403을 받으므로
+실행 중인 동일 서버가 제공하는 화면을 사용하세요. `web-audit`은 서버와 클라이언트가
+loopback이어야 합니다. 게시·검증 범위는 [현재 상태](current-status.ko.md)를 따릅니다.
+
 ## 주요 명령
 
 ```bash

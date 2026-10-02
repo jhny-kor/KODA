@@ -1,5 +1,14 @@
 # KODA 구현 명세 — 정적 스캐너를 넘어서기
 
+> **문서 확인: 2026-10-02.** 아래 2026-06-17 구현·123개 테스트·빌드 기록은
+> 당시의 기록이며 현재 전체 검증 결과가 아닙니다. 공통 CLI의 현행 동작은
+> [사용법](usage.ko.md), 별도 로컬 AI 개발 구현은
+> [macOS 로컬 AI](macos-local-ai.ko.md), 게시·검증 범위는
+> [현재 상태](current-status.ko.md)를 따릅니다. Python과 Swift의 내부 검사 통과만으로
+> 기능 동등성을 보장하지 않습니다. 공통 Ollama 제공자의 API base는 원격 HTTP(S)도
+> 허용하며, `koda[ai]` extra는 현재 pyproject에 정의되어 있지 않습니다.
+
+
 > 목적: [roadmap-ai-augmentation.md](roadmap-ai-augmentation.md)의 4대 축을 **실제로 구현 가능한 수준**으로 구체화한다.
 > 업계 기법(Strix·XBOW·Endor·Copilot Autofix·Semgrep Assistant)을 분석해 KODA에 맞게 채택/변형/기각한 결정을 코드 스켈레톤과 함께 기록한다.
 > 상태: 설계(Design) + 일부 구현. 함수 시그니처·모듈 경계·CLI/Config 스키마는 구현 시작 기준점이다.
