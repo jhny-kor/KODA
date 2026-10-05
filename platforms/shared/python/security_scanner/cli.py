@@ -658,6 +658,8 @@ def main(argv: list[str] | None = None) -> int:
             oob_host=oob_host,
             oob_confirmed=oob_confirmed,
             json_endpoints=tuple(json_endpoints),
+            max_params=args.max_params,
+            max_form_fields=args.max_form_fields,
             compare_unauth=args.compare_unauth,
             secondary_headers=secondary_headers or None,
         )
@@ -1070,7 +1072,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="URL",
         help="extra same-host URL/path to scan (known route, sitemap entry); repeatable",
     )
-    web_scan.add_argument("--delay", type=float, default=0.3, help="seconds to wait between crawl requests (default 0.3)")
+    web_scan.add_argument("--max-params", type=_positive_int, default=15, help="max query parameters to actively probe per URL (default 15); raise for wider coverage")
+    web_scan.add_argument("--max-form-fields", type=_positive_int, default=10, help="max form fields to actively probe per form (default 10)")
+    web_scan.add_argument("--delay", type=float, default=0.3, help="seconds to wait between crawl requests (default 0.3; set 0 for maximum throughput)")
     web_scan.add_argument("--login-url", help="URL of a login form to authenticate before scanning")
     web_scan.add_argument("--username", help="username for form login")
     web_scan.add_argument("--password", help="password for form login")

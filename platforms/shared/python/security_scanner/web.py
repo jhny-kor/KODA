@@ -113,6 +113,8 @@ def crawl_web(
     oob_host: str | None = None,
     oob_confirmed: Callable[[str], bool] | None = None,
     json_endpoints: Sequence[tuple[str, str, Mapping[str, object]]] = (),
+    max_params: int = 15,
+    max_form_fields: int = 10,
     compare_unauth: bool = False,
     secondary_headers: Mapping[str, str] | None = None,
     scanned_pages: list[str] | None = None,
@@ -325,11 +327,12 @@ def crawl_web(
             # intrusive, timing/OOB-based blind SQLi and command injection).
             collected.extend(active_probe(
                 final_url, page_opener, page_headers, timeout, target,
-                oob_host=oob_host, oob_confirmed=oob_confirmed, intrusive=intrusive,
+                max_params=max_params, oob_host=oob_host, oob_confirmed=oob_confirmed, intrusive=intrusive,
             ))
         if active and body:
             # Opt-in active verification of this page's form fields (GET/POST).
             collected.extend(form_active_probe(final_url, body, page_opener, page_headers, timeout, target,
+                                               max_fields=max_form_fields,
                                                allowed_origins=allowed, request_identity=request_identity,
                                                intrusive=intrusive, oob_host=oob_host, oob_confirmed=oob_confirmed,
                                                stored_markers=stored_markers))
@@ -2114,14 +2117,14 @@ class OobCollector:
 
 
 def _delay_confirms(fetch: Callable[[int], float | None], big: int, small: int) -> bool:
-    """True when response time tracks an injected delay at two points.
+    """True when response time tracks an injected delay across repeated samples.
 
     ``fetch(sec)`` sends a payload asking the backend to pause ``sec`` seconds and
-    returns the elapsed time. Requiring the delay to scale (big vs small vs a
-    0-second baseline) rejects endpoints that are merely slow. A non-vulnerable
-    param costs only two fast requests (baseline + big both return promptly).
-    ponytail: single confirmation pair; add more samples if network jitter causes
-    false positives in a given environment.
+    returns the elapsed time. The delay must scale (big vs small vs a 0-second
+    baseline) AND the big delay must reproduce on a second sample, so neither a
+    uniformly-slow endpoint nor a one-off latency spike triggers a finding. A
+    non-vulnerable param still costs only two fast requests (baseline + big return
+    promptly); the extra samples run only once a positive is forming.
     """
     base = fetch(0)
     if base is None:
@@ -2130,7 +2133,11 @@ def _delay_confirms(fetch: Callable[[int], float | None], big: int, small: int) 
     if hi is None or (hi - base) < big * 0.6:
         return False
     lo = fetch(small)
-    return lo is not None and small * 0.5 <= (lo - base) < (hi - base) + 1.0
+    if lo is None or not (small * 0.5 <= (lo - base) < (hi - base) + 1.0):
+        return False
+    # Re-confirm the big delay: a single jitter spike must not be enough.
+    hi2 = fetch(big)
+    return hi2 is not None and (hi2 - base) >= big * 0.6
 
 
 def _ssti_evaluated(body: str | None) -> bool:

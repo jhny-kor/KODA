@@ -627,6 +627,19 @@ class LiveCrawlTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_delay_confirms_accepts_consistent_delay(self):
+        # Response time scales with the requested delay across all samples.
+        self.assertTrue(web._delay_confirms(lambda sec: 0.05 + sec, big=3, small=1))
+
+    def test_delay_confirms_rejects_one_off_spike(self):
+        # base, hi(spike), lo(scales), hi2(spike gone) -> re-confirmation rejects it.
+        samples = iter([0.0, 3.0, 1.0, 0.0])
+        self.assertFalse(web._delay_confirms(lambda sec: next(samples), big=3, small=1))
+
+    def test_delay_confirms_rejects_uniformly_slow(self):
+        # Every request is slow but does not scale with the delay -> not injectable.
+        self.assertFalse(web._delay_confirms(lambda sec: 5.0, big=3, small=1))
+
     def test_header_injection_reflected(self):
         class Echoer(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
