@@ -16,6 +16,39 @@ The existing `web-scan` command remains the lightweight web-posture/crawl path.
 Use `web-audit` when the result must carry a reproducible target scope, approval,
 one-time nonce, bounded traffic, and per-control coverage.
 
+## web-scan scanning tiers
+
+`web-scan` escalates in explicit, opt-in tiers. Each tier verifies findings by
+observing the server's response (reflected marker, evaluated expression, error
+signature, measured delay, out-of-band callback) rather than guessing, and no
+tier sends data-destroying payloads — a benign proof of concept (`sleep`, a
+unique marker, an OAST hit) proves the same bug without damaging the target.
+
+| Tier | Flag | What it does | Traffic |
+| --- | --- | --- | --- |
+| Passive | *(default)* | TLS, security headers, cookie flags, CSP/HSTS quality, information disclosure, CORS reflection, JWT, advertised HTTP methods, Host-header reflection, secrets in JS assets. | Read-only GET/OPTIONS. |
+| Active | `--active` | Bounded, verified payloads to query params, form fields, and (with `--api-spec`) the API surface: reflected XSS, JS-context XSS, multi-engine SSTI, error-based SQL injection, path traversal/LFI, open redirect, CRLF / response-header injection, and `Referer`/`X-Forwarded-For` header injection. | GET + non-login form submits; non-destructive. |
+| Intrusive | `--intrusive` (requires `--active`) | Time-based blind SQL injection and OS command injection (timing differential, re-confirmed), JSON write-endpoint fuzzing (POST/PUT/PATCH bodies from `--api-spec`), and stored / second-order XSS (a marker injected on one page detected on another). | State-changing requests — authorized staging only. |
+| Intrusive + OAST | `--oob-listen HOST:PORT` (requires `--intrusive`) | Starts a built-in HTTP out-of-band collector and confirms blind SSRF and blind OS command injection via a caller-controlled callback. `HOST:PORT` is the address the target can reach the scanner on; the port is bound locally. | Adds outbound fetches the target performs to the collector. |
+
+Coverage and throughput knobs: `--max-params` (query params probed per URL),
+`--max-form-fields` (fields probed per form), and `--delay` (seconds between
+crawl requests; `0` for maximum throughput). Scope stays bounded by `--max-pages`,
+the internal request-safety limit, and same-host origin scoping; crawling never
+shares an account's cookies or credential headers across origins.
+
+Escalate beyond `web-scan` when you need more:
+
+- `web-audit` — approval-gated, profile-driven, reproducible 21-control coverage
+  with a one-time nonce and bounded traffic envelope (the rest of this document).
+- `zap-run --mode full|api --authorize-active` — comprehensive third-party active
+  scanning (fuzzing, the full attack-rule set). `web-scan --intrusive` deliberately
+  stays a bounded, verification-first probe set; it does not replace ZAP's full
+  active scanner.
+
+Every active/intrusive tier is for systems you are explicitly authorized to test.
+`--intrusive` prints a warning and should target a staging copy.
+
 ## Checkout authentication and rendering boundaries
 
 The 2026-10-02 checkout contains additional web boundary changes under

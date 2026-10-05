@@ -61,6 +61,17 @@ KODA가 구현한 정적 룰 매핑 범위이며 전체 SAST 또는 공식 준�
 `zap-run --mode full`처럼 요청 범위를 넓히는 옵션은 소유하거나 명시적 권한을
 받은 대상에서만 사용하고, ZAP 활성 모드에는 `--authorize-active`를 지정하세요.
 
+`web-scan`은 명시적 opt-in 단계로 공격성을 높입니다 — 패시브(기본), `--active`
+(쿼리 파라미터·폼·`--api-spec` 표면에 검증형 페이로드: 반사/JS컨텍스트 XSS,
+멀티엔진 SSTI, SQLi, LFI, 오픈 리다이렉트, CRLF, 헤더 삽입), `--intrusive`
+(시간기반 블라인드 SQLi/OS 명령어 삽입, JSON 쓰기 엔드포인트 퍼징, 저장형 XSS
+추가. `--oob-listen HOST:PORT`로 블라인드 SSRF/RCE를 확인하는 내장 수집기 기동).
+`--intrusive`는 `--active`가 필요하고 상태 변경 요청을 보내므로 승인된 staging
+전용입니다. 어떤 단계도 데이터 파괴 페이로드를 보내지 않습니다. 범위는
+`--max-params`·`--max-form-fields`로 조정하고 `--delay 0`으로 처리량을 최대화할
+수 있습니다. 전체 단계표와 `web-audit`·`zap-run --mode full`로의 확대 기준은
+[web-scan 점검 단계](security/WEB_AUDIT.ko.md#web-scan-점검-단계티어)를 보세요.
+
 `--crawl`의 기본 상한은 50페이지·깊이 3이며 `--max-pages`와 `--max-depth`로
 조정할 수 있습니다. KODA는 중복 URL을 제거하고 별도의 요청 안전 한도를
 적용합니다. 페이지·깊이·요청 상한, 응답 읽기 제한, 렌더링 실패 때문에 확인하지

@@ -236,6 +236,18 @@ The default `web-scan` performs a bounded posture check. `--crawl`, `--render`,
 `--discover-assets`, `--capture-network`, `--interact`, `--scan-js-secrets`,
 `--ingest-sitemap`, and `--probe-paths` increase the requests or discovery scope.
 
+`web-scan` escalates in explicit opt-in tiers — passive (default), `--active`
+(bounded verified payloads: reflected/JS-context XSS, multi-engine SSTI, SQLi,
+LFI, open redirect, CRLF, header injection on query params, forms, and the
+`--api-spec` surface), and `--intrusive` (adds time-based blind SQLi / OS command
+injection, JSON write-endpoint fuzzing, and stored XSS; `--oob-listen HOST:PORT`
+adds a built-in collector that confirms blind SSRF / RCE). `--intrusive` requires
+`--active`, sends state-changing requests, and is for authorized staging only. No
+tier sends data-destroying payloads. Tune coverage with `--max-params` and
+`--max-form-fields`; set `--delay 0` for maximum throughput. See the
+[web-scan scanning tiers](security/WEB_AUDIT.md#web-scan-scanning-tiers) table for
+the full breakdown and when to escalate to `web-audit` or `zap-run --mode full`.
+
 `--crawl` defaults to 50 pages and depth 3; use `--max-pages` and `--max-depth`
 to adjust those budgets. KODA deduplicates URLs and applies a separate request
 safety limit. Page, depth, or request limits, body-read limits, and rendering
@@ -253,8 +265,17 @@ value returned by `/api/health` together with the exact loopback `Origin`.
 # Bounded posture scan
 python3 -m security_scanner web-scan --url https://example.com --format markdown
 
-# Active query-parameter checks: explicit authorization is required
+# Active checks (XSS/SSTI/SQLi/LFI/redirect/CRLF): explicit authorization required
 python3 -m security_scanner web-scan --url https://example.com --active
+
+# Intrusive tier (blind SQLi/RCE timing, JSON fuzzing, stored XSS): authorized staging only
+python3 -m security_scanner web-scan --url https://staging.example.com --active --intrusive \
+  --api-spec openapi.json
+
+# Add an out-of-band collector to confirm blind SSRF / command injection.
+# HOST:PORT is the address the target can reach this scanner on.
+python3 -m security_scanner web-scan --url https://staging.example.com --active --intrusive \
+  --oob-listen 10.0.0.5:8899
 
 # ZAP's default is a baseline scan. Full/API/active automation also require
 # --authorize-active and an authorized target.
