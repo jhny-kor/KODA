@@ -723,6 +723,109 @@ class LiveCrawlTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_intrusive_form_field_sqli(self):
+        import re as _re
+
+        class SleepyForm(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<form method='post' action='/s'><input name='q'></form>")
+
+            def do_POST(self):
+                from urllib.parse import parse_qs
+                n = int(self.headers.get("Content-Length", "0"))
+                q = (parse_qs(self.rfile.read(n).decode()).get("q") or [""])[0]
+                m = _re.search(r"SLEEP\((\d+)\)", q)
+                if m:
+                    time.sleep(int(m.group(1)))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), SleepyForm)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, timeout=5, active=True, intrusive=True)
+            self.assertIn("web.sql-injection-time-blind", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_oob_collector_confirms_ssrf(self):
+        import urllib.request as _req
+
+        collector = web.OobCollector("127.0.0.1", port=0)
+
+        class Fetcher(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                target_url = (parse_qs(urlparse(self.path).query).get("url") or [""])[0]
+                if target_url.startswith("http://"):
+                    try:  # vulnerable: server fetches a caller-controlled URL (SSRF)
+                        _req.urlopen(target_url, timeout=2).read()
+                    except Exception:
+                        pass
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Fetcher)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/f?url=x"
+            findings, _w, _p = web.crawl_web(
+                base, max_pages=1, delay=0, timeout=5, active=True, intrusive=True,
+                oob_host=collector.public_host, oob_confirmed=collector.confirmed,
+            )
+            self.assertIn("web.ssrf-oob-verified", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+            collector.close()
+
+    def test_authenticated_intrusive_scan_uses_session(self):
+        import re as _re
+
+        class AuthApp(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from http.cookies import SimpleCookie
+                cookie = SimpleCookie(self.headers.get("Cookie", ""))
+                authed = cookie["sid"].value == "good" if "sid" in cookie else False
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+                if authed:  # timing bug only reachable behind the session
+                    m = _re.search(r"SLEEP\((\d+)\)", value)
+                    if m:
+                        time.sleep(int(m.group(1)))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok" if authed else b"login")
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), AuthApp)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/acct?id=1"
+            findings, _w, _p = web.crawl_web(
+                base, max_pages=1, delay=0, timeout=5, active=True, intrusive=True,
+                extra_headers={"Cookie": "sid=good"},
+            )
+            self.assertIn("web.sql-injection-time-blind", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_cors_dynamic_origin_reflection(self):
         class Reflector(http.server.BaseHTTPRequestHandler):
             def do_GET(self):

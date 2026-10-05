@@ -570,6 +570,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.intrusive and not args.active:
             print("error: --intrusive requires --active", file=sys.stderr)
             return 2
+        if args.oob_listen and not args.intrusive:
+            print("error: --oob-listen requires --intrusive", file=sys.stderr)
+            return 2
+        oob_host = None
+        oob_confirmed = None
+        oob_collector = None
+        if args.oob_listen:
+            from .web import OobCollector
+
+            _host, sep, port = args.oob_listen.rpartition(":")
+            if not sep or not port.isdigit():
+                print("error: --oob-listen must be HOST:PORT (e.g. 192.168.1.5:8899)", file=sys.stderr)
+                return 2
+            oob_collector = OobCollector(args.oob_listen, port=int(port))
+            oob_host = oob_collector.public_host
+            oob_confirmed = oob_collector.confirmed
+            print(f"OOB collector listening on :{oob_collector.port}, advertised to targets as {oob_host}", file=sys.stderr)
         if args.active:
             print(
                 "warning: --active sends attack payloads (XSS/SQLi/open-redirect) to query "
@@ -638,10 +655,14 @@ def main(argv: list[str] | None = None) -> int:
             probe_paths=args.probe_paths,
             active=args.active,
             intrusive=args.intrusive,
+            oob_host=oob_host,
+            oob_confirmed=oob_confirmed,
             json_endpoints=tuple(json_endpoints),
             compare_unauth=args.compare_unauth,
             secondary_headers=secondary_headers or None,
         )
+        if oob_collector is not None:
+            oob_collector.close()
         findings = login_findings + crawl_findings
         warnings.extend(crawl_warnings)
         report = ReportConfig(
@@ -1018,6 +1039,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--intrusive",
         action="store_true",
         help="INTRUSIVE tier (requires --active): adds timing-based blind SQLi / OS command injection probes and fuzzes JSON API write-endpoints (POST/PUT/PATCH) from --api-spec. Explicitly authorized targets only",
+    )
+    web_scan.add_argument(
+        "--oob-listen",
+        metavar="HOST:PORT",
+        help="start a built-in out-of-band HTTP collector to confirm blind SSRF / command injection (requires --intrusive). HOST:PORT is the address the TARGET can reach this scanner on; the port is bound locally",
     )
     web_scan.add_argument(
         "--api-spec",

