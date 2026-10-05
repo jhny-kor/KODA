@@ -110,6 +110,7 @@ def crawl_web(
     probe_paths: bool = False,
     active: bool = False,
     intrusive: bool = False,
+    exploit: bool = False,
     oob_host: str | None = None,
     oob_confirmed: Callable[[str], bool] | None = None,
     json_endpoints: Sequence[tuple[str, str, Mapping[str, object]]] = (),
@@ -226,7 +227,8 @@ def crawl_web(
                 continue
             ep_opener, ep_headers = request_identity(endpoint)
             collected.extend(json_active_probe(endpoint, body, ep_opener, ep_headers, timeout, target, method=method,
-                                               intrusive=intrusive, oob_host=oob_host, oob_confirmed=oob_confirmed))
+                                               intrusive=intrusive, oob_host=oob_host, oob_confirmed=oob_confirmed,
+                                               exploit=exploit))
 
     while (
         queue
@@ -327,7 +329,8 @@ def crawl_web(
             # intrusive, timing/OOB-based blind SQLi and command injection).
             collected.extend(active_probe(
                 final_url, page_opener, page_headers, timeout, target,
-                max_params=max_params, oob_host=oob_host, oob_confirmed=oob_confirmed, intrusive=intrusive,
+                max_params=max_params, oob_host=oob_host, oob_confirmed=oob_confirmed,
+                intrusive=intrusive, exploit=exploit,
             ))
         if active and body:
             # Opt-in active verification of this page's form fields (GET/POST).
@@ -335,7 +338,7 @@ def crawl_web(
                                                max_fields=max_form_fields,
                                                allowed_origins=allowed, request_identity=request_identity,
                                                intrusive=intrusive, oob_host=oob_host, oob_confirmed=oob_confirmed,
-                                               stored_markers=stored_markers))
+                                               stored_markers=stored_markers, exploit=exploit))
         if (compare_unauth or secondary_headers) and not _is_static_asset(final_url):
             # Access-control comparison: does a lower-privileged context get the
             # same authenticated content? (IDOR/BOLA/BFLA heuristic.)
@@ -2071,6 +2074,105 @@ def _oob_cmd_findings(
     return []
 
 
+# --- Proof-of-impact (opt-in --exploit, layered on --intrusive) ----------------
+# For an exploitable class, pull ONE bounded, read-only evidence value and stop:
+# a DB identity string, the output of a benign `id`, or an arbitrary-expression
+# result. This demonstrates impact for the report. ponytail: deliberately NOT a
+# data-dump / shell / secret-exfil / blind char-by-char extractor — that is the
+# line between a scanner and a weapon; a single proof value is enough to show the
+# finding is real and set severity.
+_SQL_PROOF_PAYLOADS = (
+    "' AND extractvalue(1,concat(0x7e,version(),0x7e))-- -",       # MySQL/MariaDB
+    "' AND extractvalue(1,concat(0x7e,current_user(),0x7e))-- -",  # MySQL/MariaDB
+    "' AND 1=cast(version() as int)-- -",                           # PostgreSQL
+    "' AND 1=convert(int,@@version)-- -",                           # MSSQL
+    "' AND 1=cast(current_user as int)-- -",                        # PostgreSQL user
+)
+_SQL_PROOF_RE = re.compile(
+    r"~([^~<\n]{2,80})~"                                            # extractvalue ~value~
+    r"|(PostgreSQL \d[\w.]*|Microsoft SQL Server[^\n<]{0,40}"       # cast/convert error text
+    r"|MariaDB-[\w.]+|\b\d+\.\d+\.\d+[-\w.]*\b)",
+    re.IGNORECASE,
+)
+_CMD_PROOF_PAYLOADS = ("; id", "| id", "$(id)", "`id`", "& id")
+_CMD_PROOF_RE = re.compile(r"uid=\d+\([\w.$-]+\)\s+gid=\d+\([\w.$-]+\)")
+# SSTI arbitrary-eval proof: a second, distinct arithmetic per engine syntax.
+_SSTI_PROOF = (
+    ("{{31337-1}}", "Jinja2/Twig/Nunjucks ({{...}})"),
+    ("${31337-1}", "Freemarker/JSP-EL (${...})"),
+    ("<%= 31337-1 %>", "ERB/JSP (<%= %>)"),
+    ("#{31337-1}", "Ruby/EL (#{...})"),
+)
+_SSTI_PROOF_RESULT = "31336"
+_REDACT_RE = re.compile(
+    r"(?i)(set-cookie|authorization|cookie|x-[\w-]*token|token|api[_-]?key|password)\s*[:=]\s*\S+"
+)
+
+
+def _redact(text: str, limit: int = 300) -> str:
+    """Mask credential-bearing substrings and bound length, for report evidence."""
+    text = _REDACT_RE.sub(lambda m: f"{m.group(1)}: [REDACTED]", text)
+    text = re.sub(r"\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9_-]{40,}\b", "[REDACTED]", text)
+    text = " ".join(text.split())
+    return text[:limit]
+
+
+def _exploit_findings(
+    send_value: Callable[[str], str | None], url: str, target: str, label: str, original: str,
+) -> list[Finding]:
+    """Proof-of-impact for an already-probed injection point: extract ONE read-only
+    evidence value per class (DB identity, benign `id`, arbitrary expression) and
+    attach a redacted transcript. Returns nothing for a non-exploitable point."""
+    out: list[Finding] = []
+
+    # 1) SQL injection: error-based identity (version / current_user), read-only.
+    for payload in _SQL_PROOF_PAYLOADS:
+        body = send_value(original + payload)
+        if not body:
+            continue
+        match = _SQL_PROOF_RE.search(body)
+        if match:
+            proof = (match.group(1) or match.group(2) or "").strip()
+            out.append(_finding(
+                "web.sql-injection-exploited", "critical",
+                "SQL injection confirmed by reading a database identity value",
+                url, target=target,
+                evidence=_redact(f"{label}: read-only SQLi proof returned '{proof}' (payload: {payload})"),
+                recommendation="Use parameterized queries / prepared statements; never build SQL from raw input.",
+            ))
+            break
+
+    # 2) OS command injection: run a benign read-only command and capture its output.
+    for payload in _CMD_PROOF_PAYLOADS:
+        body = send_value(original + payload)
+        if not body:
+            continue
+        match = _CMD_PROOF_RE.search(body)
+        if match:
+            out.append(_finding(
+                "web.command-injection-exploited", "critical",
+                "OS command injection confirmed by running a benign command (id)",
+                url, target=target,
+                evidence=_redact(f"{label}: injected `id` returned '{match.group(0)}' (payload: {payload})"),
+                recommendation="Never pass user input to a shell; use argument arrays / safe APIs and validate against an allow-list.",
+            ))
+            break
+
+    # 3) SSTI: confirm arbitrary expression evaluation (code execution capability).
+    for payload, engine in _SSTI_PROOF:
+        body = send_value(payload)
+        if body and _SSTI_PROOF_RESULT in body and "31337-1" not in body:
+            out.append(_finding(
+                "web.ssti-exploited", "critical",
+                "Server-side template injection confirmed: arbitrary expression evaluated",
+                url, target=target,
+                evidence=_redact(f"{label}: engine {engine} evaluated {payload} to {_SSTI_PROOF_RESULT}"),
+                recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
+            ))
+            break
+    return out
+
+
 class OobCollector:
     """Minimal HTTP out-of-band collector for blind SSRF / RCE confirmation.
 
@@ -2214,6 +2316,7 @@ def active_probe(
     oob_host: str | None = None,
     oob_confirmed: Callable[[str], bool] | None = None,
     intrusive: bool = False,
+    exploit: bool = False,
 ) -> list[Finding]:
     """Send bounded, non-destructive attack payloads to a URL's query params.
 
@@ -2371,6 +2474,11 @@ def active_probe(
                     lambda v, nm=name: _probe_body(opener, _with_query_param(parsed, nm, v), headers, timeout),
                     original, oob_host, oob_confirmed,
                 ))
+            if exploit:
+                findings.extend(_exploit_findings(
+                    lambda v, nm=name: _probe_body(opener, _with_query_param(parsed, nm, v), headers, timeout),
+                    url, target, label, original,
+                ))
 
     # Injection via request headers (reflected XSS / SSTI). One set per URL, not
     # per param, to cap noise: some apps echo Referer / X-Forwarded-For into the page.
@@ -2439,6 +2547,7 @@ def form_active_probe(
     oob_host: str | None = None,
     oob_confirmed: Callable[[str], bool] | None = None,
     stored_markers: dict[str, str] | None = None,
+    exploit: bool = False,
 ) -> list[Finding]:
     """Active verification of HTML form fields (GET and POST), mirroring the
     query-param checks. Skips login/register (password) and file-upload forms to
@@ -2521,6 +2630,8 @@ def form_active_probe(
                     stored = f"kodastored{secrets.token_hex(4)}\"><kx>"
                     submit_field(stored)
                     stored_markers[stored] = action_url
+                if exploit:
+                    findings.extend(_exploit_findings(submit_field, action_url, target, label, base[name]))
     return findings
 
 
@@ -2537,6 +2648,7 @@ def json_active_probe(
     intrusive: bool = False,
     oob_host: str | None = None,
     oob_confirmed: Callable[[str], bool] | None = None,
+    exploit: bool = False,
 ) -> list[Finding]:
     """Fuzz the string fields of a JSON request body for reflected XSS, SSTI and
     error-based SQL injection — the API analogue of ``form_active_probe``.
@@ -2595,6 +2707,11 @@ def json_active_probe(
                     url, target, label,
                     lambda v, nm=name: _submit_json(opener, url, method, {**template, nm: v}, headers, timeout),
                     str(template[name]), oob_host, oob_confirmed,
+                ))
+            if exploit:
+                findings.extend(_exploit_findings(
+                    lambda v, nm=name: _submit_json(opener, url, method, {**template, nm: v}, headers, timeout),
+                    url, target, label, str(template[name]),
                 ))
     return findings
 

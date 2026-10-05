@@ -24,6 +24,7 @@ ZAP·Playwright·BOAST가 없거나 oracle/cleanup이 완전하지 않으면 PAS
 | 액티브 | `--active` | 쿼리 파라미터·폼 필드·(`--api-spec` 시) API 표면에 제한·검증형 페이로드: 반사 XSS, JS 컨텍스트 XSS, 멀티엔진 SSTI, 에러기반 SQL 삽입, 경로 조작/LFI, 오픈 리다이렉트, CRLF/응답 헤더 삽입, `Referer`/`X-Forwarded-For` 헤더 삽입. | GET + 비로그인 폼 제출; 비파괴. |
 | 침투(intrusive) | `--intrusive` (`--active` 필요) | 시간기반 블라인드 SQL 삽입·OS 명령어 삽입(타이밍 차분, 재확인), JSON 쓰기 엔드포인트 퍼징(`--api-spec`의 POST/PUT/PATCH 바디), 저장형/2차 XSS(한 페이지에 주입한 마커를 다른 페이지에서 검출). | 상태 변경 요청 — 승인된 staging 전용. |
 | 침투 + OAST | `--oob-listen HOST:PORT` (`--intrusive` 필요) | 내장 HTTP 대역외 수집기를 띄워 블라인드 SSRF·블라인드 OS 명령어 삽입을 콜백으로 확인. `HOST:PORT`는 대상이 스캐너에 도달할 수 있는 주소이며 포트는 로컬에 바인딩됩니다. | 대상이 수집기로 보내는 아웃바운드 요청 추가. |
+| 영향 실증 | `--exploit` (`--intrusive` 필요) | 확인된 삽입점에 실제 익스플로잇을 실행하되 읽기전용 증거 **1건만** 추출하고 멈춤: SQLi → DB `version()`/`current_user`, 명령어 삽입 → 무해한 `id` 출력, SSTI → 임의 식 평가 결과. 증적은 리댁션됩니다. 데이터 덤프·셸·시크릿 유출·파괴는 하지 않습니다. | 확인된 취약점당 요청 수 건 추가. |
 
 범위·처리량 노브: `--max-params`(URL당 점검 쿼리 파라미터 수), `--max-form-fields`
 (폼당 점검 필드 수), `--delay`(크롤 요청 간격 초; `0`이면 최대 처리량). 범위는

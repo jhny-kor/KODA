@@ -67,7 +67,9 @@ KODA가 구현한 정적 룰 매핑 범위이며 전체 SAST 또는 공식 준�
 (시간기반 블라인드 SQLi/OS 명령어 삽입, JSON 쓰기 엔드포인트 퍼징, 저장형 XSS
 추가. `--oob-listen HOST:PORT`로 블라인드 SSRF/RCE를 확인하는 내장 수집기 기동).
 `--intrusive`는 `--active`가 필요하고 상태 변경 요청을 보내므로 승인된 staging
-전용입니다. 어떤 단계도 데이터 파괴 페이로드를 보내지 않습니다. 범위는
+전용입니다. `--exploit`(`--intrusive` 필요)는 영향 실증을 추가합니다 — 확인된
+삽입점에서 읽기전용 증거 1건(DB 버전, `id` 출력, 평가된 식)만 추출하고 멈추며
+덤프·셸·파괴는 없습니다. 어떤 단계도 데이터 파괴 페이로드를 보내지 않습니다. 범위는
 `--max-params`·`--max-form-fields`로 조정하고 `--delay 0`으로 처리량을 최대화할
 수 있습니다. 전체 단계표와 `web-audit`·`zap-run --mode full`로의 확대 기준은
 [web-scan 점검 단계](security/WEB_AUDIT.ko.md#web-scan-점검-단계티어)를 보세요.

@@ -242,8 +242,11 @@ LFI, open redirect, CRLF, header injection on query params, forms, and the
 `--api-spec` surface), and `--intrusive` (adds time-based blind SQLi / OS command
 injection, JSON write-endpoint fuzzing, and stored XSS; `--oob-listen HOST:PORT`
 adds a built-in collector that confirms blind SSRF / RCE). `--intrusive` requires
-`--active`, sends state-changing requests, and is for authorized staging only. No
-tier sends data-destroying payloads. Tune coverage with `--max-params` and
+`--active`, sends state-changing requests, and is for authorized staging only.
+`--exploit` (requires `--intrusive`) adds proof-of-impact: for a confirmed
+injection it extracts a single read-only evidence value (DB version, `id` output,
+an evaluated expression) and stops — no data dump, shell, or destruction. No tier
+sends data-destroying payloads. Tune coverage with `--max-params` and
 `--max-form-fields`; set `--delay 0` for maximum throughput. See the
 [web-scan scanning tiers](security/WEB_AUDIT.md#web-scan-scanning-tiers) table for
 the full breakdown and when to escalate to `web-audit` or `zap-run --mode full`.
@@ -276,6 +279,10 @@ python3 -m security_scanner web-scan --url https://staging.example.com --active 
 # HOST:PORT is the address the target can reach this scanner on.
 python3 -m security_scanner web-scan --url https://staging.example.com --active --intrusive \
   --oob-listen 10.0.0.5:8899
+
+# Proof-of-impact: pull ONE read-only evidence value from a confirmed injection
+# (DB version, `id` output, evaluated expression). No dump/shell/destruction.
+python3 -m security_scanner web-scan --url https://staging.example.com --active --intrusive --exploit
 
 # ZAP's default is a baseline scan. Full/API/active automation also require
 # --authorize-active and an authorized target.

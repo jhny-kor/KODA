@@ -640,6 +640,94 @@ class LiveCrawlTests(unittest.TestCase):
         # Every request is slow but does not scale with the delay -> not injectable.
         self.assertFalse(web._delay_confirms(lambda sec: 5.0, big=3, small=1))
 
+    def test_exploit_sqli_extracts_db_identity(self):
+        class SqlLeak(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+                # Vulnerable: extractvalue leaks version() in the XPATH error body.
+                body = "XPATH syntax error: '~5.7.42-log~'" if "extractvalue" in value else "ok"
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), SqlLeak)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/q?id=1"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, timeout=5,
+                                             active=True, intrusive=True, exploit=True)
+            hit = [f for f in findings if f.rule_id == "web.sql-injection-exploited"]
+            self.assertTrue(hit)
+            self.assertIn("5.7.42-log", hit[0].evidence)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_exploit_command_injection_runs_id(self):
+        import re as _re
+
+        class ShellRun(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("host") or [""])[0]
+                if _re.search(r"(;|\||&|\$\(|`)\s*id", value):  # vulnerable: runs injected `id`
+                    body = "uid=0(root) gid=0(root) groups=0(root)"
+                else:
+                    body = "pong"
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), ShellRun)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/ping?host=a"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, timeout=5,
+                                             active=True, intrusive=True, exploit=True)
+            hit = [f for f in findings if f.rule_id == "web.command-injection-exploited"]
+            self.assertTrue(hit)
+            self.assertIn("uid=0(root)", hit[0].evidence)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_exploit_ssti_arbitrary_expression(self):
+        class Templater(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+                body = value.replace("{{31337-1}}", "31336").replace("{{1337*1337}}", "1787569")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Templater)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/p?name=x"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, timeout=5,
+                                             active=True, intrusive=True, exploit=True)
+            self.assertIn("web.ssti-exploited", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_redact_masks_credentials(self):
+        red = web._redact("Set-Cookie: session=abc; version 5.7 token=deadbeefdeadbeefdeadbeefdeadbeef1234")
+        self.assertNotIn("abc", red)
+        self.assertIn("[REDACTED]", red)
+
     def test_header_injection_reflected(self):
         class Echoer(http.server.BaseHTTPRequestHandler):
             def do_GET(self):

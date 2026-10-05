@@ -573,6 +573,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.oob_listen and not args.intrusive:
             print("error: --oob-listen requires --intrusive", file=sys.stderr)
             return 2
+        if args.exploit and not args.intrusive:
+            print("error: --exploit requires --intrusive", file=sys.stderr)
+            return 2
+        if args.exploit:
+            print(
+                "warning: --exploit runs real exploitation steps against confirmed "
+                "vulnerabilities to extract a single read-only proof value (DB identity, "
+                "`id` output, evaluated expression). Run ONLY against systems you are "
+                "explicitly authorized to test.",
+                file=sys.stderr,
+            )
         oob_host = None
         oob_confirmed = None
         oob_collector = None
@@ -655,6 +666,7 @@ def main(argv: list[str] | None = None) -> int:
             probe_paths=args.probe_paths,
             active=args.active,
             intrusive=args.intrusive,
+            exploit=args.exploit,
             oob_host=oob_host,
             oob_confirmed=oob_confirmed,
             json_endpoints=tuple(json_endpoints),
@@ -1046,6 +1058,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--oob-listen",
         metavar="HOST:PORT",
         help="start a built-in out-of-band HTTP collector to confirm blind SSRF / command injection (requires --intrusive). HOST:PORT is the address the TARGET can reach this scanner on; the port is bound locally",
+    )
+    web_scan.add_argument(
+        "--exploit",
+        action="store_true",
+        help="PROOF-OF-IMPACT (requires --intrusive): for a confirmed injection, pull ONE read-only evidence value (SQLi -> DB version/current_user, command injection -> `id` output, SSTI -> arbitrary expression). No data dump, no shell, no destruction. Explicitly authorized targets only",
     )
     web_scan.add_argument(
         "--api-spec",
