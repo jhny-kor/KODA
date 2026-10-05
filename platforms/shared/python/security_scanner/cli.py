@@ -707,6 +707,43 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
+    if args.command == "net-scan":
+        from .netprobe import active_tls_probe, default_credential_check, port_scan
+
+        if not args.authorize_active:
+            print(
+                "error: net-scan actively probes a host's ports/services and requires "
+                "--authorize-active. Run only against systems you are explicitly authorized to test.",
+                file=sys.stderr,
+            )
+            return 2
+        findings = port_scan(args.host, timeout=args.timeout)
+        if args.tls:
+            findings += active_tls_probe(args.host, args.tls_port, timeout=max(args.timeout, 5.0))
+        if args.default_creds_url:
+            findings += default_credential_check(
+                args.default_creds_url, timeout=max(args.timeout, 5.0), authorize=True
+            )
+        report = ReportConfig(
+            format=args.format or "markdown",
+            output=expand_path(str(args.output), Path.cwd()) if args.output else None,
+            min_severity=args.min_severity or "info",
+            language=args.language or "en",
+        )
+        filtered_findings = filter_by_min_severity(findings, report.min_severity)
+        content = render_report(
+            filtered_findings, report.format, target_names=(args.host,),
+            target_paths={args.host: args.host}, language=report.language,
+        )
+        write_report(content, report.output)
+        print(
+            f"Net scan: {len(filtered_findings)} finding(s) at or above {report.min_severity} for {args.host}.",
+            file=sys.stderr,
+        )
+        if args.fail_on and _has_failure(filtered_findings, args.fail_on):
+            return 1
+        return 0
+
     if args.command == "fix":
         from .fixes import apply as fixes_apply
 
@@ -1009,6 +1046,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--nvd-api-key-env",
         help="environment variable holding an NVD API key (raises NVD rate limits)",
     )
+
+    net_scan = subparsers.add_parser("net-scan", help="probe a host's exposed network services (TLS, ports, default credentials; authorized targets only)")
+    net_scan.add_argument("--host", required=True, help="authorized host/IP to probe")
+    net_scan.add_argument("--tls", action="store_true", help="active TLS tests: deprecated protocol / weak cipher / certificate validity")
+    net_scan.add_argument("--tls-port", type=int, default=443, help="port for the active TLS tests (default 443)")
+    net_scan.add_argument("--default-creds-url", metavar="URL", help="HTTP Basic-auth URL to test a short list of published default credentials against")
+    net_scan.add_argument("--authorize-active", action="store_true", help="confirm you are authorized to actively probe this host (required)")
+    net_scan.add_argument("--timeout", type=float, default=2.0, help="per-connection timeout in seconds (default 2)")
+    net_scan.add_argument("--format", choices=("markdown", "json", "html", "sarif"), help="report format")
+    net_scan.add_argument("--output", type=Path, help="report output path")
+    net_scan.add_argument("--language", choices=("en", "ko"), help="report display language")
+    net_scan.add_argument("--min-severity", choices=SEVERITIES, help="minimum severity to include (default info)")
+    net_scan.add_argument("--fail-on", choices=SEVERITIES, help="exit 1 when findings meet or exceed severity")
 
     web_scan = subparsers.add_parser("web-scan", help="check a live website's security posture (headers, TLS, cookies, CORS)")
     web_scan.add_argument("--url", required=True, help="authorized http(s) URL to check")

@@ -52,8 +52,17 @@ KODA가 구현한 정적 룰 매핑 범위이며 전체 SAST 또는 공식 준�
 ## 안전 경계
 
 일반 스캔과 `sbom-verify`는 읽기 전용입니다. `fix --apply`, 템플릿 생성,
-`web-scan`, `zap-run`, `upload-sbom`은 파일을 변경하거나 외부 시스템에
+`web-scan`, `net-scan`, `zap-run`, `upload-sbom`은 파일을 변경하거나 외부 시스템에
 접근할 수 있으므로 승인된 대상에서만 사용하세요.
+
+`net-scan`은 비웹 네트워크 표면을 다룹니다 — 엄선된 TCP 포트/배너 스윕, 능동 TLS
+점검(폐기된 TLS 1.0/1.1·약한 암호·인증서 유효성), HTTP Basic 공개 기본 자격증명
+점검(브루트포스 아님). 대상에 능동 접속하므로 `--authorize-active`가 필요합니다:
+
+```bash
+python3 -m security_scanner net-scan --host 10.0.0.10 --tls --authorize-active
+python3 -m security_scanner net-scan --host 10.0.0.10 --default-creds-url https://10.0.0.10/admin --authorize-active
+```
 
 ## 승인된 웹 점검
 
