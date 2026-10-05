@@ -383,6 +383,33 @@ class LiveCrawlTests(unittest.TestCase):
         self.assertEqual(payload["auth"]["status"], "authenticated")
         self.assertEqual(payload["page_results"][0]["auth_state"], "authenticated")
 
+    def test_web_payload_forwards_intrusive_exploit_tier(self):
+        import json as _json
+        from security_scanner.server import web_scan_payload
+
+        class Templater(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+                body = value.replace("{{31337-1}}", "31336").replace("{{1337*1337}}", "1787569")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Templater)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/p?name=x"
+            payload = web_scan_payload(url, delay=0, timeout=5, active=True, intrusive=True, exploit=True)
+            self.assertIn("web.ssti-exploited", _json.dumps(payload))
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_cross_account_structural_detection(self):
         # A server that serves the SAME record to any cookie (broken object-level
         # auth) but varies only a per-request CSRF token — structural comparison

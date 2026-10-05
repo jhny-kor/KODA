@@ -199,6 +199,9 @@ TRANSLATIONS = {
         "web_ingest_sitemap": "Ingest robots.txt / sitemap.xml",
         "web_probe_paths": "Probe sensitive paths (/.env, /.git ...)",
         "web_active": "Active verify (XSS/SQLi/redirect payloads — authorized only)",
+        "web_intrusive": "Intrusive (blind SQLi/RCE timing, JSON fuzz, stored XSS — staging only)",
+        "web_exploit": "Proof-of-impact (extract one read-only evidence value — staging only)",
+        "web_oob": "OOB collector HOST:PORT (confirm blind SSRF/RCE; target-reachable address)",
         "web_compare_unauth": "Access-control check: compare vs unauthenticated",
         "web_secondary_label": "Second account cookie/header (cross-account IDOR/BOLA)",
         "web_secondary_placeholder": "Cookie: sid=second-account",
@@ -444,6 +447,9 @@ TRANSLATIONS = {
         "web_ingest_sitemap": "robots.txt / sitemap.xml 수집",
         "web_probe_paths": "민감 경로 프로브 (/.env, /.git ...)",
         "web_active": "능동 검증 (XSS/SQLi/리다이렉트 페이로드 — 권한 대상만)",
+        "web_intrusive": "침투 (블라인드 SQLi/RCE 타이밍, JSON 퍼징, 저장형 XSS — staging만)",
+        "web_exploit": "영향 실증 (읽기전용 증거 1건 추출 — staging만)",
+        "web_oob": "OOB 수집기 HOST:PORT (블라인드 SSRF/RCE 확인; 대상이 닿는 주소)",
         "web_compare_unauth": "접근통제 점검: 비인증과 비교",
         "web_secondary_label": "두 번째 계정 쿠키/헤더 (계정 간 IDOR/BOLA)",
         "web_secondary_placeholder": "Cookie: sid=second-account",
@@ -4594,6 +4600,10 @@ HTML_TEMPLATE = """<!doctype html>
           <label class="scan-web-check"><input id="web-ingest-sitemap" type="checkbox"> <span id="web-ingest-sitemap-label"></span></label>
           <label class="scan-web-check"><input id="web-probe-paths" type="checkbox"> <span id="web-probe-paths-label"></span></label>
           <label class="scan-web-check"><input id="web-active" type="checkbox"> <span id="web-active-label"></span></label>
+          <label class="scan-web-check"><input id="web-intrusive" type="checkbox"> <span id="web-intrusive-label"></span></label>
+          <label class="scan-web-check"><input id="web-exploit" type="checkbox"> <span id="web-exploit-label"></span></label>
+          <label class="scan-web-headers"><span id="web-oob-label"></span>
+            <input id="web-oob" type="text" autocomplete="off" placeholder="HOST:PORT"></label>
           <label class="scan-web-check"><input id="web-compare-unauth" type="checkbox"> <span id="web-compare-unauth-label"></span></label>
           <div class="scan-web-textareas">
           <label class="scan-web-headers"><span id="web-secondary-label"></span>
@@ -4986,6 +4996,13 @@ HTML_TEMPLATE = """<!doctype html>
       return `http://127.0.0.1:8765${endpoint}`;
     }
 
+    async function dashboardJsonHeaders() {
+      const health = await fetch(apiEndpoint("/api/health"));
+      const session = health.ok ? health.headers.get("X-KODA-Session") : "";
+      if (!session) throw new Error("Local dashboard session is unavailable");
+      return { "Content-Type": "application/json", "X-KODA-Session": session };
+    }
+
     async function parseJsonResponse(response) {
       try {
         return await response.json();
@@ -5083,6 +5100,9 @@ HTML_TEMPLATE = """<!doctype html>
       setText("web-ingest-sitemap-label", activeLabels.web_ingest_sitemap);
       setText("web-probe-paths-label", activeLabels.web_probe_paths);
       setText("web-active-label", activeLabels.web_active);
+      setText("web-intrusive-label", activeLabels.web_intrusive);
+      setText("web-exploit-label", activeLabels.web_exploit);
+      setText("web-oob-label", activeLabels.web_oob);
       setText("web-compare-unauth-label", activeLabels.web_compare_unauth);
       setText("web-secondary-label", activeLabels.web_secondary_label);
       byId("web-secondary").placeholder = activeLabels.web_secondary_placeholder;
@@ -5530,7 +5550,7 @@ HTML_TEMPLATE = """<!doctype html>
         }
         const response = await fetch(apiEndpoint("/api/export"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: await dashboardJsonHeaders(),
           body: JSON.stringify({
             format,
             language: state.language,
@@ -5764,7 +5784,7 @@ HTML_TEMPLATE = """<!doctype html>
       try {
         const response = await fetch(apiEndpoint("/api/select-directory"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: await dashboardJsonHeaders(),
           body: JSON.stringify({ current_path: byId("scan-path").value || "" }),
         });
         const result = await parseJsonResponse(response);
@@ -5806,7 +5826,7 @@ HTML_TEMPLATE = """<!doctype html>
       try {
         const response = await fetch(apiEndpoint("/api/scan"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: await dashboardJsonHeaders(),
           body: JSON.stringify({
             path,
             language: state.language,
@@ -5904,15 +5924,9 @@ HTML_TEMPLATE = """<!doctype html>
       render();
 
       try {
-        const headers = { "Content-Type": "application/json" };
-        if (byId("web-active").checked) {
-          const health = await fetch(apiEndpoint("/api/health"));
-          const session = health.headers.get("X-KODA-Session");
-          if (session) headers["X-KODA-Session"] = session;
-        }
         const response = await fetch(apiEndpoint("/api/web-scan"), {
           method: "POST",
-          headers,
+          headers: await dashboardJsonHeaders(),
           body: JSON.stringify({
             url,
             language: state.language,
@@ -5929,6 +5943,9 @@ HTML_TEMPLATE = """<!doctype html>
             ingest_sitemap: byId("web-ingest-sitemap").checked,
             probe_paths: byId("web-probe-paths").checked,
             active: byId("web-active").checked,
+            intrusive: byId("web-intrusive").checked,
+            exploit: byId("web-exploit").checked,
+            oob_listen: byId("web-oob").value.trim(),
             compare_unauth: byId("web-compare-unauth").checked,
             secondary_headers: byId("web-secondary").value,
             api_spec: byId("web-api-spec").value,
@@ -6011,7 +6028,7 @@ HTML_TEMPLATE = """<!doctype html>
       try {
         const response = await fetch(apiEndpoint("/api/zap-scan"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: await dashboardJsonHeaders(),
           body: JSON.stringify(requestBody),
         });
         const nextPayload = await parseJsonResponse(response);
@@ -6048,7 +6065,7 @@ HTML_TEMPLATE = """<!doctype html>
       try {
         const response = await fetch(apiEndpoint("/api/scan"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: await dashboardJsonHeaders(),
           body: JSON.stringify({
             path,
             language: state.language,
@@ -6098,7 +6115,7 @@ HTML_TEMPLATE = """<!doctype html>
       try {
         const response = await fetch(apiEndpoint("/api/prevention-kit"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: await dashboardJsonHeaders(),
           body: JSON.stringify({ action, path }),
         });
         const result = await parseJsonResponse(response);
@@ -6128,7 +6145,11 @@ HTML_TEMPLATE = """<!doctype html>
         return;
       }
       const format = byId("sbom-format").value;
-      const csvCell = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+      const csvCell = (value) => {
+        const raw = String(value ?? "");
+        const guarded = /^[\\s\\uFEFF\\u0000]*[=+\\-@＝＋－＠]/u.test(raw) ? "\\t" + raw : raw;
+        return `"${guarded.replaceAll('"', '""')}"`;
+      };
       const nis = payload.nis_sbom || { columns: [], rows: [] };
       const content = format === "nis-sbom"
         ? "\ufeff" + [nis.columns, ...nis.rows.map((row) => nis.columns.map((column) => row[column] || ""))]

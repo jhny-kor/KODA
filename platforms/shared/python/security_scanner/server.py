@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import platform
@@ -367,6 +368,11 @@ def web_scan_payload(
     ingest_sitemap: bool = False,
     probe_paths: bool = False,
     active: bool = False,
+    intrusive: bool = False,
+    exploit: bool = False,
+    oob_listen: str = "",
+    max_params: int = 15,
+    max_form_fields: int = 10,
     compare_unauth: bool = False,
     secondary_headers_text: str = "",
     api_spec_text: str = "",
@@ -415,13 +421,32 @@ def web_scan_payload(
     origins = _validated_origins(url, allowed_origins)
 
     seeds = tuple(seeds)
+    json_endpoints: list = []
     if api_spec_text.strip():
         from .api_spec import parse_api_spec
 
         spec_urls, spec_warnings = parse_api_spec(api_spec_text, url)
         seeds = seeds + tuple(spec_urls)
         warnings.extend(spec_warnings)
+        if intrusive:
+            from .api_spec import parse_api_spec_json_bodies
+
+            json_endpoints = parse_api_spec_json_bodies(api_spec_text, url)
     secondary_headers = _headers_from_text(secondary_headers_text)
+
+    oob_host = None
+    oob_confirmed = None
+    oob_collector = None
+    if oob_listen.strip() and intrusive:
+        from .web import OobCollector
+
+        _h, sep, port = oob_listen.strip().rpartition(":")
+        if sep and port.isdigit():
+            oob_collector = OobCollector(oob_listen.strip(), port=int(port))
+            oob_host = oob_collector.public_host
+            oob_confirmed = oob_collector.confirmed
+        else:
+            warnings.append("Ignored oob_listen: expected HOST:PORT.")
 
     scanned_pages: list[str] = []
     page_results: list[dict[str, object]] = []
@@ -443,12 +468,21 @@ def web_scan_payload(
         ingest_sitemap=ingest_sitemap,
         probe_paths=probe_paths,
         active=active,
+        intrusive=intrusive,
+        exploit=exploit,
+        oob_host=oob_host,
+        oob_confirmed=oob_confirmed,
+        json_endpoints=tuple(json_endpoints),
+        max_params=max_params,
+        max_form_fields=max_form_fields,
         compare_unauth=compare_unauth,
         secondary_headers=secondary_headers or None,
         scanned_pages=scanned_pages,
         page_results=page_results,
         allowed_origins=origins,
     )
+    if oob_collector is not None:
+        oob_collector.close()
     warnings.extend(crawl_warnings)
     if auth_result["status"] == "uncertain" and any(item["auth_state"] == "authenticated" for item in page_results):
         auth_result["status"] = "authenticated"
@@ -793,6 +827,8 @@ def _handler(language: str):
             if path in {"/api/health", "/api/scan", "/api/scan-upload", "/api/web-scan", "/api/zap-scan", "/api/select-directory", "/api/prevention-kit", "/api/export", "/api/web-audit/plan", "/api/web-audit/approve", "/api/web-audit/run"}:
                 if path.startswith("/api/web-audit/") and not self._require_web_audit_access(options=True):
                     return
+                if path not in {"/api/health", "/api/web-audit/plan", "/api/web-audit/approve", "/api/web-audit/run"} and not self._require_dashboard_access(options=True):
+                    return
                 self.send_response(HTTPStatus.NO_CONTENT)
                 self._send_cors_headers()
                 self.send_header("Content-Length", "0")
@@ -802,6 +838,13 @@ def _handler(language: str):
 
         def do_POST(self) -> None:
             path = urlparse(self.path).path
+            dashboard_paths = {"/api/scan", "/api/scan-upload", "/api/web-scan", "/api/zap-scan", "/api/select-directory", "/api/prevention-kit", "/api/export"}
+            if path in dashboard_paths:
+                if not self._require_dashboard_access():
+                    return
+                if path != "/api/scan-upload" and self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._send_json({"error": "application/json Content-Type is required"}, status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+                    return
             if path in {"/api/web-audit/plan", "/api/web-audit/approve", "/api/web-audit/run"}:
                 if not self._require_web_audit_access():
                     return
@@ -909,7 +952,12 @@ def _handler(language: str):
         def _handle_web_scan(self) -> None:
             try:
                 request = self._read_json(max_bytes=4_194_304)  # allow a pasted API spec
-                if bool(request.get("active")) and not self._require_web_audit_access():
+                active = bool(request.get("active"))
+                # Intrusive / exploit / OOB are active-tier and require the same
+                # local web-audit session gate; they also require --active semantics.
+                intrusive = active and bool(request.get("intrusive"))
+                exploit = intrusive and bool(request.get("exploit"))
+                if (active or intrusive or exploit) and not self._require_web_audit_access():
                     return
                 auth = request.get("auth") if isinstance(request.get("auth"), dict) else {}
                 payload = web_scan_payload(
@@ -932,7 +980,12 @@ def _handler(language: str):
                     scan_js_secrets=bool(request.get("scan_js_secrets")),
                     ingest_sitemap=bool(request.get("ingest_sitemap")),
                     probe_paths=bool(request.get("probe_paths")),
-                    active=bool(request.get("active")),
+                    active=active,
+                    intrusive=intrusive,
+                    exploit=exploit,
+                    oob_listen=str(request.get("oob_listen") or ""),
+                    max_params=_bounded_int(request.get("max_params"), default=15, low=1, high=100),
+                    max_form_fields=_bounded_int(request.get("max_form_fields"), default=10, low=1, high=50),
                     compare_unauth=bool(request.get("compare_unauth")),
                     secondary_headers_text=str(request.get("secondary_headers") or ""),
                     api_spec_text=str(request.get("api_spec") or ""),
@@ -1097,6 +1150,30 @@ def _handler(language: str):
                     self._send_json({"error": "exact loopback Origin is required"}, status=HTTPStatus.FORBIDDEN)
                 else:
                     self.send_error(HTTPStatus.FORBIDDEN)
+                return False
+            if not options and self.headers.get("X-KODA-Session") != getattr(self.server, "koda_session_token", ""):
+                self._send_json({"error": "invalid X-KODA-Session"}, status=HTTPStatus.FORBIDDEN)
+                return False
+            return True
+
+        def _require_dashboard_access(self, *, options: bool = False) -> bool:
+            host = self.headers.get("Host", "")
+            try:
+                parsed = urlparse(f"http://{host}")
+                hostname = parsed.hostname or ""
+                try:
+                    ipaddress.ip_address(hostname)
+                    literal_host = True
+                except ValueError:
+                    literal_host = hostname == "localhost"
+            except ValueError:
+                self._send_json({"error": "literal IP or localhost Host is required"}, status=HTTPStatus.FORBIDDEN)
+                return False
+            if not literal_host or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+                self._send_json({"error": "literal IP or localhost Host is required"}, status=HTTPStatus.FORBIDDEN)
+                return False
+            if self.headers.get("Origin") != f"http://{host}":
+                self._send_json({"error": "exact same-origin request is required"}, status=HTTPStatus.FORBIDDEN)
                 return False
             if not options and self.headers.get("X-KODA-Session") != getattr(self.server, "koda_session_token", ""):
                 self._send_json({"error": "invalid X-KODA-Session"}, status=HTTPStatus.FORBIDDEN)
