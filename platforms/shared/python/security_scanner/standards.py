@@ -698,6 +698,8 @@ WEB_VERIFIED_RULE_IDS = (
     "web.sql-injection-error-verified",
     "web.sql-injection-time-blind",
     "web.reflected-xss-verified",
+    "web.xss-js-context",
+    "web.stored-xss",
     "web.open-redirect-verified",
     "web.ssti-verified",
     "web.command-injection-time-blind",
@@ -772,10 +774,10 @@ SW49_CONTROLS: tuple[SecurityControl, ...] = (
     ),
     _control(
         "I-04", "input-validation-expression", "크로스사이트 스크립트", "Cross-site Scripting", ("CWE-79", "CWE-80"),
-        ("code.xss-dom-sink", "web.reflected-xss-verified"), "partial",
+        ("code.xss-dom-sink", "web.reflected-xss-verified", "web.xss-js-context", "web.stored-xss"), "partial",
         ("HTML", "JSP", "JavaScript", "TypeScript"),
-        note_ko="DOM 싱크 패턴과 웹 능동 점검(실행 시)으로 확인합니다. 서버측 템플릿 XSS는 부분적으로만 탐지됩니다.",
-        note_en="Covers DOM sinks and (when run) active web probes. Server-side template XSS is only partially detected.",
+        note_ko="DOM 싱크 패턴과 웹 능동 점검(반사/JS컨텍스트/저장형)으로 확인합니다. 서버측 템플릿 XSS는 부분적으로만 탐지됩니다.",
+        note_en="Covers DOM sinks and active web probes (reflected / JS-context / stored). Server-side template XSS is only partially detected.",
     ),
     _control(
         "I-05", "input-validation-expression", "운영체제 명령어 삽입", "OS Command Injection", ("CWE-78",),

@@ -185,6 +185,10 @@ def crawl_web(
     tls_checked_hosts: set[str] = set()
     host_probed: set[str] = set()
     visited: set[str] = set()
+    # Stored / 2nd-order XSS: markers injected into forms (intrusive) mapped to the
+    # page that injected them; a marker surfacing on a *different* page is stored XSS.
+    stored_markers: dict[str, str] = {}
+    stored_flagged: set[str] = set()
     queue: deque[tuple[str, int]] = deque([(seed_url, 0)])
     queued = {_canonical(seed_url)}
     # E: enqueue caller-supplied same-host seeds (known routes / sitemap / API paths).
@@ -304,6 +308,18 @@ def crawl_web(
         collected.extend(analyze_response(final_url, header_items, set_cookies, target=target))
         if body:
             collected.extend(analyze_body(final_url, body, target=target))
+            # Stored XSS: did a marker injected on an earlier page surface here?
+            text_body = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
+            for marker, source in list(stored_markers.items()):
+                if marker in text_body and _canonical(source) != _canonical(final_url) and marker not in stored_flagged:
+                    stored_flagged.add(marker)
+                    collected.append(_finding(
+                        "web.stored-xss", "high",
+                        "Stored / second-order XSS (input submitted elsewhere is reflected unencoded here)",
+                        final_url, target=target,
+                        evidence=f"a marker submitted at {source} was reflected unencoded on {final_url}",
+                        recommendation="Context-encode stored content on output; do not trust previously stored input.",
+                    ))
         if active:
             # Opt-in active verification of this URL's query params (and, with
             # intrusive, timing/OOB-based blind SQLi and command injection).
@@ -315,7 +331,8 @@ def crawl_web(
             # Opt-in active verification of this page's form fields (GET/POST).
             collected.extend(form_active_probe(final_url, body, page_opener, page_headers, timeout, target,
                                                allowed_origins=allowed, request_identity=request_identity,
-                                               intrusive=intrusive, oob_host=oob_host, oob_confirmed=oob_confirmed))
+                                               intrusive=intrusive, oob_host=oob_host, oob_confirmed=oob_confirmed,
+                                               stored_markers=stored_markers))
         if (compare_unauth or secondary_headers) and not _is_static_asset(final_url):
             # Access-control comparison: does a lower-privileged context get the
             # same authenticated content? (IDOR/BOLA/BFLA heuristic.)
@@ -1951,11 +1968,16 @@ _LFI_RE = re.compile(r"root:.*?:0:0:|\bfor 16-bit app support\b", re.IGNORECASE)
 # SSTI: an arithmetic payload that only resolves if the template engine evaluates
 # it. 1337*1337 is distinctive enough that a stray 1787569 in the page is unlikely;
 # we also require the literal expression to be absent, confirming it was evaluated
-# rather than echoed. ponytail: covers {{...}} engines (Jinja2/Twig/Nunjucks/
-# Angular); add ${...} and <%= %> variants if Freemarker/ERB coverage is needed.
+# rather than echoed. Each payload targets a different template syntax; they all
+# share the same inner expression, so one _ssti_evaluated check covers them.
 _SSTI_EXPR = "1337*1337"
-_SSTI_PAYLOAD = "{{" + _SSTI_EXPR + "}}"
 _SSTI_RESULT = "1787569"
+_SSTI_PAYLOADS = (
+    "{{" + _SSTI_EXPR + "}}",       # Jinja2, Twig, Nunjucks, Angular
+    "${" + _SSTI_EXPR + "}",        # Freemarker, JSP EL, Thymeleaf, Mako
+    "<%= " + _SSTI_EXPR + " %>",    # ERB, JSP scriptlet
+    "#{" + _SSTI_EXPR + "}",        # Ruby interpolation, some expression langs
+)
 # Request headers some apps echo into the page body: injection points beyond params.
 _INJECTABLE_HEADERS = ("Referer", "X-Forwarded-For")
 # Params that commonly carry a URL the server fetches server-side (blind SSRF).
@@ -2116,6 +2138,49 @@ def _ssti_evaluated(body: str | None) -> bool:
     return bool(body) and _SSTI_RESULT in body and _SSTI_EXPR not in body
 
 
+def _marker_in_script(body: str, marker: str) -> bool:
+    """True when ``marker`` is reflected inside an inline <script> block — a JS
+    context where HTML-encoding alone does not stop XSS."""
+    idx = body.find(marker)
+    if idx < 0:
+        return False
+    before = body[:idx].lower()
+    open_i = before.rfind("<script")
+    return open_i != -1 and before.rfind("</script>") < open_i
+
+
+def _probe_response_headers(
+    opener: urllib.request.OpenerDirector, url: str, headers: Mapping[str, str], timeout: float
+) -> dict[str, str] | None:
+    """Response headers (lower-cased) for one GET, including on an HTTP error, or None."""
+    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return _lower_headers(response.headers.items())
+    except urllib.error.HTTPError as exc:
+        try:
+            return _lower_headers(exc.headers.items()) if exc.headers else {}
+        finally:
+            exc.close()
+    except (urllib.error.URLError, ssl.SSLError, socket.timeout, OSError):
+        return None
+
+
+def _ssti_findings(
+    send_value: Callable[[str], str | None], url: str, target: str, label: str,
+) -> list[Finding]:
+    """Try each template syntax at one injection point; flag the first that evaluates."""
+    for payload in _SSTI_PAYLOADS:
+        if _ssti_evaluated(send_value(payload)):
+            return [_finding(
+                "web.ssti-verified", "high",
+                "Template expression in input was evaluated server-side (SSTI)",
+                url, target=target, evidence=f"{label}: {payload} evaluated to {_SSTI_RESULT}",
+                recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
+            )]
+    return []
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Stops urllib from following redirects so open-redirect can be observed."""
 
@@ -2183,19 +2248,43 @@ def active_probe(
                     recommendation="Context-encode all user input on output and add a strict CSP.",
                 )
             )
+        else:
+            # JS-context XSS: a plain alnum marker that survives HTML-encoding but
+            # still lands inside an inline <script> block is exploitable there.
+            js_marker = f"koda{token}jsx"
+            jbody = _probe_body(opener, _with_query_param(parsed, name, js_marker), headers, timeout)
+            if jbody and _marker_in_script(jbody, js_marker):
+                findings.append(
+                    _finding(
+                        "web.xss-js-context", "medium",
+                        "Reflected input lands inside an inline <script> block (JS-context XSS)",
+                        url, target=target,
+                        evidence=f"param '{name}': value reflected within inline JavaScript",
+                        recommendation="Never place user input in inline scripts; JSON-encode and HTML-encode it, and add a strict CSP.",
+                    )
+                )
 
-        # SSTI: a template expression that only resolves if evaluated server-side.
-        ssti_body = _probe_body(opener, _with_query_param(parsed, name, _SSTI_PAYLOAD), headers, timeout)
-        if _ssti_evaluated(ssti_body):
+        # CRLF / HTTP response-header injection: a newline in the value that adds a
+        # header to the response (also enables response splitting).
+        crlf_body = _probe_response_headers(
+            opener, _with_query_param(parsed, name, f"koda{token}\r\nX-Koda-CRLF: {token}"), headers, timeout
+        )
+        if crlf_body and crlf_body.get("x-koda-crlf") == token:
             findings.append(
                 _finding(
-                    "web.ssti-verified", "high",
-                    "Template expression in input was evaluated server-side (SSTI)",
+                    "web.crlf-injection", "high",
+                    "CRLF / HTTP response header injection (an injected header reached the response)",
                     url, target=target,
-                    evidence=f"param '{name}': {_SSTI_PAYLOAD} evaluated to {_SSTI_RESULT}",
-                    recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
+                    evidence=f"param '{name}': an injected CR/LF added header X-Koda-CRLF to the response",
+                    recommendation="Strip CR/LF from any value placed in a response header; use framework APIs that encode header values.",
                 )
             )
+
+        # SSTI: template expressions that only resolve if evaluated server-side.
+        findings.extend(_ssti_findings(
+            lambda p, nm=name: _probe_body(opener, _with_query_param(parsed, nm, p), headers, timeout),
+            url, target, f"param '{name}'",
+        ))
 
         # Error-based SQL injection: a single quote provokes a DB error the
         # unmodified request did not.
@@ -2291,17 +2380,10 @@ def active_probe(
                     recommendation="Context-encode all user input on output and add a strict CSP.",
                 )
             )
-        sbody = _probe_body(opener, url, {**headers, header_name: _SSTI_PAYLOAD}, timeout)
-        if _ssti_evaluated(sbody):
-            findings.append(
-                _finding(
-                    "web.ssti-verified", "high",
-                    "Template expression in input was evaluated server-side (SSTI)",
-                    url, target=target,
-                    evidence=f"request header '{header_name}': {_SSTI_PAYLOAD} evaluated to {_SSTI_RESULT}",
-                    recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
-                )
-            )
+        findings.extend(_ssti_findings(
+            lambda p, hn=header_name: _probe_body(opener, url, {**headers, hn: p}, timeout),
+            url, target, f"request header '{header_name}'",
+        ))
     return findings
 
 
@@ -2349,11 +2431,14 @@ def form_active_probe(
     intrusive: bool = False,
     oob_host: str | None = None,
     oob_confirmed: Callable[[str], bool] | None = None,
+    stored_markers: dict[str, str] | None = None,
 ) -> list[Finding]:
     """Active verification of HTML form fields (GET and POST), mirroring the
     query-param checks. Skips login/register (password) and file-upload forms to
     avoid credential submission and uploads. Opt-in, capped, non-destructive-ish.
-    With ``intrusive``, adds time-based blind SQLi / command injection per field."""
+    With ``intrusive``, adds time-based blind SQLi / command injection per field,
+    and (when ``stored_markers`` is given) submits a unique marker per field so the
+    crawler can later detect stored / second-order XSS on other pages."""
 
     text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
     parser = _FormsParser()
@@ -2384,57 +2469,51 @@ def form_active_probe(
         testable = [name for name, (itype, _v) in fields.items() if itype in {"text", "search", "email", "url", "", "textarea"}]
 
         for name in testable[:max_fields]:
+            label = f"form field '{name}' ({method.upper()})"
+            # Bind per-form loop vars as defaults so the closures are explicit and
+            # lint-clean (they are only ever called synchronously below).
+            def submit_field(v, nm=name, ao=action_opener, au=action_url, m=method, b=base, ah=action_headers):
+                return _submit_form(ao, au, m, {**b, nm: v}, ah, timeout)
             marker = f"koda{token}\"><kdx>"
-            body_x = _submit_form(action_opener, action_url, method, {**base, name: marker}, action_headers, timeout)
+            body_x = submit_field(marker)
             if body_x and marker in body_x:
                 findings.append(
                     _finding(
                         "web.reflected-xss-verified", "medium",
                         "Unencoded reflected input detected; XSS context review required",
                         action_url, target=target,
-                        evidence=f"form field '{name}' ({method.upper()}) reflected the marker unencoded",
+                        evidence=f"{label} reflected the marker unencoded",
                         recommendation="Context-encode all user input on output and add a strict CSP.",
                     )
                 )
-            body_t = _submit_form(action_opener, action_url, method, {**base, name: _SSTI_PAYLOAD}, action_headers, timeout)
-            if _ssti_evaluated(body_t):
-                findings.append(
-                    _finding(
-                        "web.ssti-verified", "high",
-                        "Template expression in input was evaluated server-side (SSTI)",
-                        action_url, target=target,
-                        evidence=f"form field '{name}' ({method.upper()}): {_SSTI_PAYLOAD} evaluated to {_SSTI_RESULT}",
-                        recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
-                    )
-                )
-            body_s = _submit_form(action_opener, action_url, method, {**base, name: base[name] + "'"}, action_headers, timeout)
+            findings.extend(_ssti_findings(submit_field, action_url, target, label))
+            body_s = submit_field(base[name] + "'")
             if body_s and _SQL_ERROR_RE.search(body_s):
-                baseline = _submit_form(action_opener, action_url, method, base, action_headers, timeout)
+                baseline = submit_field(base[name])
                 if not (baseline and _SQL_ERROR_RE.search(baseline)):
                     findings.append(
                         _finding(
                             "web.sql-injection-error-verified", "high",
                             "Input change triggers a database error; SQL injection is likely",
                             action_url, target=target,
-                            evidence=f"form field '{name}' ({method.upper()}) produced a SQL error only with a trailing quote",
+                            evidence=f"{label} produced a SQL error only with a trailing quote",
                             recommendation="Use parameterized queries / prepared statements; never build SQL from raw input.",
                         )
                     )
             if intrusive:
-                label = f"form field '{name}' ({method.upper()})"
-                # Bind per-form loop vars as defaults (synchronous use, but keeps the
-                # closures explicit and lint-clean).
-                def submit_field(v, nm=name, ao=action_opener, au=action_url, m=method, b=base, ah=action_headers):
-                    return _submit_form(ao, au, m, {**b, nm: v}, ah, timeout)
                 findings.extend(_blind_timing_findings(
-                    action_url, target, label,
-                    lambda v: _time_call(lambda: submit_field(v)),
-                    base[name], timeout,
+                    action_url, target, label, lambda v: _time_call(lambda: submit_field(v)), base[name], timeout,
                 ))
                 if oob_host and oob_confirmed:
                     findings.extend(_oob_cmd_findings(
                         action_url, target, label, submit_field, base[name], oob_host, oob_confirmed,
                     ))
+                if stored_markers is not None:
+                    # Submit a unique breakout marker and register it; the crawler
+                    # flags it if it later surfaces unencoded on a different page.
+                    stored = f"kodastored{secrets.token_hex(4)}\"><kx>"
+                    submit_field(stored)
+                    stored_markers[stored] = action_url
     return findings
 
 
@@ -2480,17 +2559,10 @@ def json_active_probe(
                     recommendation="Context-encode all user input on output and add a strict CSP.",
                 )
             )
-        body_t = _submit_json(opener, url, method, {**template, name: _SSTI_PAYLOAD}, headers, timeout)
-        if _ssti_evaluated(body_t):
-            findings.append(
-                _finding(
-                    "web.ssti-verified", "high",
-                    "Template expression in input was evaluated server-side (SSTI)",
-                    url, target=target,
-                    evidence=f"JSON field '{name}' ({method}): {_SSTI_PAYLOAD} evaluated to {_SSTI_RESULT}",
-                    recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
-                )
-            )
+        findings.extend(_ssti_findings(
+            lambda p, nm=name: _submit_json(opener, url, method, {**template, nm: p}, headers, timeout),
+            url, target, f"JSON field '{name}' ({method})",
+        ))
         body_s = _submit_json(opener, url, method, {**template, name: str(template[name]) + "'"}, headers, timeout)
         if body_s and _SQL_ERROR_RE.search(body_s):
             baseline = _submit_json(opener, url, method, dict(template), headers, timeout)

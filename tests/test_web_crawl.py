@@ -517,6 +517,116 @@ class LiveCrawlTests(unittest.TestCase):
         self.assertFalse(web._ssti_evaluated("you sent {{1337*1337}}"))
         self.assertFalse(web._ssti_evaluated("nothing here"))
 
+    def test_ssti_dollar_brace_engine(self):
+        class Templater(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+                # Only ${...} evaluates here (Freemarker/EL-style), not {{...}}.
+                body = value.replace("${1337*1337}", "1787569").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Templater)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/p?name=x"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, active=True)
+            self.assertIn("web.ssti-verified", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_xss_js_context(self):
+        class JsCtx(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                q = (parse_qs(urlparse(self.path).query).get("q") or [""])[0]
+                q = q.replace("<", "&lt;").replace(">", "&gt;")  # HTML-escapes angle brackets only
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(f"<html><script>var x = '{q}';</script></html>".encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), JsCtx)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/p?q=1"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, active=True)
+            self.assertIn("web.xss-js-context", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_crlf_injection(self):
+        class Crlf(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                q = (parse_qs(urlparse(self.path).query).get("q") or [""])[0]
+                self.send_response(200)
+                self.send_header("X-Echo", q)  # vulnerable: unsanitized value into a header
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Crlf)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/p?q=1"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, active=True)
+            self.assertIn("web.crlf-injection", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_stored_xss_cross_page(self):
+        stored = {"v": ""}
+
+        class App(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import urlparse
+                if urlparse(self.path).path == "/b":
+                    html = f"<html>comment: {stored['v']}</html>"  # reflects stored value raw
+                else:
+                    html = ("<html><a href='/b'>b</a>"
+                            "<form method='post' action='/save'><input name='c'></form></html>")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(html.encode())
+
+            def do_POST(self):
+                from urllib.parse import parse_qs
+                n = int(self.headers.get("Content-Length", "0"))
+                stored["v"] = (parse_qs(self.rfile.read(n).decode()).get("c") or [""])[0]
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), App)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/"
+            findings, _w, _p = web.crawl_web(base, max_pages=5, max_depth=1, delay=0, timeout=5,
+                                             active=True, intrusive=True)
+            self.assertIn("web.stored-xss", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_header_injection_reflected(self):
         class Echoer(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
