@@ -133,6 +133,14 @@ def main(argv: list[str] | None = None) -> int:
             worker_args.append("--once")
         return schedule_worker_main(worker_args)
 
+    if args.command == "portal-worker":
+        from .portal_worker import main as portal_worker_main
+
+        worker_args = ["--db", args.db]
+        if args.healthcheck:
+            worker_args.append("--healthcheck")
+        return portal_worker_main(worker_args)
+
     if args.command == "serve":
         # Linux is the portal deployment; desktop/local app keeps the legacy dashboard.
         if sys.platform.startswith("linux") and not getattr(args, "legacy_dashboard", False):
@@ -559,23 +567,37 @@ def main(argv: list[str] | None = None) -> int:
         from .web import build_auth_opener, crawl_web, login
 
         extra_headers = _parse_headers(args.header)
+        if args.intrusive and not args.active:
+            print("error: --intrusive requires --active", file=sys.stderr)
+            return 2
         if args.active:
             print(
                 "warning: --active sends attack payloads (XSS/SQLi/open-redirect) to query "
                 "parameters. Run only against systems you are explicitly authorized to test.",
                 file=sys.stderr,
             )
-        seeds = list(args.seed)
-        if args.api_spec:
-            from .api_spec import parse_api_spec
-
-            spec_urls, spec_warnings = parse_api_spec(
-                expand_path(str(args.api_spec), Path.cwd()).read_text(encoding="utf-8"), args.url
+        if args.intrusive:
+            print(
+                "warning: --intrusive sends timing-based blind SQLi / OS command-injection "
+                "probes and POSTs fuzzed JSON bodies to API write-endpoints. These are "
+                "state-changing requests; run ONLY against systems you are explicitly "
+                "authorized to test, ideally against a staging copy.",
+                file=sys.stderr,
             )
+        seeds = list(args.seed)
+        json_endpoints: list = []
+        if args.api_spec:
+            from .api_spec import parse_api_spec, parse_api_spec_json_bodies
+
+            spec_text = expand_path(str(args.api_spec), Path.cwd()).read_text(encoding="utf-8")
+            spec_urls, spec_warnings = parse_api_spec(spec_text, args.url)
             seeds.extend(spec_urls)
             for warning in spec_warnings:
                 print(f"warning: {warning}", file=sys.stderr)
             print(f"API spec: seeded {len(spec_urls)} GET endpoint(s).", file=sys.stderr)
+            if args.intrusive:
+                json_endpoints = parse_api_spec_json_bodies(spec_text, args.url)
+                print(f"API spec: {len(json_endpoints)} JSON write-endpoint(s) queued for fuzzing.", file=sys.stderr)
         secondary_headers = _parse_headers(args.secondary_header)
         opener = build_auth_opener()
         warnings: list[str] = []
@@ -615,6 +637,8 @@ def main(argv: list[str] | None = None) -> int:
             ingest_sitemap=args.ingest_sitemap,
             probe_paths=args.probe_paths,
             active=args.active,
+            intrusive=args.intrusive,
+            json_endpoints=tuple(json_endpoints),
             compare_unauth=args.compare_unauth,
             secondary_headers=secondary_headers or None,
         )
@@ -991,6 +1015,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="send bounded, non-destructive attack payloads to URL query params to verify reflected XSS / error-based SQLi / open redirect (authorized targets only)",
     )
     web_scan.add_argument(
+        "--intrusive",
+        action="store_true",
+        help="INTRUSIVE tier (requires --active): adds timing-based blind SQLi / OS command injection probes and fuzzes JSON API write-endpoints (POST/PUT/PATCH) from --api-spec. Explicitly authorized targets only",
+    )
+    web_scan.add_argument(
         "--api-spec",
         type=Path,
         metavar="FILE",
@@ -1070,6 +1099,10 @@ def build_parser() -> argparse.ArgumentParser:
     schedule_worker.add_argument("--db", default=os.environ.get("KODA_PORTAL_DB", "koda-portal.sqlite3"), help="portal SQLite database")
     schedule_worker.add_argument("--work-dir", default=os.environ.get("KODA_SCHEDULE_WORK_DIR"), help="temporary schedule work directory")
     schedule_worker.add_argument("--once", action="store_true", help="run the current KST schedule date once")
+
+    portal_worker = subparsers.add_parser("portal-worker", help="run the isolated portal scan or delivery worker")
+    portal_worker.add_argument("--db", default=os.environ.get("KODA_PORTAL_DB", "koda-portal.sqlite3"), help="portal SQLite database")
+    portal_worker.add_argument("--healthcheck", action="store_true", help="check the worker heartbeat and exit")
 
     bootstrap = subparsers.add_parser("portal-bootstrap", help="explicitly enable the first portal administrator")
     bootstrap.add_argument("--tracker-user-id", required=True, help="Tracker UUID")

@@ -696,8 +696,13 @@ SW49_GUIDE_SECTION_BY_PREFIX = {
 # scan has been run. They are not part of the local file-scan rule catalog.
 WEB_VERIFIED_RULE_IDS = (
     "web.sql-injection-error-verified",
+    "web.sql-injection-time-blind",
     "web.reflected-xss-verified",
     "web.open-redirect-verified",
+    "web.ssti-verified",
+    "web.command-injection-time-blind",
+    "web.command-injection-oob",
+    "web.ssrf-oob-verified",
 )
 
 
@@ -750,14 +755,16 @@ SW49_CONTROLS: tuple[SecurityControl, ...] = (
     # 입력데이터 검증 및 표현 (17)
     _control(
         "I-01", "input-validation-expression", "SQL 삽입", "SQL Injection", ("CWE-89",),
-        ("code.sql-dynamic-query", "web.sql-injection-error-verified"), "partial", _WEB_LANGS,
+        ("code.sql-dynamic-query", "web.sql-injection-error-verified", "web.sql-injection-time-blind"), "partial", _WEB_LANGS,
         note_ko="동적 SQL 문자열 조립 패턴을 탐지합니다. ORM 내부 우회나 저장 프로시저는 수동 확인이 필요합니다.",
         note_en="Detects dynamic SQL string assembly. ORM bypasses and stored procedures need manual review.",
     ),
     _control(
         "I-02", "input-validation-expression", "코드 삽입", "Code Injection", ("CWE-94", "CWE-95"),
-        ("code.eval-user-input",), "partial",
+        ("code.eval-user-input", "web.ssti-verified"), "partial",
         ("JavaScript", "TypeScript", "Python", "PHP", "Ruby", "HTML"),
+        note_ko="eval 계열 싱크와, 웹 능동 점검 시 서버측 템플릿 인젝션(SSTI)을 확인합니다.",
+        note_en="Covers eval-style sinks and, when active web probes run, server-side template injection (SSTI).",
     ),
     _control(
         "I-03", "input-validation-expression", "경로 조작 및 자원 삽입", "Path Manipulation and Resource Injection", ("CWE-22", "CWE-99"),
@@ -772,7 +779,9 @@ SW49_CONTROLS: tuple[SecurityControl, ...] = (
     ),
     _control(
         "I-05", "input-validation-expression", "운영체제 명령어 삽입", "OS Command Injection", ("CWE-78",),
-        ("code.command-injection",), "partial", _WEB_LANGS,
+        ("code.command-injection", "web.command-injection-time-blind", "web.command-injection-oob"), "partial", _WEB_LANGS,
+        note_ko="셸 명령 조립 패턴과, 웹 침투 점검 시 시간기반/대역외(OOB) 명령어 삽입을 확인합니다.",
+        note_en="Covers shell-command assembly and, when intrusive web probes run, time-based/out-of-band command injection.",
     ),
     _control(
         "I-06", "input-validation-expression", "위험한 형식 파일 업로드", "Unrestricted Dangerous File Upload", ("CWE-434",),
@@ -807,7 +816,7 @@ SW49_CONTROLS: tuple[SecurityControl, ...] = (
     ),
     _control(
         "I-12", "input-validation-expression", "서버사이드 요청 위조", "Server-Side Request Forgery", ("CWE-918",),
-        ("code.ssrf-user-url",), "partial", _WEB_LANGS,
+        ("code.ssrf-user-url", "web.ssrf-oob-verified"), "partial", _WEB_LANGS,
     ),
     _control(
         "I-13", "input-validation-expression", "HTTP 응답분할", "HTTP Response Splitting", ("CWE-113",),

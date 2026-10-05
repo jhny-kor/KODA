@@ -60,6 +60,73 @@ def _from_openapi(data: dict, base_url: str) -> tuple[list[str], list[str]]:
     return _dedupe(urls), warnings
 
 
+def parse_api_spec_json_bodies(content: str, base_url: str) -> list[tuple[str, str, dict]]:
+    """Return ``(method, url, json_body_skeleton)`` for OpenAPI POST/PUT/PATCH
+    operations that take a JSON request body.
+
+    Feeds ``json_active_probe`` so API write-endpoints get fuzzed. These issue
+    non-GET requests, so the caller must gate them behind intrusive authorization.
+    Only OpenAPI is supported (HAR/Postman carry concrete bodies the caller can use
+    directly). ponytail: top-level ``properties`` only; ``$ref`` schemas resolve to
+    an empty body (no string fields to fuzz) — expand to a $ref walk if needed.
+    """
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return []
+    if not (isinstance(data, dict) and ("openapi" in data or "swagger" in data)):
+        return []
+    paths = data.get("paths")
+    if not isinstance(paths, dict):
+        return []
+    base = _openapi_base(data, base_url)
+    out: list[tuple[str, str, dict]] = []
+    for raw_path, item in paths.items():
+        if not isinstance(item, dict):
+            continue
+        shared = item.get("parameters") if isinstance(item.get("parameters"), list) else []
+        for method, operation in item.items():
+            if method.lower() not in {"post", "put", "patch"} or not isinstance(operation, dict):
+                continue
+            skeleton = _json_body_skeleton(operation)
+            if skeleton is None:
+                continue
+            params = list(shared)
+            if isinstance(operation.get("parameters"), list):
+                params += operation["parameters"]
+            out.append((method.upper(), _build_openapi_url(base, str(raw_path), params), skeleton))
+    return out
+
+
+def _json_body_skeleton(operation: dict) -> dict | None:
+    """Minimal JSON object from an operation's ``application/json`` schema, or None
+    when the operation has no JSON request body."""
+    body = operation.get("requestBody")
+    content = body.get("content") if isinstance(body, dict) else None
+    media = content.get("application/json") if isinstance(content, dict) else None
+    if not isinstance(media, dict):
+        return None
+    schema = media.get("schema")
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict):
+        return {}
+    skeleton: dict = {}
+    for key, spec in props.items():
+        kind = spec.get("type") if isinstance(spec, dict) else None
+        if kind in ("integer", "number"):
+            skeleton[key] = 1
+        elif kind == "boolean":
+            skeleton[key] = True
+        elif kind == "object":
+            skeleton[key] = {}
+        elif kind == "array":
+            skeleton[key] = []
+        else:
+            skeleton[key] = "test"
+    return skeleton
+
+
 def _openapi_base(data: dict, base_url: str) -> str:
     servers = data.get("servers")
     if isinstance(servers, list) and servers and isinstance(servers[0], dict):
