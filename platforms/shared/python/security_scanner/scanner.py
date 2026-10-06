@@ -112,6 +112,15 @@ class SecurityScanner:
                 language=self.config.report.language,
             )
             self.warnings.extend(triage_warnings)
+        if self.config.enable_ai_remediate:
+            from .ai import remediate as ai_remediate
+
+            findings, remediate_warnings = ai_remediate.remediate_findings(
+                findings,
+                model=self.config.llm_model,
+                language=self.config.report.language,
+            )
+            self.warnings.extend(remediate_warnings)
         ordered = tuple(sorted(findings, key=lambda finding: finding.sort_key()))
         # A pre-generated SARIF is positive evidence only; it never certifies coverage.
         analyzer_runs: list[AnalyzerRun] = []

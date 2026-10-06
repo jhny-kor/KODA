@@ -970,6 +970,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)",
     )
     scan.add_argument(
+        "--ai-remediate",
+        action="store_true",
+        help="append an LLM concrete fix suggestion to each finding (opt-in; local Ollama keeps data offline)",
+    )
+    scan.add_argument(
         "--changed-only",
         action="store_true",
         help="scan only files changed versus --base (for fast per-pull-request CI checks)",
@@ -1073,6 +1078,7 @@ def build_parser() -> argparse.ArgumentParser:
     net_scan.add_argument("--ai-triage", action="store_true", help="label findings as likely true/false positives via an LLM (opt-in; local Ollama keeps data offline)")
     net_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
     net_scan.add_argument("--ai-explain", action="store_true", help="append an LLM one-line impact/exploitation narrative to high-impact findings (opt-in)")
+    net_scan.add_argument("--ai-remediate", action="store_true", help="append an LLM concrete fix suggestion to each finding (opt-in; local Ollama keeps data offline)")
 
     web_scan = subparsers.add_parser("web-scan", help="check a live website's security posture (headers, TLS, cookies, CORS)")
     web_scan.add_argument("--url", required=True, help="authorized http(s) URL to check")
@@ -1084,6 +1090,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_scan.add_argument("--ai-triage", action="store_true", help="label findings as likely true/false positives via an LLM (opt-in; local Ollama keeps data offline)")
     web_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
     web_scan.add_argument("--ai-explain", action="store_true", help="append an LLM one-line impact/exploitation narrative to high-impact findings (opt-in)")
+    web_scan.add_argument("--ai-remediate", action="store_true", help="append an LLM concrete fix suggestion to each finding (opt-in; local Ollama keeps data offline)")
     web_scan.add_argument("--timeout", type=float, default=15.0, help="per-request timeout in seconds")
     web_scan.add_argument("--crawl", action="store_true", help="follow same-host links and scan sub-pages")
     web_scan.add_argument("--max-pages", type=_positive_int, default=50, help="maximum URLs to process while crawling (default 50)")
@@ -1415,6 +1422,7 @@ def _config_from_cli(args: argparse.Namespace, *, archive_extract_root: Path | N
         enable_vuln_intel=enable_vuln_intel,
         enable_reachability=bool(getattr(args, "reachability", False)),
         enable_ai_triage=bool(getattr(args, "ai_triage", False)),
+        enable_ai_remediate=bool(getattr(args, "ai_remediate", False)),
         llm_model=getattr(args, "llm", None),
         changed_only=bool(getattr(args, "changed_only", False)),
         diff_base=getattr(args, "base", None),
@@ -1487,6 +1495,7 @@ def _apply_overrides(
         enable_vuln_intel=enable_vuln_intel,
         enable_reachability=bool(getattr(args, "reachability", False)) or config.enable_reachability,
         enable_ai_triage=bool(getattr(args, "ai_triage", False)) or config.enable_ai_triage,
+        enable_ai_remediate=bool(getattr(args, "ai_remediate", False)) or config.enable_ai_remediate,
         llm_model=getattr(args, "llm", None) or config.llm_model,
         changed_only=bool(getattr(args, "changed_only", False)) or config.changed_only,
         diff_base=getattr(args, "base", None) or config.diff_base,
@@ -1523,6 +1532,13 @@ def _enrich(findings: list, args, warnings: list[str]) -> list:
             findings, model=getattr(args, "llm", None), language=language
         )
         warnings.extend(narrate_warnings)
+    if getattr(args, "ai_remediate", False):
+        from .ai import remediate
+
+        findings, remediate_warnings = remediate.remediate_findings(
+            findings, model=getattr(args, "llm", None), language=language
+        )
+        warnings.extend(remediate_warnings)
     return findings
 
 

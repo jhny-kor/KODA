@@ -132,6 +132,9 @@ class ScannerConfig:
     # Opt-in AI triage of findings (see ai/triage.py). llm_model overrides the KODA_LLM
     # environment variable when set (e.g. "ollama/qwen2.5-coder:7b").
     enable_ai_triage: bool = False
+    # Opt-in AI remediation suggestions (see ai/remediate.py); appends a concrete
+    # fix to each finding's recommendation. Shares llm_model with triage.
+    enable_ai_remediate: bool = False
     llm_model: str | None = None
     # Opt-in CI diff-scope: scan only files changed versus diff_base (see git_changes.py).
     changed_only: bool = False
