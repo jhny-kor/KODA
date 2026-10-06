@@ -464,7 +464,8 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as exc:
             print(f"Deploy check error: {exc}", file=sys.stderr)
             return 2
-        if args.fail_on and _has_failure(filtered_findings, args.fail_on):
+        gate_findings = _new_findings(filtered_findings, args.baseline) if getattr(args, "baseline", None) else filtered_findings
+        if args.fail_on and _has_failure(gate_findings, args.fail_on):
             return 1
         return 0
 
@@ -559,7 +560,8 @@ def main(argv: list[str] | None = None) -> int:
             f"Host scan: {len(filtered_findings)} finding(s) at or above {config.report.min_severity}.",
             file=sys.stderr,
         )
-        if args.fail_on and _has_failure(filtered_findings, args.fail_on):
+        gate_findings = _new_findings(filtered_findings, args.baseline) if getattr(args, "baseline", None) else filtered_findings
+        if args.fail_on and _has_failure(gate_findings, args.fail_on):
             return 1
         return 0
 
@@ -705,7 +707,8 @@ def main(argv: list[str] | None = None) -> int:
             f"for {target_name} across {pages} page(s).",
             file=sys.stderr,
         )
-        if args.fail_on and _has_failure(filtered_findings, args.fail_on):
+        gate_findings = _new_findings(filtered_findings, args.baseline) if getattr(args, "baseline", None) else filtered_findings
+        if args.fail_on and _has_failure(gate_findings, args.fail_on):
             return 1
         return 0
 
@@ -756,7 +759,8 @@ def main(argv: list[str] | None = None) -> int:
             f"Net scan: {len(filtered_findings)} finding(s) at or above {report.min_severity} for {args.host}.",
             file=sys.stderr,
         )
-        if args.fail_on and _has_failure(filtered_findings, args.fail_on):
+        gate_findings = _new_findings(filtered_findings, args.baseline) if getattr(args, "baseline", None) else filtered_findings
+        if args.fail_on and _has_failure(gate_findings, args.fail_on):
             return 1
         return 0
 
@@ -875,6 +879,8 @@ def main(argv: list[str] | None = None) -> int:
                     gate_findings = [
                         finding for finding in filtered_findings if finding.reachable != "unreachable"
                     ]
+                if getattr(args, "baseline", None):
+                    gate_findings = _new_findings(gate_findings, args.baseline)
                 if args.fail_on and _has_failure(gate_findings, args.fail_on):
                     return 1
         except (ConfigError, ValueError) as exc:
@@ -951,6 +957,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--language", choices=("ko",), default="ko", help="report language (Korean only)")
     scan.add_argument("--min-severity", choices=SEVERITIES, help="minimum severity to include")
     scan.add_argument("--fail-on", choices=SEVERITIES, help="exit 1 when findings meet or exceed severity")
+    scan.add_argument("--baseline", type=Path, metavar="REPORT", help="only fail (and highlight) on findings absent from this baseline JSON report (new-only gate)")
     scan.add_argument("--max-file-size", type=int, help="maximum file size to scan in bytes")
     scan.add_argument("--discover-projects", action="store_true", help="discover project roots under target folders")
     scan.add_argument("--enable-osv", action="store_true", help="query OSV.dev for exact-version dependency vulnerabilities")
@@ -1095,6 +1102,7 @@ def build_parser() -> argparse.ArgumentParser:
     net_scan.add_argument("--language", choices=("en", "ko"), help="report display language")
     net_scan.add_argument("--min-severity", choices=SEVERITIES, help="minimum severity to include (default info)")
     net_scan.add_argument("--fail-on", choices=SEVERITIES, help="exit 1 when findings meet or exceed severity")
+    net_scan.add_argument("--baseline", type=Path, metavar="REPORT", help="only fail (and highlight) on findings absent from this baseline JSON report (new-only gate)")
     net_scan.add_argument("--ai-triage", action="store_true", help="label findings as likely true/false positives via an LLM (opt-in; local Ollama keeps data offline)")
     net_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
     net_scan.add_argument("--ai-explain", action="store_true", help="append an LLM one-line impact/exploitation narrative to high-impact findings (opt-in)")
@@ -1110,6 +1118,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_scan.add_argument("--language", choices=("en", "ko"), help="report display language")
     web_scan.add_argument("--min-severity", choices=SEVERITIES, help="minimum severity to include (default info)")
     web_scan.add_argument("--fail-on", choices=SEVERITIES, help="exit 1 when findings meet or exceed severity")
+    web_scan.add_argument("--baseline", type=Path, metavar="REPORT", help="only fail (and highlight) on findings absent from this baseline JSON report (new-only gate)")
     web_scan.add_argument("--ai-triage", action="store_true", help="label findings as likely true/false positives via an LLM (opt-in; local Ollama keeps data offline)")
     web_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
     web_scan.add_argument("--ai-explain", action="store_true", help="append an LLM one-line impact/exploitation narrative to high-impact findings (opt-in)")
@@ -1592,6 +1601,31 @@ def _ai_present(findings: list, args, warnings: list[str]) -> None:
         print(f"\nAI query '{query}' matched {len(matches)} finding(s):", file=sys.stderr)
         for finding in matches:
             print(f"  [{finding.severity}] {finding.rule_id} — {finding.title}", file=sys.stderr)
+
+
+def _new_findings(findings: list, baseline_path: Path) -> list:
+    """Return only findings absent from a baseline JSON report (the --baseline gate).
+
+    Matches diffing._finding_key (rule_id, target, path, line); a missing baseline
+    file is treated as "no baseline" so nothing is suppressed by accident.
+    """
+    from .diffing import load_report_findings
+
+    def norm_line(value: object) -> str:
+        return "" if value in (None, "None", "") else str(value)
+
+    try:
+        baseline_items = load_report_findings(baseline_path)
+    except (OSError, ValueError):
+        return list(findings)
+    baseline_keys = {
+        (str(i.get("rule_id", "")), str(i.get("target", "")), str(i.get("path", "")), norm_line(i.get("line")))
+        for i in baseline_items
+    }
+    return [
+        f for f in findings
+        if (f.rule_id, f.target, str(f.path), norm_line(f.line)) not in baseline_keys
+    ]
 
 
 def _has_failure(findings, fail_on: str) -> bool:
