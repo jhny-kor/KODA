@@ -18,6 +18,10 @@ _QUALIFIED_WEAK_HASH = re.compile(r"\.(?:md5|sha1)\(", re.IGNORECASE)
 # ``yaml.load(`` without an explicit (safe) Loader -> ``yaml.safe_load(``.
 _YAML_LOAD = re.compile(r"\byaml\.load\(")
 
+# Config hardening: flip an insecure boolean to its safe value, preserving layout.
+_PRIVILEGE_ESCALATION = re.compile(r"(allowPrivilegeEscalation\s*:\s*)true\b", re.IGNORECASE)
+_PRIVILEGED = re.compile(r"(\bprivileged\s*:\s*)true\b", re.IGNORECASE)
+
 
 def fix_weak_hash(line: str) -> str | None:
     """Rewrite ``<x>.md5(`` / ``<x>.sha1(`` to ``<x>.sha256(``."""
@@ -33,4 +37,16 @@ def fix_yaml_load(line: str) -> str | None:
         # Already safe, or an explicit Loader is in play (safe_load takes no Loader): skip.
         return None
     fixed = _YAML_LOAD.sub("yaml.safe_load(", line)
+    return fixed if fixed != line else None
+
+
+def fix_allow_privilege_escalation(line: str) -> str | None:
+    """Flip ``allowPrivilegeEscalation: true`` to ``false`` (Kubernetes securityContext)."""
+    fixed = _PRIVILEGE_ESCALATION.sub(r"\1false", line)
+    return fixed if fixed != line else None
+
+
+def fix_privileged(line: str) -> str | None:
+    """Flip ``privileged: true`` to ``false`` (Compose / Kubernetes securityContext)."""
+    fixed = _PRIVILEGED.sub(r"\1false", line)
     return fixed if fixed != line else None

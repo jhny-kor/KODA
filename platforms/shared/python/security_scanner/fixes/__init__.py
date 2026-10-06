@@ -17,6 +17,9 @@ LineFixer = Callable[[str], "str | None"]
 FIXERS: dict[str, LineFixer] = {
     "code.weak-hash": deterministic.fix_weak_hash,
     "code.unsafe-deserialization": deterministic.fix_yaml_load,
+    "config.k8s-allow-privilege-escalation": deterministic.fix_allow_privilege_escalation,
+    "config.compose-privileged": deterministic.fix_privileged,
+    "config.k8s-privileged-container": deterministic.fix_privileged,
 }
 
 
