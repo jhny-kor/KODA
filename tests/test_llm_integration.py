@@ -31,7 +31,7 @@ def _reachable_model() -> str | None:
     try:
         with urllib.request.urlopen(f"{_BASE}/models", timeout=3) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except Exception:
+    except (OSError, ValueError):  # URLError is OSError; JSONDecodeError is ValueError
         return None
     models = [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
     chat = [m for m in models if m and "embed" not in m.lower()]
