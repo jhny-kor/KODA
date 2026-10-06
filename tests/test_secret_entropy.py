@@ -23,7 +23,8 @@ class SecretEntropyTests(unittest.TestCase):
 
     def test_named_placeholders_still_caught(self):
         self.assertTrue(_looks_like_placeholder("changeme"))
-        self.assertTrue(_looks_like_placeholder("your_api_key"))
+        self.assertTrue(_looks_like_placeholder("your_key"))
+        self.assertTrue(_looks_like_placeholder("example_value"))
 
     def test_entropy_monotonic(self):
         self.assertEqual(_shannon_entropy("aaaa"), 0.0)
