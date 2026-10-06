@@ -708,6 +708,7 @@ WEB_VERIFIED_RULE_IDS = (
     "web.command-injection-oob",
     "web.command-injection-exploited",
     "web.ssrf-oob-verified",
+    "web.ssrf-cloud-metadata",
 )
 
 
@@ -821,7 +822,7 @@ SW49_CONTROLS: tuple[SecurityControl, ...] = (
     ),
     _control(
         "I-12", "input-validation-expression", "서버사이드 요청 위조", "Server-Side Request Forgery", ("CWE-918",),
-        ("code.ssrf-user-url", "web.ssrf-oob-verified"), "partial", _WEB_LANGS,
+        ("code.ssrf-user-url", "web.ssrf-oob-verified", "web.ssrf-cloud-metadata"), "partial", _WEB_LANGS,
     ),
     _control(
         "I-13", "input-validation-expression", "HTTP 응답분할", "HTTP Response Splitting", ("CWE-113",),

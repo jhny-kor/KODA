@@ -30,13 +30,13 @@ from .models import Finding
 # Curated ports worth checking for exposure (service name for the report).
 COMMON_PORTS: dict[int, str] = {
     21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 110: "pop3", 143: "imap",
-    80: "http", 443: "https", 445: "smb", 3306: "mysql", 3389: "rdp",
-    5432: "postgresql", 6379: "redis", 8080: "http-alt", 8443: "https-alt",
+    80: "http", 443: "https", 445: "smb", 2375: "docker", 3306: "mysql", 3389: "rdp",
+    5432: "postgresql", 5984: "couchdb", 6379: "redis", 8080: "http-alt", 8443: "https-alt",
     9200: "elasticsearch", 11211: "memcached", 27017: "mongodb",
 }
 # Ports whose mere exposure to the probe is notable (admin/data-plane services
 # that are usually not meant to face an untrusted network).
-_SENSITIVE_PORTS = {23, 445, 3306, 3389, 5432, 6379, 9200, 11211, 27017}
+_SENSITIVE_PORTS = {23, 445, 2375, 3306, 3389, 5432, 5984, 6379, 9200, 11211, 27017}
 # Published vendor defaults only. Kept tiny on purpose: a default-credential
 # check, not a brute forcer.
 _DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
@@ -179,6 +179,59 @@ def default_credential_check(url: str, *, timeout: float = 5.0, authorize: bool 
                 recommendation="Change all default credentials; disable or restrict the exposed admin endpoint.",
             )]
     return []
+
+
+def service_auth_probe(host: str, *, timeout: float = 2.0) -> list[Finding]:
+    """Check common data/admin services for *unauthenticated* access.
+
+    Non-destructive: each probe issues a read-only status command (Redis PING/INFO,
+    an HTTP status endpoint) and flags the service only when it answers without
+    requiring credentials. Nothing is written or deleted.
+    """
+    findings: list[Finding] = []
+    findings += _redis_unauth(host, timeout)
+    findings += _http_unauth(host, 9200, "/", "elasticsearch", "cluster_name", timeout)
+    findings += _http_unauth(host, 2375, "/version", "docker", "ApiVersion", timeout)
+    findings += _http_unauth(host, 5984, "/_all_dbs", "couchdb", "[", timeout)
+    return findings
+
+
+def _redis_unauth(host: str, timeout: float, port: int = 6379) -> list[Finding]:
+    try:
+        with socket.create_connection((host, port), timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(b"PING\r\n")
+            if not sock.recv(64).decode("latin-1", "replace").startswith("+PONG"):
+                return []  # auth required (-NOAUTH) or not Redis
+            sock.sendall(b"INFO server\r\n")
+            info = sock.recv(2048).decode("latin-1", "replace")
+    except OSError:
+        return []
+    if "redis_version" not in info:
+        return []
+    return [_finding(
+        "net.redis-unauth", "high", "Redis is reachable without authentication", host,
+        evidence="Redis answered PING and INFO with no AUTH required",
+        recommendation="Set requirepass / ACLs and bind Redis to localhost or a private network.",
+    )]
+
+
+def _http_unauth(host: str, port: int, path: str, service: str, signature: str, timeout: float) -> list[Finding]:
+    url = f"http://{host}:{port}{path}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            if response.status != 200:
+                return []
+            body = response.read(4096).decode("latin-1", "replace")
+    except (urllib.error.URLError, OSError):
+        return []
+    if signature not in body:
+        return []
+    return [_finding(
+        f"net.{service}-unauth", "high", f"{service} API reachable without authentication", url,
+        evidence=f"{service} returned a {signature!r} response on {port} without credentials",
+        recommendation=f"Require authentication for {service} and restrict it to a private network.",
+    )]
 
 
 def _basic_auth_challenge(url: str, timeout: float) -> bool:

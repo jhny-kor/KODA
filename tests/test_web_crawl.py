@@ -725,6 +725,30 @@ class LiveCrawlTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_ssrf_cloud_metadata_inband(self):
+        class Fetcher(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                target_url = (parse_qs(urlparse(self.path).query).get("url") or [""])[0]
+                # Vulnerable: server fetches the URL and reflects metadata content.
+                body = "instance-id: i-0abc\nami-id: ami-123" if "169.254.169.254" in target_url else "ok"
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Fetcher)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/f?url=x"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, timeout=5, active=True)
+            self.assertIn("web.ssrf-cloud-metadata", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_exploit_ssti_arbitrary_expression(self):
         class Templater(http.server.BaseHTTPRequestHandler):
             def do_GET(self):

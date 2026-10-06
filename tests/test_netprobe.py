@@ -101,6 +101,59 @@ class ActiveTlsTests(unittest.TestCase):
             server.server_close()
 
 
+class ServiceAuthTests(unittest.TestCase):
+    def test_redis_without_auth_is_flagged(self):
+        class RedisHandler(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.recv(64)  # PING
+                self.request.sendall(b"+PONG\r\n")
+                self.request.recv(64)  # INFO server
+                self.request.sendall(b"# Server\r\nredis_version:7.0.0\r\n")
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), RedisHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            findings = netprobe._redis_unauth("127.0.0.1", 2.0, port=server.server_address[1])
+            self.assertTrue([f for f in findings if f.rule_id == "net.redis-unauth"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_redis_with_auth_is_quiet(self):
+        class NoAuth(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.recv(64)
+                self.request.sendall(b"-NOAUTH Authentication required.\r\n")
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), NoAuth)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            self.assertEqual(netprobe._redis_unauth("127.0.0.1", 2.0, port=server.server_address[1]), [])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_http_service_unauth_detected(self):
+        class ESHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"cluster_name":"prod","version":{}}')
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), ESHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            findings = netprobe._http_unauth("127.0.0.1", server.server_address[1], "/", "elasticsearch", "cluster_name", 2.0)
+            self.assertTrue([f for f in findings if f.rule_id == "net.elasticsearch-unauth"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 class TriageOnWebFindingsTests(unittest.TestCase):
     def test_web_finding_is_triaged_via_injected_backend(self):
         from security_scanner.ai import provider, triage

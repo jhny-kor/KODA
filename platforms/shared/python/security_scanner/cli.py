@@ -709,7 +709,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "net-scan":
-        from .netprobe import active_tls_probe, default_credential_check, port_scan
+        from .netprobe import (
+            active_tls_probe,
+            default_credential_check,
+            port_scan,
+            service_auth_probe,
+        )
 
         if not args.authorize_active:
             print(
@@ -719,6 +724,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         findings = port_scan(args.host, timeout=args.timeout)
+        findings += service_auth_probe(args.host, timeout=max(args.timeout, 2.0))
         if args.tls:
             findings += active_tls_probe(args.host, args.tls_port, timeout=max(args.timeout, 5.0))
         if args.default_creds_url:

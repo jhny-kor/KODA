@@ -1991,6 +1991,15 @@ _SSRF_PARAM_NAMES = {
     "url", "uri", "u", "dest", "destination", "callback", "webhook", "target",
     "src", "source", "feed", "fetch", "proxy", "image", "img", "load", "file",
 }
+# Cloud instance-metadata endpoints and signatures that confirm an SSRF reached
+# them. AWS IMDSv1 answers without a header; GCP/Azure usually need a header the
+# vulnerable app would have to add, so they are best-effort.
+_CLOUD_METADATA = (
+    ("http://169.254.169.254/latest/meta-data/", ("ami-id", "instance-id", "hostname", "iam/")),
+    ("http://169.254.169.254/latest/meta-data/iam/security-credentials/", ("AccessKeyId", "SecretAccessKey", "Token")),
+    ("http://metadata.google.internal/computeMetadata/v1/instance/", ("service-accounts", "machine-type", "zone")),
+    ("http://169.254.169.254/metadata/instance?api-version=2021-02-01", ("compute", "subscriptionId", "azEnvironment")),
+)
 # Intrusive tier (opt-in, double-gated by the caller). Time-delay payloads make a
 # vulnerable backend pause, proving blind SQL injection / OS command injection by
 # timing alone — WITHOUT changing or destroying data. {n} is the delay in seconds.
@@ -2426,6 +2435,23 @@ def active_probe(
                     recommendation="Never build filesystem paths from user input; use an allow-list of identifiers and canonicalize before use.",
                 )
             )
+
+        # SSRF to the cloud metadata service (in-band): a URL-like param pointed
+        # at the link-local metadata endpoint that returns instance/credential data.
+        if name.lower() in _SSRF_PARAM_NAMES:
+            for meta_url, signatures in _CLOUD_METADATA:
+                meta_body = _probe_body(opener, _with_query_param(parsed, name, meta_url), headers, timeout)
+                if meta_body and any(sig in meta_body for sig in signatures):
+                    findings.append(
+                        _finding(
+                            "web.ssrf-cloud-metadata", "critical",
+                            "SSRF reaches the cloud metadata service (instance credential theft risk)",
+                            url, target=target,
+                            evidence=f"param '{name}': fetching {meta_url} returned cloud metadata content",
+                            recommendation="Block link-local/metadata addresses server-side, require IMDSv2, and validate outbound URLs against an allow-list.",
+                        )
+                    )
+                    break
 
         # Blind SSRF (out-of-band): a URL-like param pointed at the caller's
         # collector. Verified only if the collector later reports a hit for the token.
