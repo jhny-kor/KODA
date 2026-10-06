@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 from ..models import Finding, TargetConfig
 from .common import is_text_candidate, read_text_lines
+
+
+def _finding(path: Path, rule_id: str, severity: str, title: str, description: str, recommendation: str) -> Finding:
+    return Finding(
+        rule_id=rule_id, category="configuration", severity=severity, title=title,
+        path=path, description=description, recommendation=recommendation,
+    )
 
 
 ENV_FILE_RE = re.compile(r"^\.env($|\.)")
@@ -54,7 +62,70 @@ def check_file(path: Path, target: TargetConfig) -> list[Finding]:
         findings.extend(_check_android_manifest(path, target))
     if path.name in IOS_PLIST_NAMES:
         findings.extend(_check_ios_plist(path, target))
+    if path.name == "package.json" or path.name in _LICENSE_MANIFESTS or _looks_like_license_file(path):
+        findings.extend(_check_license(path, target))
     return findings
+
+
+_LICENSE_MANIFESTS = {"pyproject.toml", "setup.cfg", "package.json"}
+_LICENSE_FILE_NAMES = {"license", "license.txt", "license.md", "copying", "copying.txt"}
+# Strong copyleft: distributing linked/derived work usually obliges source release.
+_STRONG_COPYLEFT = re.compile(
+    r"\bAGPL|GNU Affero|GPL-?3|GPLv3|GPL-?2|GPLv2|GNU General Public License|"
+    r"\bSSPL\b|Server Side Public License",
+    re.IGNORECASE,
+)
+# Weak/file-level copyleft: lighter obligations, still worth a review.
+_WEAK_COPYLEFT = re.compile(r"\bLGPL|Lesser General Public|Mozilla Public License|\bMPL-?2|\bEUPL", re.IGNORECASE)
+
+
+def _looks_like_license_file(path: Path) -> bool:
+    return path.name.lower() in _LICENSE_FILE_NAMES
+
+
+def _check_license(path: Path, target: TargetConfig) -> list[Finding]:
+    """Flag strong/weak copyleft licenses declared in a manifest or LICENSE file.
+
+    Deterministic and offline: reads the declared license text only. It does not
+    resolve the full dependency tree's licenses (that needs a license database).
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")[:20000]
+    except OSError:
+        return []
+    declared = text
+    if path.name == "package.json":
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        license_field = data.get("license")
+        licenses_field = data.get("licenses")
+        parts = []
+        if isinstance(license_field, str):
+            parts.append(license_field)
+        elif isinstance(license_field, dict):
+            parts.append(str(license_field.get("type", "")))
+        if isinstance(licenses_field, list):
+            parts.extend(str(item.get("type", "")) if isinstance(item, dict) else str(item) for item in licenses_field)
+        declared = " ".join(parts)
+        if not declared.strip():
+            return []
+    if _STRONG_COPYLEFT.search(declared):
+        return [_finding(
+            path, "license.strong-copyleft", "high",
+            "Strong copyleft license declared (AGPL/GPL/SSPL)",
+            "A strong copyleft license obliges releasing source for distributed derivative/linked works.",
+            "Confirm license compatibility with your distribution model; segregate or replace the component if proprietary distribution is required.",
+        )]
+    if _WEAK_COPYLEFT.search(declared):
+        return [_finding(
+            path, "license.weak-copyleft", "low",
+            "Weak/file-level copyleft license declared (LGPL/MPL/EUPL)",
+            "A weak copyleft license carries file-level or dynamic-linking obligations.",
+            "Review the license's linking and modification obligations against your distribution.",
+        )]
+    return []
 
 
 def _check_sensitive_filenames(path: Path) -> list[Finding]:
