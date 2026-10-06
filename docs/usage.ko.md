@@ -156,5 +156,33 @@ CLI 종료 코드는 `VULNERABLE`일 때 1, 승인·프로필·capability 오류
 따라서 CI에서 성공을 “전체 21개 PASS”로 해석하지 말고 결과 JSON의 각 항목과
 `coverage.completed == coverage.required`를 함께 확인하세요.
 
+## AI 어시스트 (옵트인)
+
+모든 AI 기능은 기본 꺼짐이며 심각도·게이트 결과를 바꾸지 않습니다. `--llm`/`KODA_LLM`로
+백엔드를 고르고, 미설정 시 경고 한 줄과 함께 graceful하게 넘어갑니다. `secrets`
+findings는 원문 시크릿·소스를 전송하지 않습니다.
+
+| 플래그 | 효과 | 적용 |
+| --- | --- | --- |
+| `--ai-triage` | findings를 likely_true/likely_false/uncertain로 라벨 | scan, web-scan, net-scan |
+| `--ai-remediate` | 각 finding에 구체적 수정안 추가 | scan, web-scan, net-scan |
+| `--ai-explain` | 고위험 finding에 영향 서술 1~2문장 추가 | web-scan, net-scan |
+| `--ai-map` | CWE 없는 finding에 CWE/OWASP 매핑 제안 | web-scan, net-scan |
+| `--ai-summary` | findings 경영 요약 출력 | scan, web-scan, net-scan |
+| `--ai-query "<질문>"` | 질문에 관련된 finding만 출력(읽기전용) | scan, web-scan, net-scan |
+
+로컬 Ollama 백엔드를 쓰면 데이터가 기기 밖으로 나가지 않습니다. `anthropic/<model>`·
+`openai/<model>` 등 클라우드 백엔드는 명시적 외부 전송이며 API 키가 필요합니다.
+클라우드 사용 전 [개인정보 정책](../PRIVACY.md)을 확인하세요.
+
+## 신규만 게이트 (baseline)
+
+`--baseline REPORT`를 주면 `--fail-on`이 **이전 JSON 보고서에 없는 신규 finding**에만
+발동합니다(rule id/target/path/line 기준). 기존 백로그로 CI가 실패하지 않으면서
+새로 생긴 문제만 막을 수 있습니다. `scan`·`web-scan`·`net-scan`에서 사용 가능하고,
+baseline 파일이 없으면 아무것도 숨기지 않습니다. web-scan/net-scan findings는
+상위 `attack-path.*`(예: SSRF→메타데이터 자격탈취, Docker API 노출→호스트 탈취)로
+상관되어 end-to-end 영향이 우선순위화됩니다.
+
 - [한국어 문서 인덱스](README.md)
 - [English CLI and local usage](usage.md)

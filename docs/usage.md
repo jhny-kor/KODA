@@ -149,22 +149,48 @@ entries are combined and duplicate archive locations are removed.
 
 `--reachability` labels dependency findings as `reachable`, `unreachable`, or `unknown` from local Python and JavaScript/TypeScript import analysis. It does not remove a finding. Add `--reachable-only` with `--fail-on` when an unreachable result should not fail a gate.
 
-## AI triage
+## AI assists (opt-in)
 
-AI triage is optional and never changes a finding's severity or gate result. It adds
-`likely_true`, `likely_false`, or `uncertain` labels with a confidence and a short
-reason to JSON findings:
+All AI assists are optional, default-off, and never change a finding's severity or
+gate result. They share one backend selected by `--llm` / `KODA_LLM` and degrade
+gracefully (with a one-line warning) when no backend is configured. Raw secrets and
+source are never sent for `secrets` findings. Flags, by scan type:
+
+| Flag | Effect | Where |
+| --- | --- | --- |
+| `--ai-triage` | Label findings `likely_true` / `likely_false` / `uncertain` | scan, web-scan, net-scan |
+| `--ai-remediate` | Append a concrete fix suggestion to each finding | scan, web-scan, net-scan |
+| `--ai-explain` | Append a one/two-sentence impact narrative to high-impact findings | web-scan, net-scan |
+| `--ai-map` | Suggest a CWE/OWASP mapping for findings that lack one | web-scan, net-scan |
+| `--ai-summary` | Print an executive risk summary of the findings | scan, web-scan, net-scan |
+| `--ai-query "<question>"` | Print the findings an LLM judges relevant to a question (read-only) | scan, web-scan, net-scan |
 
 ```bash
-python3 -m security_scanner scan --target . --ai-triage \
+python3 -m security_scanner scan --target . --ai-triage --ai-remediate \
   --llm ollama/qwen2.5-coder:7b --format json
 ```
 
 Use a local Ollama backend to keep finding context on the machine. A cloud backend
 such as `anthropic/<model>` or `openai/<model>` is an explicit data transfer and
 requires an API key through `KODA_LLM_API_KEY` (or the provider-specific variable).
-Raw secret values are not sent. See [Privacy Policy](../PRIVACY.md) before using a
-cloud backend.
+See [Privacy Policy](../PRIVACY.md) before using a cloud backend.
+
+## New-only gate (baseline)
+
+`--baseline REPORT` makes `--fail-on` trip only on findings absent from a prior JSON
+report (matched on rule id / target / path / line), so CI can gate on newly
+introduced issues without failing on a known backlog:
+
+```bash
+python3 -m security_scanner scan --target . --format json --output baseline.json
+# later, in CI:
+python3 -m security_scanner scan --target . --fail-on high --baseline baseline.json
+```
+
+Available on `scan`, `web-scan`, and `net-scan`. A missing baseline file suppresses
+nothing. Web-scan and net-scan findings are also correlated into higher-level
+`attack-path.*` findings (e.g. SSRF→metadata credential theft, exposed Docker API→
+host takeover) so end-to-end impact is prioritized.
 
 For a complete command list and current flags, run:
 
