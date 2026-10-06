@@ -135,6 +135,18 @@ def check_file(path: Path, target: TargetConfig) -> list[Finding]:
     return findings
 
 
+def _shannon_entropy(value: str) -> float:
+    """Shannon entropy in bits per character (0 for a single repeated char)."""
+    if not value:
+        return 0.0
+    import math
+    from collections import Counter
+
+    counts = Counter(value)
+    length = len(value)
+    return -sum((n / length) * math.log2(n / length) for n in counts.values())
+
+
 def _looks_like_placeholder(value: str) -> bool:
     cleaned = value.strip().strip("'\"").strip()
     if not cleaned:
@@ -142,7 +154,12 @@ def _looks_like_placeholder(value: str) -> bool:
     if PLACEHOLDER_RE.match(cleaned):
         return True
     lowered = cleaned.lower()
-    return lowered.startswith(("example_", "sample_", "dummy_", "fake_"))
+    if lowered.startswith(("example_", "sample_", "dummy_", "fake_")):
+        return True
+    # Very low entropy over a reasonable length (e.g. "aaaaaaaa", "abcabcabc",
+    # "12341234") is a filler/pattern value, not a real secret. The threshold is
+    # conservative so high-entropy real keys are never skipped.
+    return len(cleaned) >= 8 and _shannon_entropy(cleaned) < 2.0
 
 
 def _looks_like_secret_reference(line: str, value: str) -> bool:
