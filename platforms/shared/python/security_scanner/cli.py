@@ -860,6 +860,11 @@ def main(argv: list[str] | None = None) -> int:
                 for warning in scanner.warnings:
                     print(f"warning: {warning}", file=sys.stderr)
 
+                present_warnings: list[str] = []
+                _ai_present(filtered_findings, args, present_warnings)
+                for warning in present_warnings:
+                    print(f"warning: {warning}", file=sys.stderr)
+
                 print(
                     f"Scanned {len(target_names)} target(s); "
                     f"{len(filtered_findings)} finding(s) at or above {config.report.min_severity}.",
@@ -978,6 +983,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--ai-remediate",
         action="store_true",
         help="append an LLM concrete fix suggestion to each finding (opt-in; local Ollama keeps data offline)",
+    )
+    scan.add_argument(
+        "--ai-summary",
+        action="store_true",
+        help="print an LLM executive risk summary of the findings (opt-in)",
+    )
+    scan.add_argument(
+        "--ai-query",
+        metavar="TEXT",
+        help="print findings an LLM judges relevant to a natural-language question (read-only)",
     )
     scan.add_argument(
         "--changed-only",
