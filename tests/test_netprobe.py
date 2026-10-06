@@ -101,5 +101,28 @@ class ActiveTlsTests(unittest.TestCase):
             server.server_close()
 
 
+class TriageOnWebFindingsTests(unittest.TestCase):
+    def test_web_finding_is_triaged_via_injected_backend(self):
+        from security_scanner.ai import provider, triage
+        from security_scanner.models import Finding
+
+        finding = Finding(
+            rule_id="net.default-credentials", category="web", severity="high",
+            title="Default credentials accepted", path=Path("http://h/admin"),
+            target="http://h/admin", evidence="published default 'admin:admin' was accepted",
+        )
+
+        def fake_complete(prompt, *, system, json_mode, model, timeout_seconds):
+            verdict = "likely_true" if "exploitable" in system.lower() or "true" in system.lower() else "likely_true"
+            return provider.LLMResult(
+                text='{"verdict": "' + verdict + '", "confidence": 0.9, "reason": "test"}',
+                backend="test", sent_externally=False,
+            )
+
+        triaged, warnings = triage.triage_findings([finding], complete=fake_complete)
+        self.assertEqual(triaged[0].triage_verdict, "likely_true")
+        self.assertEqual(warnings, [])
+
+
 if __name__ == "__main__":
     unittest.main()

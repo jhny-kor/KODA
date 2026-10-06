@@ -679,6 +679,7 @@ def main(argv: list[str] | None = None) -> int:
             oob_collector.close()
         findings = login_findings + crawl_findings
         warnings.extend(crawl_warnings)
+        findings = _maybe_triage(findings, args, warnings)
         report = ReportConfig(
             format=args.format or "markdown",
             output=expand_path(str(args.output), Path.cwd()) if args.output else None,
@@ -724,12 +725,16 @@ def main(argv: list[str] | None = None) -> int:
             findings += default_credential_check(
                 args.default_creds_url, timeout=max(args.timeout, 5.0), authorize=True
             )
+        net_warnings: list[str] = []
+        findings = _maybe_triage(findings, args, net_warnings)
         report = ReportConfig(
             format=args.format or "markdown",
             output=expand_path(str(args.output), Path.cwd()) if args.output else None,
             min_severity=args.min_severity or "info",
             language=args.language or "en",
         )
+        for warning in net_warnings:
+            print(f"warning: {warning}", file=sys.stderr)
         filtered_findings = filter_by_min_severity(findings, report.min_severity)
         content = render_report(
             filtered_findings, report.format, target_names=(args.host,),
@@ -1059,6 +1064,8 @@ def build_parser() -> argparse.ArgumentParser:
     net_scan.add_argument("--language", choices=("en", "ko"), help="report display language")
     net_scan.add_argument("--min-severity", choices=SEVERITIES, help="minimum severity to include (default info)")
     net_scan.add_argument("--fail-on", choices=SEVERITIES, help="exit 1 when findings meet or exceed severity")
+    net_scan.add_argument("--ai-triage", action="store_true", help="label findings as likely true/false positives via an LLM (opt-in; local Ollama keeps data offline)")
+    net_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
 
     web_scan = subparsers.add_parser("web-scan", help="check a live website's security posture (headers, TLS, cookies, CORS)")
     web_scan.add_argument("--url", required=True, help="authorized http(s) URL to check")
@@ -1067,6 +1074,8 @@ def build_parser() -> argparse.ArgumentParser:
     web_scan.add_argument("--language", choices=("en", "ko"), help="report display language")
     web_scan.add_argument("--min-severity", choices=SEVERITIES, help="minimum severity to include (default info)")
     web_scan.add_argument("--fail-on", choices=SEVERITIES, help="exit 1 when findings meet or exceed severity")
+    web_scan.add_argument("--ai-triage", action="store_true", help="label findings as likely true/false positives via an LLM (opt-in; local Ollama keeps data offline)")
+    web_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
     web_scan.add_argument("--timeout", type=float, default=15.0, help="per-request timeout in seconds")
     web_scan.add_argument("--crawl", action="store_true", help="follow same-host links and scan sub-pages")
     web_scan.add_argument("--max-pages", type=_positive_int, default=50, help="maximum URLs to process while crawling (default 50)")
@@ -1483,6 +1492,23 @@ def _apply_overrides(
         source_analyzer_sandbox_wrapper=config.source_analyzer_sandbox_wrapper,
         source_analyzer_sandbox_config=config.source_analyzer_sandbox_config,
     )
+
+
+def _maybe_triage(findings: list, args, warnings: list[str]) -> list:
+    """Apply opt-in LLM false-positive triage to a findings list (web/net scans).
+
+    Reuses the same ``ai.triage`` path as the source scan; degrades to the
+    unlabelled findings if no backend is configured.
+    """
+    if not getattr(args, "ai_triage", False):
+        return findings
+    from .ai import triage as ai_triage
+
+    triaged, triage_warnings = ai_triage.triage_findings(
+        list(findings), model=getattr(args, "llm", None), language=(getattr(args, "language", None) or "en")
+    )
+    warnings.extend(triage_warnings)
+    return triaged
 
 
 def _has_failure(findings, fail_on: str) -> bool:
