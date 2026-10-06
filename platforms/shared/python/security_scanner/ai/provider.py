@@ -75,7 +75,7 @@ def complete(
     if backend == "anthropic":
         return _complete_anthropic(name, prompt, system=system, timeout_seconds=timeout_seconds)
     if backend == "openai":
-        return _complete_openai(name, prompt, system=system, timeout_seconds=timeout_seconds)
+        return _complete_openai(name, prompt, system=system, json_mode=json_mode, timeout_seconds=timeout_seconds)
     raise LLMUnavailable(
         f"Unsupported LLM backend '{backend}'. Supported backends: ollama, anthropic, openai."
     )
@@ -162,7 +162,19 @@ def _complete_anthropic(model: str, prompt: str, *, system: str, timeout_seconds
     return LLMResult(text=text, backend="anthropic", sent_externally=True)
 
 
-def _complete_openai(model: str, prompt: str, *, system: str, timeout_seconds: float) -> LLMResult:
+def _is_loopback_base(base_url: str | None) -> bool:
+    """True when the OpenAI-compatible endpoint is on this machine (loopback).
+
+    A LAN address (e.g. a Mac mini serving LM Studio) still leaves this machine,
+    so only localhost / 127.0.0.1 / ::1 count as not-external.
+    """
+    if not base_url:
+        return False  # default is api.openai.com — external
+    host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
+def _complete_openai(model: str, prompt: str, *, system: str, json_mode: bool, timeout_seconds: float) -> LLMResult:
     try:
         import openai
     except ImportError as exc:  # optional extra
@@ -177,12 +189,24 @@ def _complete_openai(model: str, prompt: str, *, system: str, timeout_seconds: f
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
+    kwargs: dict[str, object] = {"model": model, "messages": messages, "temperature": 0}
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
     try:
         client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_seconds)
-        response = client.chat.completions.create(model=model, messages=messages, temperature=0)
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except Exception:
+            # Some OpenAI-compatible servers reject response_format; retry without it.
+            if json_mode:
+                kwargs.pop("response_format", None)
+                response = client.chat.completions.create(**kwargs)
+            else:
+                raise
         text = (response.choices[0].message.content or "").strip()
     except LLMUnavailable:
         raise
     except Exception as exc:  # SDK/transport errors converted to a uniform failure
         raise LLMUnavailable(f"OpenAI request failed: {exc}") from exc
-    return LLMResult(text=text, backend="openai", sent_externally=True)
+    # A loopback endpoint (local LM Studio / llama.cpp) keeps data on this machine.
+    return LLMResult(text=text, backend="openai", sent_externally=not _is_loopback_base(base_url))
