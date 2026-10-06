@@ -175,6 +175,24 @@ such as `anthropic/<model>` or `openai/<model>` is an explicit data transfer and
 requires an API key through `KODA_LLM_API_KEY` (or the provider-specific variable).
 See [Privacy Policy](../PRIVACY.md) before using a cloud backend.
 
+### Local OpenAI-compatible server (LM Studio, llama.cpp, vLLM)
+
+Point the `openai` backend at a local server that speaks the OpenAI API. The key
+is required by the SDK but ignored by the server, so any placeholder works, and a
+loopback endpoint is treated as local (no external-network warning):
+
+```bash
+export KODA_LLM=openai/qwen3.8-27b-uncensored-mlx   # the id from GET /v1/models
+export KODA_LLM_API_BASE=http://localhost:1234/v1    # LM Studio default
+export KODA_LLM_API_KEY=local                        # placeholder; the server ignores it
+python3 -m security_scanner scan --target . --ai-triage --ai-remediate --llm-timeout 180
+```
+
+Large local models (e.g. a 27B served via LM Studio) are slow — raise
+`--llm-timeout` (default 120s) so calls don't time out. Only `localhost`,
+`127.0.0.1`, and `::1` count as on-machine; a LAN address still triggers the
+data-left-this-machine warning.
+
 ## New-only gate (baseline)
 
 `--baseline REPORT` makes `--fail-on` trip only on findings absent from a prior JSON

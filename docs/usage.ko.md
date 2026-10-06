@@ -175,6 +175,23 @@ findings는 원문 시크릿·소스를 전송하지 않습니다.
 `openai/<model>` 등 클라우드 백엔드는 명시적 외부 전송이며 API 키가 필요합니다.
 클라우드 사용 전 [개인정보 정책](../PRIVACY.md)을 확인하세요.
 
+### 로컬 OpenAI 호환 서버 (LM Studio·llama.cpp·vLLM)
+
+`openai` 백엔드를 OpenAI API를 말하는 로컬 서버로 가리킬 수 있습니다. 키는 SDK가
+요구하지만 서버는 무시하므로 아무 placeholder나 되고, loopback 주소는 로컬로
+간주돼 외부 전송 경고가 뜨지 않습니다:
+
+```bash
+export KODA_LLM=openai/qwen3.8-27b-uncensored-mlx   # GET /v1/models 의 id
+export KODA_LLM_API_BASE=http://localhost:1234/v1    # LM Studio 기본
+export KODA_LLM_API_KEY=local                        # placeholder, 서버가 무시
+python3 -m security_scanner scan --target . --ai-triage --ai-remediate --llm-timeout 180
+```
+
+대형 로컬 모델(예: LM Studio의 27B)은 느리므로 `--llm-timeout`(기본 120초)을 올려
+타임아웃을 피하세요. `localhost`·`127.0.0.1`·`::1`만 동일 기기로 보고, LAN 주소는
+여전히 "기기 밖으로 나감" 경고가 뜹니다.
+
 ## 신규만 게이트 (baseline)
 
 `--baseline REPORT`를 주면 `--fail-on`이 **이전 JSON 보고서에 없는 신규 finding**에만
