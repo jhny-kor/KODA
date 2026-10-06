@@ -20,6 +20,7 @@ from ..models import Finding
 from . import provider
 
 _DEFAULT_MAX = 15
+_MAX_SNIPPET_BYTES = 1_000_000
 _SYSTEM = (
     "You are a secure-coding assistant. Given a security finding, propose the "
     "smallest concrete fix in at most two sentences — what to change and to what. "
@@ -36,7 +37,7 @@ def _context_snippet(finding: Finding) -> str:
     if finding.category == "secrets" or finding.line is None:
         return ""
     try:
-        lines = read_text_lines(finding.path)
+        lines = read_text_lines(finding.path, _MAX_SNIPPET_BYTES)
     except (OSError, ValueError):
         return ""
     if not lines:

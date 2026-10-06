@@ -79,6 +79,26 @@ class RemediateTests(unittest.TestCase):
         self.assertIn("Encode output.", out[0].recommendation)
         self.assertEqual(warnings, [])
 
+    def test_remediation_reads_source_context_for_code_finding(self):
+        import tempfile
+        from security_scanner.ai import provider, remediate
+
+        src = Path(tempfile.mkdtemp()) / "a.py"
+        src.write_text("import os\nos.system('echo ' + input())\n", encoding="utf-8")
+        finding = Finding(rule_id="code.command-injection", category="code", severity="high",
+                          title="OS command injection", path=src, target="t", line=2,
+                          evidence="os.system(...)", recommendation="Avoid shell.")
+        captured = {}
+
+        def fake_complete(prompt, *, system, json_mode, model, timeout_seconds):
+            captured["prompt"] = prompt  # must build without raising on read_text_lines
+            return provider.LLMResult(text="Use subprocess.run with a fixed arg list.", backend="test", sent_externally=False)
+
+        out, warnings = remediate.remediate_findings([finding], complete=fake_complete)
+        self.assertIn("Suggested fix: Use subprocess.run", out[0].recommendation)
+        self.assertIn("code:", captured["prompt"])  # source context was attached
+        self.assertEqual(warnings, [])
+
     def test_triage_false_positive_is_not_remediated(self):
         from dataclasses import replace
 
