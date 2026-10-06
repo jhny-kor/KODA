@@ -136,6 +136,7 @@ class ScannerConfig:
     # fix to each finding's recommendation. Shares llm_model with triage.
     enable_ai_remediate: bool = False
     llm_model: str | None = None
+    llm_timeout: float = 120.0
     # Opt-in CI diff-scope: scan only files changed versus diff_base (see git_changes.py).
     changed_only: bool = False
     diff_base: str | None = None

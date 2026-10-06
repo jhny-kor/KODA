@@ -987,6 +987,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)",
     )
     scan.add_argument(
+        "--llm-timeout",
+        type=float,
+        default=120.0,
+        help="per-LLM-call timeout in seconds (default 120; raise for large local models)",
+    )
+    scan.add_argument(
         "--ai-remediate",
         action="store_true",
         help="append an LLM concrete fix suggestion to each finding (opt-in; local Ollama keeps data offline)",
@@ -1105,6 +1111,7 @@ def build_parser() -> argparse.ArgumentParser:
     net_scan.add_argument("--baseline", type=Path, metavar="REPORT", help="only fail (and highlight) on findings absent from this baseline JSON report (new-only gate)")
     net_scan.add_argument("--ai-triage", action="store_true", help="label findings as likely true/false positives via an LLM (opt-in; local Ollama keeps data offline)")
     net_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
+    net_scan.add_argument("--llm-timeout", type=float, default=120.0, help="per-LLM-call timeout in seconds (default 120; raise for large local models)")
     net_scan.add_argument("--ai-explain", action="store_true", help="append an LLM one-line impact/exploitation narrative to high-impact findings (opt-in)")
     net_scan.add_argument("--ai-remediate", action="store_true", help="append an LLM concrete fix suggestion to each finding (opt-in; local Ollama keeps data offline)")
     net_scan.add_argument("--ai-map", action="store_true", help="append an LLM-suggested CWE/OWASP mapping to findings that lack one (opt-in)")
@@ -1121,6 +1128,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_scan.add_argument("--baseline", type=Path, metavar="REPORT", help="only fail (and highlight) on findings absent from this baseline JSON report (new-only gate)")
     web_scan.add_argument("--ai-triage", action="store_true", help="label findings as likely true/false positives via an LLM (opt-in; local Ollama keeps data offline)")
     web_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
+    web_scan.add_argument("--llm-timeout", type=float, default=120.0, help="per-LLM-call timeout in seconds (default 120; raise for large local models)")
     web_scan.add_argument("--ai-explain", action="store_true", help="append an LLM one-line impact/exploitation narrative to high-impact findings (opt-in)")
     web_scan.add_argument("--ai-remediate", action="store_true", help="append an LLM concrete fix suggestion to each finding (opt-in; local Ollama keeps data offline)")
     web_scan.add_argument("--ai-map", action="store_true", help="append an LLM-suggested CWE/OWASP mapping to findings that lack one (opt-in)")
@@ -1459,6 +1467,7 @@ def _config_from_cli(args: argparse.Namespace, *, archive_extract_root: Path | N
         enable_ai_triage=bool(getattr(args, "ai_triage", False)),
         enable_ai_remediate=bool(getattr(args, "ai_remediate", False)),
         llm_model=getattr(args, "llm", None),
+        llm_timeout=float(getattr(args, "llm_timeout", None) or 120.0),
         changed_only=bool(getattr(args, "changed_only", False)),
         diff_base=getattr(args, "base", None),
         standard=selection.standard,
@@ -1532,6 +1541,7 @@ def _apply_overrides(
         enable_ai_triage=bool(getattr(args, "ai_triage", False)) or config.enable_ai_triage,
         enable_ai_remediate=bool(getattr(args, "ai_remediate", False)) or config.enable_ai_remediate,
         llm_model=getattr(args, "llm", None) or config.llm_model,
+        llm_timeout=float(getattr(args, "llm_timeout", None) or config.llm_timeout or 120.0),
         changed_only=bool(getattr(args, "changed_only", False)) or config.changed_only,
         diff_base=getattr(args, "base", None) or config.diff_base,
         standard=selected_standard,
@@ -1553,31 +1563,32 @@ def _enrich(findings: list, args, warnings: list[str]) -> list:
 
     findings = list(findings) + correlate(findings)
     language = getattr(args, "language", None) or "en"
+    timeout = float(getattr(args, "llm_timeout", None) or 120.0)
     if getattr(args, "ai_triage", False):
         from .ai import triage as ai_triage
 
         findings, triage_warnings = ai_triage.triage_findings(
-            findings, model=getattr(args, "llm", None), language=language
+            findings, model=getattr(args, "llm", None), language=language, timeout_seconds=timeout
         )
         warnings.extend(triage_warnings)
     if getattr(args, "ai_explain", False):
         from .ai import narrate
 
         findings, narrate_warnings = narrate.explain_findings(
-            findings, model=getattr(args, "llm", None), language=language
+            findings, model=getattr(args, "llm", None), language=language, timeout_seconds=timeout
         )
         warnings.extend(narrate_warnings)
     if getattr(args, "ai_remediate", False):
         from .ai import remediate
 
         findings, remediate_warnings = remediate.remediate_findings(
-            findings, model=getattr(args, "llm", None), language=language
+            findings, model=getattr(args, "llm", None), language=language, timeout_seconds=timeout
         )
         warnings.extend(remediate_warnings)
     if getattr(args, "ai_map", False):
         from .ai import assist
 
-        findings, map_warnings = assist.suggest_mappings(findings)
+        findings, map_warnings = assist.suggest_mappings(findings, timeout_seconds=timeout)
         warnings.extend(map_warnings)
     return findings
 
@@ -1585,10 +1596,11 @@ def _enrich(findings: list, args, warnings: list[str]) -> list:
 def _ai_present(findings: list, args, warnings: list[str]) -> None:
     """Print opt-in LLM executive summary / NL-query results (read-only)."""
     language = getattr(args, "language", None) or "en"
+    timeout = float(getattr(args, "llm_timeout", None) or 120.0)
     if getattr(args, "ai_summary", False):
         from .ai import assist
 
-        summary, summary_warnings = assist.executive_summary(list(findings), language=language)
+        summary, summary_warnings = assist.executive_summary(list(findings), language=language, timeout_seconds=timeout)
         warnings.extend(summary_warnings)
         if summary:
             print("\nAI risk summary:\n" + summary + "\n", file=sys.stderr)
@@ -1596,7 +1608,7 @@ def _ai_present(findings: list, args, warnings: list[str]) -> None:
     if query:
         from .ai import assist
 
-        matches, query_warnings = assist.select_by_query(list(findings), query)
+        matches, query_warnings = assist.select_by_query(list(findings), query, timeout_seconds=timeout)
         warnings.extend(query_warnings)
         print(f"\nAI query '{query}' matched {len(matches)} finding(s):", file=sys.stderr)
         for finding in matches:

@@ -110,6 +110,7 @@ class SecurityScanner:
                 findings,
                 model=self.config.llm_model,
                 language=self.config.report.language,
+                timeout_seconds=self.config.llm_timeout,
             )
             self.warnings.extend(triage_warnings)
         if self.config.enable_ai_remediate:
@@ -119,6 +120,7 @@ class SecurityScanner:
                 findings,
                 model=self.config.llm_model,
                 language=self.config.report.language,
+                timeout_seconds=self.config.llm_timeout,
             )
             self.warnings.extend(remediate_warnings)
         ordered = tuple(sorted(findings, key=lambda finding: finding.sort_key()))
