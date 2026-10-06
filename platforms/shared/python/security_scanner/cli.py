@@ -679,7 +679,7 @@ def main(argv: list[str] | None = None) -> int:
             oob_collector.close()
         findings = login_findings + crawl_findings
         warnings.extend(crawl_warnings)
-        findings = _maybe_triage(findings, args, warnings)
+        findings = _enrich(findings, args, warnings)
         report = ReportConfig(
             format=args.format or "markdown",
             output=expand_path(str(args.output), Path.cwd()) if args.output else None,
@@ -732,7 +732,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.default_creds_url, timeout=max(args.timeout, 5.0), authorize=True
             )
         net_warnings: list[str] = []
-        findings = _maybe_triage(findings, args, net_warnings)
+        findings = _enrich(findings, args, net_warnings)
         report = ReportConfig(
             format=args.format or "markdown",
             output=expand_path(str(args.output), Path.cwd()) if args.output else None,
@@ -1072,6 +1072,7 @@ def build_parser() -> argparse.ArgumentParser:
     net_scan.add_argument("--fail-on", choices=SEVERITIES, help="exit 1 when findings meet or exceed severity")
     net_scan.add_argument("--ai-triage", action="store_true", help="label findings as likely true/false positives via an LLM (opt-in; local Ollama keeps data offline)")
     net_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
+    net_scan.add_argument("--ai-explain", action="store_true", help="append an LLM one-line impact/exploitation narrative to high-impact findings (opt-in)")
 
     web_scan = subparsers.add_parser("web-scan", help="check a live website's security posture (headers, TLS, cookies, CORS)")
     web_scan.add_argument("--url", required=True, help="authorized http(s) URL to check")
@@ -1082,6 +1083,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_scan.add_argument("--fail-on", choices=SEVERITIES, help="exit 1 when findings meet or exceed severity")
     web_scan.add_argument("--ai-triage", action="store_true", help="label findings as likely true/false positives via an LLM (opt-in; local Ollama keeps data offline)")
     web_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
+    web_scan.add_argument("--ai-explain", action="store_true", help="append an LLM one-line impact/exploitation narrative to high-impact findings (opt-in)")
     web_scan.add_argument("--timeout", type=float, default=15.0, help="per-request timeout in seconds")
     web_scan.add_argument("--crawl", action="store_true", help="follow same-host links and scan sub-pages")
     web_scan.add_argument("--max-pages", type=_positive_int, default=50, help="maximum URLs to process while crawling (default 50)")
@@ -1500,21 +1502,28 @@ def _apply_overrides(
     )
 
 
-def _maybe_triage(findings: list, args, warnings: list[str]) -> list:
-    """Apply opt-in LLM false-positive triage to a findings list (web/net scans).
+def _enrich(findings: list, args, warnings: list[str]) -> list:
+    """Post-process web/net findings: correlate into attack paths (always), then
+    optional LLM false-positive triage and impact narrative."""
+    from .attackpath import correlate
 
-    Reuses the same ``ai.triage`` path as the source scan; degrades to the
-    unlabelled findings if no backend is configured.
-    """
-    if not getattr(args, "ai_triage", False):
-        return findings
-    from .ai import triage as ai_triage
+    findings = list(findings) + correlate(findings)
+    language = getattr(args, "language", None) or "en"
+    if getattr(args, "ai_triage", False):
+        from .ai import triage as ai_triage
 
-    triaged, triage_warnings = ai_triage.triage_findings(
-        list(findings), model=getattr(args, "llm", None), language=(getattr(args, "language", None) or "en")
-    )
-    warnings.extend(triage_warnings)
-    return triaged
+        findings, triage_warnings = ai_triage.triage_findings(
+            findings, model=getattr(args, "llm", None), language=language
+        )
+        warnings.extend(triage_warnings)
+    if getattr(args, "ai_explain", False):
+        from .ai import narrate
+
+        findings, narrate_warnings = narrate.explain_findings(
+            findings, model=getattr(args, "llm", None), language=language
+        )
+        warnings.extend(narrate_warnings)
+    return findings
 
 
 def _has_failure(findings, fail_on: str) -> bool:
