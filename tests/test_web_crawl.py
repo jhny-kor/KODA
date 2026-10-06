@@ -725,6 +725,26 @@ class LiveCrawlTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_jwt_weak_hmac_secret_detected(self):
+        import base64 as _b64
+        import hashlib
+        import hmac
+        import json as _json
+
+        def jwt(secret: str) -> str:
+            def part(obj):
+                return _b64.urlsafe_b64encode(_json.dumps(obj).encode()).rstrip(b"=").decode()
+            header = part({"alg": "HS256", "typ": "JWT"})
+            payload = part({"sub": "1", "exp": 9999999999})
+            signing = f"{header}.{payload}".encode()
+            sig = _b64.urlsafe_b64encode(hmac.new(secret.encode(), signing, hashlib.sha256).digest()).rstrip(b"=").decode()
+            return f"{header}.{payload}.{sig}"
+
+        weak = web._jwt_findings("http://h/", [f"session={jwt('secret')}; HttpOnly"], target="h")
+        self.assertIn("web.jwt-weak-secret", {f.rule_id for f in weak})
+        strong = web._jwt_findings("http://h/", [f"session={jwt('N9x!q2Lr8vZ_k3Pw7tB1sEoYhGfDmJc')}; HttpOnly"], target="h")
+        self.assertNotIn("web.jwt-weak-secret", {f.rule_id for f in strong})
+
     def test_ssrf_cloud_metadata_inband(self):
         class Fetcher(http.server.BaseHTTPRequestHandler):
             def do_GET(self):

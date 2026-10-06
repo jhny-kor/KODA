@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import base64
 import difflib
+import hashlib
+import hmac
 import http.cookiejar
 import http.server
 import ipaddress
@@ -1019,6 +1021,40 @@ def _decode_jwt_json(segment: str) -> object | None:
         return None
 
 
+# Notorious default/example HMAC secrets to test a JWT against. Offline check: a
+# match proves the token is forgeable, without any request to the target.
+_JWT_WEAK_SECRETS = (
+    "secret", "password", "changeme", "admin", "jwt", "key", "test", "123456",
+    "secretkey", "your-256-bit-secret", "your_jwt_secret", "supersecret", "s3cr3t",
+)
+_JWT_HMAC_HASHES = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}
+
+
+def _jwt_weak_hmac_secret(token: str, header: Mapping[str, object]) -> str | None:
+    """Return a common secret that validates the token's HMAC signature, else None.
+
+    Offline only: recomputes HMAC(signing-input) for each candidate and compares to
+    the token's own signature. No request is sent.
+    """
+    alg = str(header.get("alg", "")).upper()
+    hasher = _JWT_HMAC_HASHES.get(alg)
+    if hasher is None:
+        return None
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    signing_input = f"{parts[0]}.{parts[1]}".encode()
+    try:
+        actual = base64.urlsafe_b64decode(parts[2] + "=" * (-len(parts[2]) % 4))
+    except (ValueError, TypeError):
+        return None
+    for secret in _JWT_WEAK_SECRETS:
+        expected = hmac.new(secret.encode(), signing_input, hasher).digest()
+        if hmac.compare_digest(expected, actual):
+            return secret
+    return None
+
+
 def _jwt_findings(url: str, set_cookies: Sequence[str], target: str) -> list[Finding]:
     """Passive: decode JWTs the server sets in cookies; flag 'alg: none' and no expiry."""
     findings: list[Finding] = []
@@ -1043,6 +1079,16 @@ def _jwt_findings(url: str, set_cookies: Sequence[str], target: str) -> list[Fin
                     )
                 )
                 continue
+            weak_secret = _jwt_weak_hmac_secret(token, header)
+            if weak_secret is not None:
+                findings.append(
+                    _finding(
+                        "web.jwt-weak-secret", "high",
+                        "JWT signed with a weak/guessable HMAC secret", url, target=target,
+                        evidence=f"A Set-Cookie JWT's HMAC signature verified against the common secret '{weak_secret}'.",
+                        recommendation="Use a long, random signing key (or asymmetric RS256/ES256) and rotate it; never ship a default secret.",
+                    )
+                )
             payload = _decode_jwt_json(parts[1])
             if isinstance(payload, dict) and "exp" not in payload:
                 findings.append(
