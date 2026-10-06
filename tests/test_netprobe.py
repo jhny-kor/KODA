@@ -154,6 +154,38 @@ class ServiceAuthTests(unittest.TestCase):
             server.server_close()
 
 
+class MongoUnauthTests(unittest.TestCase):
+    def _server(self, reply_body: bytes):
+        import struct
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.recv(4096)
+                self.request.sendall(struct.pack("<i", 4 + len(reply_body)) + reply_body)
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def test_unauth_mongo_flagged(self):
+        server = self._server(b"\x00" * 16 + b"databases\x00payload")
+        try:
+            findings = netprobe._mongodb_unauth("127.0.0.1", 3.0, port=server.server_address[1])
+            self.assertTrue([f for f in findings if f.rule_id == "net.mongodb-unauth"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_auth_required_mongo_quiet(self):
+        server = self._server(b"\x00" * 16 + b"command listDatabases requires authentication")
+        try:
+            self.assertEqual(netprobe._mongodb_unauth("127.0.0.1", 3.0, port=server.server_address[1]), [])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 class TriageOnWebFindingsTests(unittest.TestCase):
     def test_web_finding_is_triaged_via_injected_backend(self):
         from security_scanner.ai import provider, triage

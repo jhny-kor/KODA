@@ -569,6 +569,30 @@ class LiveCrawlTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_ssti_thymeleaf_star_brace_engine(self):
+        class Templater(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+                body = value.replace("*{1337*1337}", "1787569")  # only *{...} evaluates
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Templater)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/p?name=x"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, active=True)
+            self.assertIn("web.ssti-verified", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_xss_js_context(self):
         class JsCtx(http.server.BaseHTTPRequestHandler):
             def do_GET(self):

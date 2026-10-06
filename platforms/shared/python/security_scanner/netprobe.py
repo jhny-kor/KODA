@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import socket
 import ssl
+import struct
 import urllib.error
 import urllib.request
 import warnings
@@ -193,7 +194,50 @@ def service_auth_probe(host: str, *, timeout: float = 2.0) -> list[Finding]:
     findings += _http_unauth(host, 9200, "/", "elasticsearch", "cluster_name", timeout)
     findings += _http_unauth(host, 2375, "/version", "docker", "ApiVersion", timeout)
     findings += _http_unauth(host, 5984, "/_all_dbs", "couchdb", "[", timeout)
+    findings += _mongodb_unauth(host, timeout)
     return findings
+
+
+def _mongodb_unauth(host: str, timeout: float, port: int = 27017) -> list[Finding]:
+    """Run listDatabases over the MongoDB wire protocol; flag if it succeeds with
+    no authentication. Read-only — it lists database names, nothing more."""
+    # BSON for {listDatabases: 1, $db: "admin"}.
+    body = (
+        b"\x10listDatabases\x00" + struct.pack("<i", 1)
+        + b"\x02$db\x00" + struct.pack("<i", 6) + b"admin\x00"
+    )
+    doc = struct.pack("<i", len(body) + 5) + body + b"\x00"
+    payload = struct.pack("<i", 0) + b"\x00" + doc  # flagBits + section kind 0
+    message = struct.pack("<iiii", 16 + len(payload), 1, 0, 2013) + payload  # OP_MSG=2013
+    try:
+        with socket.create_connection((host, port), timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(message)
+            header = sock.recv(4)
+            if len(header) < 4:
+                return []
+            total = struct.unpack("<i", header)[0]
+            chunks, got = [], 4
+            while got < total and got < 65536:
+                chunk = sock.recv(min(8192, total - got))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                got += len(chunk)
+    except (OSError, struct.error):
+        return []
+    response = b"".join(chunks)
+    # Auth required -> errmsg contains "requires authentication"; unauth -> a
+    # "databases" array is returned.
+    if b"requires authentication" in response or b"not authorized" in response:
+        return []
+    if b"databases" not in response:
+        return []
+    return [_finding(
+        "net.mongodb-unauth", "high", "MongoDB is reachable without authentication", host,
+        evidence="listDatabases succeeded with no credentials over the MongoDB wire protocol",
+        recommendation="Enable authorization (--auth / security.authorization) and bind MongoDB to a private network.",
+    )]
 
 
 def _redis_unauth(host: str, timeout: float, port: int = 6379) -> list[Finding]:

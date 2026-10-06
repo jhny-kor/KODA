@@ -2029,6 +2029,8 @@ _SSTI_PAYLOADS = (
     "${" + _SSTI_EXPR + "}",        # Freemarker, JSP EL, Thymeleaf, Mako
     "<%= " + _SSTI_EXPR + " %>",    # ERB, JSP scriptlet
     "#{" + _SSTI_EXPR + "}",        # Ruby interpolation, some expression langs
+    "*{" + _SSTI_EXPR + "}",        # Thymeleaf selection expression
+    "@(" + _SSTI_EXPR + ")",        # Razor (ASP.NET)
 )
 # Request headers some apps echo into the page body: injection points beyond params.
 _INJECTABLE_HEADERS = ("Referer", "X-Forwarded-For")
@@ -2157,6 +2159,8 @@ _SSTI_PROOF = (
     ("${31337-1}", "Freemarker/JSP-EL (${...})"),
     ("<%= 31337-1 %>", "ERB/JSP (<%= %>)"),
     ("#{31337-1}", "Ruby/EL (#{...})"),
+    ("*{31337-1}", "Thymeleaf (*{...})"),
+    ("@(31337-1)", "Razor (@(...))"),
 )
 _SSTI_PROOF_RESULT = "31336"
 _REDACT_RE = re.compile(
