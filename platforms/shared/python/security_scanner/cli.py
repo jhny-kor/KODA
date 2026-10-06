@@ -697,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
             warnings=tuple(warnings),
         )
         write_report(content, report.output)
+        _ai_present(filtered_findings, args, warnings)
         for warning in warnings:
             print(f"warning: {warning}", file=sys.stderr)
         print(
@@ -742,6 +743,10 @@ def main(argv: list[str] | None = None) -> int:
         for warning in net_warnings:
             print(f"warning: {warning}", file=sys.stderr)
         filtered_findings = filter_by_min_severity(findings, report.min_severity)
+        present_warnings: list[str] = []
+        _ai_present(filtered_findings, args, present_warnings)
+        for warning in present_warnings:
+            print(f"warning: {warning}", file=sys.stderr)
         content = render_report(
             filtered_findings, report.format, target_names=(args.host,),
             target_paths={args.host: args.host}, language=report.language,
@@ -1079,6 +1084,9 @@ def build_parser() -> argparse.ArgumentParser:
     net_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
     net_scan.add_argument("--ai-explain", action="store_true", help="append an LLM one-line impact/exploitation narrative to high-impact findings (opt-in)")
     net_scan.add_argument("--ai-remediate", action="store_true", help="append an LLM concrete fix suggestion to each finding (opt-in; local Ollama keeps data offline)")
+    net_scan.add_argument("--ai-map", action="store_true", help="append an LLM-suggested CWE/OWASP mapping to findings that lack one (opt-in)")
+    net_scan.add_argument("--ai-summary", action="store_true", help="print an LLM executive risk summary of the findings (opt-in)")
+    net_scan.add_argument("--ai-query", metavar="TEXT", help="print findings an LLM judges relevant to a natural-language question (read-only)")
 
     web_scan = subparsers.add_parser("web-scan", help="check a live website's security posture (headers, TLS, cookies, CORS)")
     web_scan.add_argument("--url", required=True, help="authorized http(s) URL to check")
@@ -1091,6 +1099,9 @@ def build_parser() -> argparse.ArgumentParser:
     web_scan.add_argument("--llm", dest="llm", help="LLM model spec for --ai-triage, e.g. ollama/qwen2.5-coder:7b (overrides KODA_LLM env)")
     web_scan.add_argument("--ai-explain", action="store_true", help="append an LLM one-line impact/exploitation narrative to high-impact findings (opt-in)")
     web_scan.add_argument("--ai-remediate", action="store_true", help="append an LLM concrete fix suggestion to each finding (opt-in; local Ollama keeps data offline)")
+    web_scan.add_argument("--ai-map", action="store_true", help="append an LLM-suggested CWE/OWASP mapping to findings that lack one (opt-in)")
+    web_scan.add_argument("--ai-summary", action="store_true", help="print an LLM executive risk summary of the findings (opt-in)")
+    web_scan.add_argument("--ai-query", metavar="TEXT", help="print findings an LLM judges relevant to a natural-language question (read-only)")
     web_scan.add_argument("--timeout", type=float, default=15.0, help="per-request timeout in seconds")
     web_scan.add_argument("--crawl", action="store_true", help="follow same-host links and scan sub-pages")
     web_scan.add_argument("--max-pages", type=_positive_int, default=50, help="maximum URLs to process while crawling (default 50)")
@@ -1539,7 +1550,33 @@ def _enrich(findings: list, args, warnings: list[str]) -> list:
             findings, model=getattr(args, "llm", None), language=language
         )
         warnings.extend(remediate_warnings)
+    if getattr(args, "ai_map", False):
+        from .ai import assist
+
+        findings, map_warnings = assist.suggest_mappings(findings)
+        warnings.extend(map_warnings)
     return findings
+
+
+def _ai_present(findings: list, args, warnings: list[str]) -> None:
+    """Print opt-in LLM executive summary / NL-query results (read-only)."""
+    language = getattr(args, "language", None) or "en"
+    if getattr(args, "ai_summary", False):
+        from .ai import assist
+
+        summary, summary_warnings = assist.executive_summary(list(findings), language=language)
+        warnings.extend(summary_warnings)
+        if summary:
+            print("\nAI risk summary:\n" + summary + "\n", file=sys.stderr)
+    query = getattr(args, "ai_query", None)
+    if query:
+        from .ai import assist
+
+        matches, query_warnings = assist.select_by_query(list(findings), query)
+        warnings.extend(query_warnings)
+        print(f"\nAI query '{query}' matched {len(matches)} finding(s):", file=sys.stderr)
+        for finding in matches:
+            print(f"  [{finding.severity}] {finding.rule_id} — {finding.title}", file=sys.stderr)
 
 
 def _has_failure(findings, fail_on: str) -> bool:

@@ -97,5 +97,41 @@ class RemediateTests(unittest.TestCase):
         self.assertEqual(out[0].recommendation, finding.recommendation)
 
 
+class AssistTests(unittest.TestCase):
+    def _findings(self):
+        return [
+            _f("net.docker-unauth", severity="critical"),
+            _f("web.reflected-xss-verified", severity="medium"),
+        ]
+
+    def test_executive_summary(self):
+        from security_scanner.ai import assist, provider
+
+        def fake(prompt, *, system, json_mode, model, timeout_seconds):
+            return provider.LLMResult(text="Two critical exposures; fix Docker first.", backend="test", sent_externally=False)
+
+        text, warnings = assist.executive_summary(self._findings(), complete=fake)
+        self.assertIn("Docker", text)
+        self.assertEqual(warnings, [])
+
+    def test_suggest_mappings_appends_cwe(self):
+        from security_scanner.ai import assist, provider
+
+        def fake(prompt, *, system, json_mode, model, timeout_seconds):
+            return provider.LLMResult(text='{"cwe":"CWE-79","owasp":"A03"}', backend="test", sent_externally=False)
+
+        out, _ = assist.suggest_mappings([_f("web.reflected-xss-verified")], complete=fake)
+        self.assertIn("CWE-79", out[0].description)
+
+    def test_select_by_query_filters(self):
+        from security_scanner.ai import assist, provider
+
+        def fake(prompt, *, system, json_mode, model, timeout_seconds):
+            return provider.LLMResult(text='{"keep":[0]}', backend="test", sent_externally=False)
+
+        matches, _ = assist.select_by_query(self._findings(), "critical only", complete=fake)
+        self.assertEqual([m.rule_id for m in matches], ["net.docker-unauth"])
+
+
 if __name__ == "__main__":
     unittest.main()
