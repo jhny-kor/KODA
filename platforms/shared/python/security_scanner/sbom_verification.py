@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote
 
-from .java_archives import ArchiveScan, scan_archives
+from .java_archives import ArchiveScan, scan_archive_targets
 from .java_inventory import JavaComponent, inventory_components
 from .sbom_verification_reporting import write_verification_reports
 
@@ -131,7 +131,10 @@ def run_sbom_verification(options: SbomVerificationOptions) -> SbomVerificationR
         raise ValueError("--sbom or --baseline-sbom is required")
     target_paths = tuple(dict.fromkeys(path.expanduser().resolve() for path in (options.targets or (options.target,))))
     scan = _scan_targets(target_paths, excludes=options.excludes, max_depth=options.max_depth)
-    actual_components = tuple(_actual(component) for component in inventory_components(scan))
+    components = inventory_components(scan)
+    incomplete_scan = scan.limit_exceeded or any(component.identification_source == "metadata-limit" for component in components)
+    scan_warnings = scan.warnings + (("Java archive verification was incomplete because a resource limit was reached.",) if incomplete_scan else ())
+    actual_components = tuple(_actual(component) for component in components)
     sbom_components = _load_components(options.sbom) if options.sbom else ()
     baseline_components = _load_components(options.baseline_sbom) if options.baseline_sbom else ()
     results = _compare_current(sbom_components, actual_components, options) if options.sbom else _inventory_anomalies(actual_components)
@@ -146,11 +149,11 @@ def run_sbom_verification(options: SbomVerificationOptions) -> SbomVerificationR
         "archive_count": len(scan.artifacts),
         "max_depth": options.max_depth,
         "strict_hash": options.strict_hash,
-        "warnings": list(scan.warnings),
+        "warnings": list(scan_warnings),
     }
     write_verification_reports(options.output_dir, results, baseline_changes, actual_components, summary, metadata, options.format)
-    exit_code = _exit_code(options, results, baseline_changes)
-    return SbomVerificationResult(exit_code, results, baseline_changes, summary, scan.warnings, metadata)
+    exit_code = 2 if incomplete_scan else _exit_code(options, results, baseline_changes)
+    return SbomVerificationResult(exit_code, results, baseline_changes, summary, scan_warnings, metadata)
 
 
 def _scan_targets(
@@ -159,18 +162,7 @@ def _scan_targets(
     excludes: tuple[str, ...],
     max_depth: int | None,
 ) -> ArchiveScan:
-    artifacts = []
-    warnings: list[str] = []
-    seen: set[tuple[str, str]] = set()
-    for target in targets:
-        scan = scan_archives(target, excludes=excludes, max_depth=max_depth)
-        warnings.extend(scan.warnings)
-        for artifact in scan.artifacts:
-            key = (artifact.location.display(), artifact.sha256)
-            if key not in seen:
-                seen.add(key)
-                artifacts.append(artifact)
-    return ArchiveScan(tuple(artifacts), tuple(dict.fromkeys(warnings)))
+    return scan_archive_targets(targets, excludes=excludes, max_depth=max_depth)
 
 
 def _actual(component: JavaComponent) -> ActualArchiveIdentity:

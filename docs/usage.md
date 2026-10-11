@@ -33,7 +33,7 @@ The default binding is `127.0.0.1:8765`. Open `http://127.0.0.1:8765/security-da
 
 ### Development dashboard access boundaries — 2026-10-11
 
-In the unpublished security-boundary development checkout, scan, directory
+In the security-boundary implementation included in this GitHub publication, scan, directory
 selection, export, prevention, web, and ZAP POST requests require
 `Origin: http://<Host>` and the `X-KODA-Session` value from `/api/health`.
 The built-in dashboard supplies both. A stale exported dashboard or a direct API

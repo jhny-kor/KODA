@@ -10,8 +10,10 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from unittest.mock import Mock
 
 from security_scanner.web_audit import (
     ApprovalError,
@@ -26,6 +28,7 @@ from security_scanner.web_audit import (
     build_approval_request,
     canonical_json,
     _finding_payload,
+    _perform_authentication,
     _read_bounded,
     run_web_audit,
     validate_profile,
@@ -438,6 +441,25 @@ class WebAuditTests(unittest.TestCase):
             upload_server.server_close()
             access_thread.join(timeout=2)
             upload_thread.join(timeout=2)
+
+    def test_json_authentication_rejects_nonlocal_http_before_post(self) -> None:
+        opener = Mock()
+        _, warnings, _, result = _perform_authentication(
+            {"method": "json", "login_url": "http://public.example/login",
+             "username": "operator", "password": "secret"},
+            SimpleNamespace(origins=("http://public.example",)), opener, run_id="test",
+        )
+        self.assertEqual(result["reason_code"], "insecure_auth_origin")
+        self.assertTrue(warnings)
+        opener.open.assert_not_called()
+
+    def test_header_authentication_rejects_nonlocal_http_origin(self) -> None:
+        headers, _, _, result = _perform_authentication(
+            {"method": "header", "headers": {"Authorization": "Bearer secret"}},
+            SimpleNamespace(origins=("http://public.example",)), Mock(), run_id="test",
+        )
+        self.assertEqual(headers, {})
+        self.assertEqual(result["reason_code"], "insecure_auth_origin")
 
     def test_json_authentication_is_used_by_scenarios_and_redacted(self) -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _JsonAuthHandler)

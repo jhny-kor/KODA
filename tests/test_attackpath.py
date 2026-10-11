@@ -52,7 +52,7 @@ class NarrateTests(unittest.TestCase):
         self.assertEqual(warnings, [])
 
     def test_low_impact_finding_is_left_alone(self):
-        from security_scanner.ai import narrate, provider
+        from security_scanner.ai import narrate
 
         finding = _f("web.reflected-xss-verified", severity="medium")
 

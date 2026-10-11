@@ -78,7 +78,7 @@ Current production categories:
 
 ## CSV export behavior — 2026-10-11
 
-In the unpublished security-boundary checkout, NIS-SBOM CSV cells are quoted and
+In the security-boundary implementation included in this GitHub publication, NIS-SBOM CSV cells are quoted and
 values beginning with formula characters (`=`, `+`, `-`, `@`, including fullwidth
 forms after leading whitespace/BOM/NUL) are prefixed with a tab. CSV text can
 therefore differ from the original value. Use JSON or CycloneDX for exact machine

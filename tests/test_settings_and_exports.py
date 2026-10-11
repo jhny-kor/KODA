@@ -38,8 +38,23 @@ from security_scanner.server import (
     DEFAULT_UPLOAD_MAX_BYTES, DEFAULT_UPLOAD_MAX_EXTRACTED_BYTES, DEFAULT_UPLOAD_MAX_FILES,
     create_dashboard_server, scan_directory_payload, zap_scan_payload,
 )
-from security_scanner.sbom import NIS_SBOM_COLUMNS, cyclonedx_payload, render_nis_sbom
+from security_scanner.sbom import NIS_SBOM_COLUMNS, cyclonedx_payload, render_nis_sbom, render_nis_sbom_rows
 from security_scanner.standards import standards_payload
+
+
+def _dashboard_post_headers(server) -> dict[str, str]:
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+    connection.request("GET", "/api/health")
+    response = connection.getresponse()
+    session = response.getheader("X-KODA-Session")
+    response.read()
+    connection.close()
+    assert session
+    return {
+        "Content-Type": "application/json",
+        "Origin": f"http://127.0.0.1:{server.server_port}",
+        "X-KODA-Session": session,
+    }
 
 SAMPLE_PAYLOAD = {
     "findings": [
@@ -171,6 +186,21 @@ class LocalVulnerabilityScanTests(unittest.TestCase):
 
 
 class ExportTests(unittest.TestCase):
+    def test_nis_sbom_csv_formula_values_are_inert(self) -> None:
+        document = render_nis_sbom_rows(
+            [
+                {"Component Name": "=1+1", "Component Path": " \t@SUM(1,2)", "Component Version": "safe"},
+                {"Component Name": "＋1+1", "Component Path": 'x,"=1+1'},
+            ],
+            product_name="test",
+        )
+        rows = list(csv.DictReader(io.StringIO(document.lstrip("\ufeff"))))
+        self.assertEqual(rows[0]["Component Name"], "\t=1+1")
+        self.assertEqual(rows[0]["Component Path"], "\t \t@SUM(1,2)")
+        self.assertEqual(rows[0]["Component Version"], "safe")
+        self.assertEqual(rows[1]["Component Name"], "\t＋1+1")
+        self.assertEqual(rows[1]["Component Path"], 'x,"=1+1')
+
     def test_nis_sbom_uses_the_official_twenty_columns(self) -> None:
         component = DependencyComponent(
             name="requests",
@@ -189,7 +219,7 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(tuple(rows[0]), NIS_SBOM_COLUMNS)
         self.assertEqual(rows[0]["SBOM Standard"], "NIS 1.0")
         self.assertEqual(rows[0]["SBOM Type"], "Analyzed")
-        self.assertRegex(rows[0]["SBOM ID"], rf"^KODA-\d{{8}}-\d{{6}}$")
+        self.assertRegex(rows[0]["SBOM ID"], r"^KODA-\d{8}-\d{6}$")
         self.assertEqual(rows[0]["Product Name"], "sample")
         self.assertEqual(rows[0]["Unique Identifier"], "pkg:pypi/requests@2.32.0")
 
@@ -366,7 +396,7 @@ class ExportTests(unittest.TestCase):
                 "POST",
                 "/api/export",
                 body=json.dumps({"format": "pdf", "language": "ko", "payload": SAMPLE_PAYLOAD}),
-                headers={"Content-Type": "application/json"},
+                headers=_dashboard_post_headers(server),
             )
             response = connection.getresponse()
             if importlib.util.find_spec("playwright"):
@@ -392,7 +422,7 @@ class ExportTests(unittest.TestCase):
                 "POST",
                 "/api/export",
                 body=json.dumps({"format": "html", "language": "ko", "payload": SAMPLE_PAYLOAD}),
-                headers={"Content-Type": "application/json"},
+                headers=_dashboard_post_headers(server),
             )
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
@@ -545,7 +575,7 @@ class ZapScanTests(unittest.TestCase):
                 body=json.dumps(
                     {"url": "https://staging.example.com", "active_scan": True, "authorization_confirmed": False}
                 ),
-                headers={"Content-Type": "application/json"},
+                headers=_dashboard_post_headers(server),
             )
             response = connection.getresponse()
             self.assertEqual(response.status, 400)
@@ -588,7 +618,8 @@ class UploadScanTests(unittest.TestCase):
         server = create_dashboard_server(port=0)
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
-        aws_access_key = "AK" + "IA" + ("A" * 16)
+        # Synthetic high-entropy fixture: repeated characters are placeholders.
+        aws_access_key = "AK" + "IA" + "Q7M2X9P4R6T8V3W5"
         try:
             response = self._upload(server, "config.env", f"AWS_ACCESS_KEY_ID={aws_access_key}\n".encode())
             payload = json.loads(response.read())

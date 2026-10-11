@@ -1,4 +1,3 @@
-import datetime as dt
 import hashlib
 import json
 import os
@@ -124,6 +123,31 @@ class ScheduleApiTests(unittest.TestCase):
         self.assertEqual(list((self.root / 'inputs').iterdir()), [])
         self.assertIsInstance(self.store.run(result['run_id'])['result'], dict)
         self.assertEqual(len(self.store.baseline_schedule_files(self.target['target_id'])), 1)
+
+    def test_new_manual_submission_does_not_pause_reserved_schedule_owner(self):
+        collector = Collector()
+        original_list = collector.list_files
+        manual = []
+
+        def list_with_manual(target, **kwargs):
+            path = self.root / 'late-manual.py'
+            path.write_text('print(2)\n')
+            input_id = self.store.add_input(self.project, path.name, path)
+            manual.append(self.store.create_scan(self.admin, self.project, input_id, 'local', 'all', 'source'))
+            self.assertFalse(self.store.mark_run_running(manual[0]['run_id']))
+            return original_list(target, **kwargs)
+
+        def analyze(*args):
+            self.assertEqual(self.store.run(manual[0]['run_id'])['status'], 'queued')
+            return {'findings': [], 'sbom': {'components': []}}
+
+        runner = self.runner(collector)
+        with patch.object(collector, 'list_files', side_effect=list_with_manual), \
+             patch.object(runner, '_analyze', side_effect=analyze), \
+             patch.object(runner, 'sleep', side_effect=AssertionError('Reserved owner must not wait for queued manual work')):
+            result = runner.run_once()
+        self.assertEqual(result['status'], 'completed', result)
+        self.assertEqual(result['cleanup_status'], 'completed')
 
     def test_result_outbox_replays_after_connection_failure_without_collection(self):
         runner = self.runner()

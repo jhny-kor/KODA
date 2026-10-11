@@ -4,6 +4,8 @@ import tarfile
 import tempfile
 import unittest
 import urllib.error
+import email.message
+import ssl
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -71,6 +73,50 @@ class GitLabCollectorTests(unittest.TestCase):
                     collector.list_files({"source_gitlab_mapping_id": "m", "source_gitlab_ref": "main",
                                           "max_bytes": 1, "max_files": 10, "timeout_seconds": 30})
             self.assertFalse((Path(directory) / "gitlab-source.tar.gz").exists())
+
+    def test_gitlab_safe_reads_honor_retry_after_and_bound_attempts(self):
+        from security_scanner.portal_integrations import IntegrationError, _gitlab_open
+        headers = email.message.Message()
+        headers["Retry-After"] = "0"
+        responses = [urllib.error.HTTPError("https://gitlab.example/api/v4/user", 429, "busy", headers, io.BytesIO(b'{"message":"busy"}')),
+                     urllib.error.HTTPError("https://gitlab.example/api/v4/user", 429, "busy", headers, io.BytesIO(b'{"message":"busy"}')),
+                     urllib.error.HTTPError("https://gitlab.example/api/v4/user", 429, "busy", headers, io.BytesIO(b'{"message":"busy"}'))]
+        settings = ("https://gitlab.example", "token", ssl.create_default_context())
+        with patch("security_scanner.portal_integrations.build_opener") as build, patch("security_scanner.portal_integrations.time.sleep") as sleep:
+            build.return_value.open.side_effect = responses
+            with self.assertRaises(IntegrationError) as caught:
+                _gitlab_open("/user", settings=settings)
+        self.assertEqual(caught.exception.status, 429)
+        self.assertEqual(build.return_value.open.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_gitlab_writes_are_never_retried_after_rate_limit(self):
+        from security_scanner.portal_integrations import IntegrationError, _gitlab_open
+        headers = email.message.Message()
+        error = urllib.error.HTTPError("https://gitlab.example/api/v4/projects/1/issues", 429, "busy", headers, io.BytesIO(b"busy"))
+        settings = ("https://gitlab.example", "token", ssl.create_default_context())
+        with patch("security_scanner.portal_integrations.build_opener") as build, patch("security_scanner.portal_integrations.time.sleep") as sleep:
+            build.return_value.open.side_effect = error
+            with self.assertRaises(IntegrationError) as caught:
+                _gitlab_open("/projects/1/issues", settings=settings, method="POST", payload={"title": "x"}, write=True)
+        self.assertEqual(caught.exception.status, 429)
+        self.assertEqual(build.return_value.open.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_gitlab_read_does_not_retry_beyond_retry_after_cap(self):
+        from security_scanner.portal_integrations import IntegrationError, _gitlab_open
+        headers = email.message.Message()
+        headers["Retry-After"] = "31"
+        error = urllib.error.HTTPError("https://gitlab.example/api/v4/user", 429, "busy", headers, io.BytesIO(b"busy"))
+        settings = ("https://gitlab.example", "token", ssl.create_default_context())
+        with patch("security_scanner.portal_integrations.build_opener") as build, patch("security_scanner.portal_integrations.time.sleep") as sleep:
+            build.return_value.open.side_effect = error
+            with self.assertRaises(IntegrationError) as caught:
+                _gitlab_open("/user", settings=settings)
+        self.assertEqual(caught.exception.status, 429)
+        self.assertIn("대기 시간이", str(caught.exception))
+        self.assertEqual(build.return_value.open.call_count, 1)
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

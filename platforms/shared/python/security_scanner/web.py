@@ -2337,15 +2337,23 @@ def _probe_response_headers(
 def _ssti_findings(
     send_value: Callable[[str], str | None], url: str, target: str, label: str,
 ) -> list[Finding]:
-    """Try each template syntax at one injection point; flag the first that evaluates."""
-    for payload in _SSTI_PAYLOADS:
-        if _ssti_evaluated(send_value(payload)):
-            return [_finding(
-                "web.ssti-verified", "high",
-                "Template expression in input was evaluated server-side (SSTI)",
-                url, target=target, evidence=f"{label}: {payload} evaluated to {_SSTI_RESULT}",
-                recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
-            )]
+    """Require two evaluated expressions and a clean control response per syntax."""
+    for payload, (proof, _engine) in zip(_SSTI_PAYLOADS, _SSTI_PROOF):
+        if not _ssti_evaluated(send_value(payload)):
+            continue
+        proof_body = send_value(proof)
+        if not proof_body or _SSTI_PROOF_RESULT not in proof_body or "31337-1" in proof_body:
+            continue
+        control_body = send_value(f"koda-ssti-control-{secrets.token_hex(4)}")
+        if control_body is None or _SSTI_RESULT in control_body or _SSTI_PROOF_RESULT in control_body:
+            continue
+        return [_finding(
+            "web.ssti-verified", "high",
+            "Template expression in input was evaluated server-side (SSTI)",
+            url, target=target,
+            evidence=f"{label}: {payload} -> {_SSTI_RESULT}; {proof} -> {_SSTI_PROOF_RESULT}; control had neither result",
+            recommendation="Never render user input as a template; pass it as context data to a sandboxed engine.",
+        )]
     return []
 
 

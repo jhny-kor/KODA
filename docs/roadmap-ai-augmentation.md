@@ -12,13 +12,16 @@
 작업 트리의 코드로 대조했으며, 미커밋 개발 변경도 포함합니다. 문서 게시가 기능
 릴리스·App Store 배포를 의미하지 않습니다.
 
+2026-10-11 게시 갱신: 아래 개발 구현의 제품 소스·테스트·빌드 스크립트를 GitHub에
+포함합니다. Java 자산·바이너리·이미지·원시 로그와 운영·App Store 배포는 제외합니다.
+
 | 축 | 현재 코드로 확인한 범위 | 아직 보장하지 않는 범위 |
 |---|---|---|
 | 공유 Python AI triage | `--ai-triage --llm`, Ollama/Anthropic/OpenAI provider, 원래 심각도를 유지하는 triage 메타데이터 | AI 판단의 정확성·실제 exploit 검증; Ollama API base를 바꾼 경우 로컬 전송만이라는 보장 |
 | 결정론적 교정 | `fix --target ...`의 기본 dry-run diff, 명시적 `--apply`, 기본 `.bak` 백업·Python 구문 검사 | 대화형 승인·git clean 필수 검사·임의 LLM 패치·자동 PR/머지 |
 | reachability | Python AST 및 JS/TS import 검색에 의한 의존성 CVE `reachable`/`unreachable`/`unknown` 라벨 | 실제 실행 도달성·완전한 호출 그래프; 기본 발견 삭제나 심각도 강등 |
 | CI 변경 파일 범위 | `--changed-only --base`, `.github/actions/koda/action.yml` composite 액션과 SARIF 업로드 단계; diff 실패 시 전체 점검 fallback | 변경 줄 단위 필터·PR 인라인 코멘트·Marketplace 배포/실제 업로드 검증 |
-| macOS 네이티브 로컬 AI | loopback OpenAI 호환 연결·설명·오탐 검토·수정본 비교·최대 3회 재생성·회귀 계획·Python 영향 분석·별도 AI 보고서 | 현재는 미게시 개발 파일; App Store 포함·기능 동등성·테스트 초안 실행 |
+| macOS 네이티브 로컬 AI | loopback OpenAI 호환 연결·설명·오탐 검토·수정본 비교·최대 3회 재생성·회귀 계획·Python 영향 분석·별도 AI 보고서 | App Store 포함·기능 동등성·테스트 초안 실행은 미검증 |
 
 공유 Python의 Ollama 기본 주소는 `http://localhost:11434`지만
 `KODA_LLM_API_BASE`는 다른 HTTP(S) 호스트도 받습니다. 해당 서버의 전송 범위는

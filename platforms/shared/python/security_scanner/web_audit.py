@@ -3059,6 +3059,11 @@ def _perform_authentication(
         return {}, [], [], {"status": "NOT_CONFIGURED"}
     method = str(auth.get("method", "form")).lower()
     extra_headers = _safe_header_items(_interpolate(auth.get("headers", {}), {}, run_id))
+    from .web import _secure_login_url, login
+    if any(not _secure_login_url(origin) for origin in network.origins):
+        return {}, ["web-audit authentication was not completed: credentialed origins require HTTPS or loopback HTTP"], [], {
+            "status": "NOT_SCANNED", "method": method, "reason_code": "insecure_auth_origin",
+        }
     if method == "header":
         raw_headers = auth.get("headers", {})
         if isinstance(raw_headers, dict):
@@ -3081,8 +3086,6 @@ def _perform_authentication(
         return extra_headers, ["web-audit authentication was not completed: login URL is missing"], [], {
             "status": "NOT_SCANNED", "method": method, "reason_code": "login_url_missing",
         }
-    from .web import login
-
     if method == "form":
         login_result: dict[str, object] = {}
         warnings, findings = login(
@@ -3093,6 +3096,7 @@ def _perform_authentication(
             user_field=str(auth.get("user_field") or "") or None,
             pass_field=str(auth.get("pass_field") or "") or None,
             request_url=str(auth.get("login_request_url") or "") or None,
+            allowed_origins=network.origins,
             extra_headers=extra_headers,
             timeout=min(float(network.limits["timeout_seconds"]), network.remaining_timeout()),
             result=login_result,
@@ -3103,6 +3107,10 @@ def _perform_authentication(
     if method != "json":
         return extra_headers, [f"web-audit authentication was not completed: unsupported method {method}"], [], {
             "status": "NOT_SCANNED", "method": method, "reason_code": "auth_method_unsupported",
+        }
+    if not _secure_login_url(login_url or request_url) or not _secure_login_url(request_url):
+        return extra_headers, ["web-audit authentication was not completed: credentials require HTTPS or loopback HTTP"], [], {
+            "status": "NOT_SCANNED", "method": method, "reason_code": "insecure_login_url",
         }
     user_field = str(auth.get("user_field") or "username")
     pass_field = str(auth.get("pass_field") or "password")

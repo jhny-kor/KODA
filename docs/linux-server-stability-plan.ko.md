@@ -20,7 +20,7 @@ Apple Silicon의 Docker LinuxKit VM에서 amd64 사용자 공간을 에뮬레이
 설치·롤백 unittest는 Docker test double을 사용하는 계약 검사다. 실제 운영 Suite
 업그레이드·롤백, Nginx gateway 로그인, 외부 Tracker/GitLab 전송, 강제 OOM 복구와
 운영 서버 부하는 미검증이다. 초기 테스트 준비·fixture 오류는 바로잡은 뒤 전체 회귀를
-재실행했다. 이번 GitHub 게시에는 문서만 포함하며 실행 소스나 이미지 배포를 뜻하지 않는다.
+재실행했다. 이번 GitHub 게시에는 제품 소스·테스트·빌드 스크립트와 문서를 포함하며 이미지·운영 배포는 포함하지 않는다.
 [현재 검증 요약](verification-2026-10-11.ko.md)을 함께 확인한다.
 
 ## 구현한 우선순위 1·2·3

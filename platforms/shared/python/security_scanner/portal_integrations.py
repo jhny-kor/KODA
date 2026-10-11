@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 from collections import Counter
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import os
@@ -25,6 +26,8 @@ MAX_GITLAB_PAGES = 500
 MAX_GITLAB_JSON_BYTES = 500 * 1024 * 1024
 MAX_GITLAB_CA_BYTES = 1024 * 1024
 MAX_TRACKER_SCHEDULE_CHANGED_FILES = 20_000
+MAX_GITLAB_READ_RETRIES = 3
+MAX_GITLAB_RETRY_DELAY_SECONDS = 30.0
 _GITLAB_CONFIG = "gitlab.json"
 _GITLAB_TOKEN = "gitlab.token"
 _GITLAB_WRITE_TOKEN = "gitlab-write.token"
@@ -210,6 +213,35 @@ def _gitlab_write_settings(settings_dir: str | Path | None = None) -> tuple[str,
     return base, _secret(token_file), context
 
 
+def _gitlab_retry_after(headers, *, now: float | None = None) -> float:
+    """Return a bounded delay for GitLab rate-limit responses.
+
+    GitLab may return either seconds or an HTTP date.  Malformed values are
+    ignored; the caller supplies exponential backoff in that case.
+    """
+    value = str(headers.get("Retry-After", "")).strip()
+    if not value:
+        return 0.0
+    try:
+        delay = float(value)
+        if delay > MAX_GITLAB_RETRY_DELAY_SECONDS:
+            raise IntegrationError("GitLab 재시도 대기 시간이 허용 한도를 초과했습니다", status=429)
+        return max(0.0, delay)
+    except ValueError:
+        try:
+            target = parsedate_to_datetime(value)
+            if target.tzinfo is None:
+                return 0.0
+            import datetime as _dt
+            current = _dt.datetime.now(_dt.timezone.utc).timestamp() if now is None else now
+            delay = target.timestamp() - current
+            if delay > MAX_GITLAB_RETRY_DELAY_SECONDS:
+                raise IntegrationError("GitLab 재시도 대기 시간이 허용 한도를 초과했습니다", status=429)
+            return max(0.0, delay)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+
 def _gitlab_open(path: str, query: dict[str, object] | None = None, *, timeout: float = 30, settings_dir: str | Path | None = None, settings=None, method: str = "GET", payload: dict | None = None, write: bool = False):
     base, token, context = settings or (_gitlab_write_settings(settings_dir) if write else _gitlab_settings(settings_dir))
     suffix = path if path.startswith("/") else "/" + path
@@ -220,15 +252,27 @@ def _gitlab_open(path: str, query: dict[str, object] | None = None, *, timeout: 
     headers = {"PRIVATE-TOKEN": token, "Accept": "application/json", "User-Agent": "KODA-Portal/1"}
     if raw is not None:
         headers["Content-Type"] = "application/json"
-    request = Request(url, data=raw, method=method, headers=headers)
     opener = build_opener(_NoRedirect(), HTTPSHandler(context=context))
-    try:
-        return opener.open(request, timeout=timeout)
-    except HTTPError as exc:
-        detail = exc.read(2048).decode("utf-8", "replace").strip()
-        raise IntegrationError(f"GitLab 요청 실패 ({exc.code}): {detail or exc.reason}", status=exc.code) from exc
-    except (URLError, TimeoutError, OSError) as exc:
-        raise IntegrationError(f"GitLab 연결 실패: {exc.reason if isinstance(exc, URLError) else exc}") from exc
+    safe_read = method.upper() in {"GET", "HEAD", "OPTIONS"}
+    attempts = MAX_GITLAB_READ_RETRIES if safe_read else 1
+    for attempt in range(attempts):
+        request = Request(url, data=raw, method=method, headers=headers)
+        try:
+            return opener.open(request, timeout=timeout)
+        except HTTPError as exc:
+            detail = exc.read(2048).decode("utf-8", "replace").strip()
+            retryable = safe_read and (exc.code == 429 or 500 <= exc.code <= 504)
+            if retryable and attempt + 1 < attempts:
+                delay = _gitlab_retry_after(exc.headers)
+                if not delay:
+                    delay = min(2 ** attempt, MAX_GITLAB_RETRY_DELAY_SECONDS)
+                exc.close()
+                time.sleep(delay)
+                continue
+            exc.close()
+            raise IntegrationError(f"GitLab 요청 실패 ({exc.code}): {detail or exc.reason}", status=exc.code) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise IntegrationError(f"GitLab 연결 실패: {exc.reason if isinstance(exc, URLError) else exc}") from exc
 
 
 def _gitlab_json(path: str, query: dict[str, object] | None = None, *, settings_dir: str | Path | None = None, settings=None, method: str = "GET", payload: dict | None = None, write: bool = False) -> tuple[object, object]:

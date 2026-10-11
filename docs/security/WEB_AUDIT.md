@@ -1,8 +1,8 @@
 # KODA profile-driven 21-control web audit
 
-> Updated 2026-10-11 against the local source checkout, including changes under
-> development. Publishing these docs does not publish the source changes or update
-> existing release images. See the [2026-10-11 validation record](../verification-2026-10-11.md)
+> Updated 2026-10-11 against the validated source checkout. Product source, tests,
+> and build scripts are included in this GitHub publication; existing release
+> images are not updated. See the [2026-10-11 validation record](../verification-2026-10-11.md)
 > and confirm the installed version and matching rebuilt bundle before use.
 
 `web-audit` is the approval-gated path for testing an owned or explicitly

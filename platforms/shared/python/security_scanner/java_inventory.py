@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import zipfile
+import zlib
 from dataclasses import dataclass, replace
 from io import BytesIO
 from typing import Iterable
@@ -9,6 +10,31 @@ from urllib.parse import quote
 
 from .java_archives import ArchiveArtifact, ArchiveScan
 from .xml_safe import XmlInputError, parse_xml
+
+
+MAX_METADATA_MEMBER_BYTES = 1024 * 1024
+MAX_METADATA_TOTAL_BYTES = 64 * 1024 * 1024
+
+
+class _MetadataLimit(Exception):
+    pass
+
+
+@dataclass(slots=True)
+class _MetadataBudget:
+    remaining: int = MAX_METADATA_TOTAL_BYTES
+
+    def read(self, archive: zipfile.ZipFile, name: str) -> bytes:
+        limit = min(MAX_METADATA_MEMBER_BYTES, self.remaining)
+        info = archive.getinfo(name)
+        if info.file_size > limit:
+            raise _MetadataLimit
+        with archive.open(info) as source:
+            payload = source.read(limit + 1)
+        if len(payload) > limit:
+            raise _MetadataLimit
+        self.remaining -= len(payload)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,18 +80,20 @@ class JavaComponent:
 def inventory_components(artifacts: ArchiveScan | Iterable[ArchiveArtifact]) -> tuple[JavaComponent, ...]:
     candidates = artifacts.artifacts if isinstance(artifacts, ArchiveScan) else tuple(artifacts)
     by_sha: dict[str, JavaComponent] = {}
+    metadata_budget = _MetadataBudget()
     for artifact in candidates:
-        component = identify_archive(artifact)
-        existing = by_sha.get(component.sha256)
-        if existing is None:
+        existing = by_sha.get(artifact.sha256)
+        if existing is not None:
+            locations = tuple(dict.fromkeys((*existing.locations, artifact.location.display())))
+            by_sha[artifact.sha256] = replace(existing, locations=locations)
+        else:
+            component = identify_archive(artifact, metadata_budget=metadata_budget)
             by_sha[component.sha256] = component
-            continue
-        locations = tuple(dict.fromkeys((*existing.locations, *component.locations)))
-        by_sha[component.sha256] = replace(existing, locations=locations)
     return tuple(sorted(by_sha.values(), key=lambda item: (item.name.lower(), item.version, item.sha256)))
 
 
-def identify_archive(artifact: ArchiveArtifact) -> JavaComponent:
+def identify_archive(artifact: ArchiveArtifact, *, metadata_budget: _MetadataBudget | None = None) -> JavaComponent:
+    metadata_budget = metadata_budget or _MetadataBudget()
     group = ""
     name = artifact.filename
     version = ""
@@ -73,35 +101,48 @@ def identify_archive(artifact: ArchiveArtifact) -> JavaComponent:
     name = filename_name or name
     source = "filename-unresolved"
     status = "unresolved"
+    metadata_limited = False
     try:
         with zipfile.ZipFile(BytesIO(artifact.payload)) as archive:
             names = sorted(name for name in archive.namelist() if not name.endswith("/"))
             properties = next((name for name in names if _is_pom_properties(name)), None)
             if properties:
-                values = _properties(archive.read(properties).decode("utf-8", errors="replace"))
-                group, name, version = _coordinates(values)
-                if group and name and version:
-                    source, status = "pom.properties", "resolved"
+                try:
+                    values = _properties(metadata_budget.read(archive, properties).decode("utf-8", errors="replace"))
+                    group, name, version = _coordinates(values)
+                    if group and name and version:
+                        source, status = "pom.properties", "resolved"
+                except _MetadataLimit:
+                    metadata_limited = True
             if status == "unresolved":
                 pom = next((entry for entry in names if _is_pom_xml(entry)), None)
                 if pom:
-                    group, name, version = _pom_xml_coordinates(archive.read(pom))
-                    if group and name and version:
-                        source, status = "pom.xml", "resolved"
+                    try:
+                        group, name, version = _pom_xml_coordinates(metadata_budget.read(archive, pom))
+                        if group and name and version:
+                            source, status = "pom.xml", "resolved"
+                    except _MetadataLimit:
+                        metadata_limited = True
             if status == "unresolved":
                 manifest = next((entry for entry in names if entry.upper() == "META-INF/MANIFEST.MF"), None)
                 if manifest:
-                    values = _properties(archive.read(manifest).decode("utf-8", errors="replace"))
-                    name = values.get("Implementation-Title") or values.get("Bundle-SymbolicName") or name
-                    version = values.get("Implementation-Version") or values.get("Bundle-Version") or ""
-                    # A version explicitly declared by MANIFEST.MF is a confirmed
-                    # version, even when the archive does not carry full Maven
-                    # coordinates. Do not downgrade this to a filename guess or
-                    # leave it in the review queue.
-                    if version:
-                        source, status = "manifest", "resolved"
-    except (OSError, zipfile.BadZipFile, UnicodeError, XmlInputError):
+                    try:
+                        values = _properties(metadata_budget.read(archive, manifest).decode("utf-8", errors="replace"))
+                        name = values.get("Implementation-Title") or values.get("Bundle-SymbolicName") or name
+                        version = values.get("Implementation-Version") or values.get("Bundle-Version") or ""
+                        # A version explicitly declared by MANIFEST.MF is a confirmed
+                        # version, even when the archive does not carry full Maven
+                        # coordinates. Do not downgrade this to a filename guess or
+                        # leave it in the review queue.
+                        if version:
+                            source, status = "manifest", "resolved"
+                    except _MetadataLimit:
+                        metadata_limited = True
+    except (OSError, ValueError, zipfile.BadZipFile, UnicodeError, XmlInputError, zlib.error):
         source = "filename-unresolved"
+
+    if status == "unresolved" and metadata_limited:
+        source = "metadata-limit"
 
     if not version and filename_version:
         version = filename_version
@@ -123,7 +164,7 @@ def identify_archive(artifact: ArchiveArtifact) -> JavaComponent:
         locations=(artifact.location.display(),),
         identification_source=source,
         identity_status=status,
-        manual_review_required=status not in {"resolved", "inferred"} or filename_version_mismatch,
+        manual_review_required=status not in {"resolved", "inferred"} or filename_version_mismatch or metadata_limited,
         version_source=version_source,
         confidence=confidence,
         filename_version=filename_version,

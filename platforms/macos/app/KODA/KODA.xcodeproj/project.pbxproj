@@ -16,6 +16,16 @@
 		0A1B2C3D4E5F600000000101 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A1B2C3D4E5F600000000102 /* SettingsView.swift */; };
 		0A1B2C3D4E5F600000000103 /* rules_catalog.json in Resources */ = {isa = PBXBuildFile; fileRef = 0A1B2C3D4E5F600000000104 /* rules_catalog.json */; };
 		0A1B2C3D4E5F600000000105 /* BundledJavaArchiveScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A1B2C3D4E5F600000000106 /* BundledJavaArchiveScanner.swift */; };
+		AA0000000000000000000001 /* LocalAIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000002; };
+		AA0000000000000000000011 /* LocalAIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000012; };
+		AA0000000000000000000021 /* NativeLocalAIFix.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000022; };
+		AA0000000000000000000091 /* NativeLocalAISourceValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000092; };
+		AA0000000000000000000031 /* LocalAIProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000032; };
+		AA0000000000000000000041 /* NativeLocalAITestPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000042; };
+		AA0000000000000000000051 /* NativeLocalAITriageReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000052; };
+		AA0000000000000000000061 /* NativeLocalAIImpact.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000062; };
+		AA0000000000000000000071 /* NativeAIReport.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000072; };
+		AA0000000000000000000081 /* LocalAIReportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000082; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +40,16 @@
 		0A1B2C3D4E5F600000000102 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		0A1B2C3D4E5F600000000104 /* rules_catalog.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = rules_catalog.json; sourceTree = "<group>"; };
 		0A1B2C3D4E5F600000000106 /* BundledJavaArchiveScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundledJavaArchiveScanner.swift; sourceTree = "<group>"; };
+		AA0000000000000000000002 /* LocalAIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAIClient.swift; sourceTree = "<group>"; };
+		AA0000000000000000000012 /* LocalAIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAIView.swift; sourceTree = "<group>"; };
+		AA0000000000000000000022 /* NativeLocalAIFix.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLocalAIFix.swift; sourceTree = "<group>"; };
+		AA0000000000000000000092 /* NativeLocalAISourceValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLocalAISourceValidator.swift; sourceTree = "<group>"; };
+		AA0000000000000000000032 /* LocalAIProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAIProfiles.swift; sourceTree = "<group>"; };
+		AA0000000000000000000042 /* NativeLocalAITestPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLocalAITestPlan.swift; sourceTree = "<group>"; };
+		AA0000000000000000000052 /* NativeLocalAITriageReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLocalAITriageReview.swift; sourceTree = "<group>"; };
+		AA0000000000000000000062 /* NativeLocalAIImpact.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLocalAIImpact.swift; sourceTree = "<group>"; };
+		AA0000000000000000000072 /* NativeAIReport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAIReport.swift; sourceTree = "<group>"; };
+		AA0000000000000000000082 /* LocalAIReportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAIReportView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -55,6 +75,16 @@
 		0A1B2C3D4E5F600000000031 /* KODA */ = {
 			isa = PBXGroup;
 			children = (
+				AA0000000000000000000002 /* LocalAIClient.swift */,
+				AA0000000000000000000012 /* LocalAIView.swift */,
+				AA0000000000000000000022 /* NativeLocalAIFix.swift */,
+				AA0000000000000000000092 /* NativeLocalAISourceValidator.swift */,
+				AA0000000000000000000032 /* LocalAIProfiles.swift */,
+				AA0000000000000000000042 /* NativeLocalAITestPlan.swift */,
+				AA0000000000000000000052 /* NativeLocalAITriageReview.swift */,
+				AA0000000000000000000062 /* NativeLocalAIImpact.swift */,
+				AA0000000000000000000072 /* NativeAIReport.swift */,
+				AA0000000000000000000082 /* LocalAIReportView.swift */,
 				0A1B2C3D4E5F600000000011 /* KODAApp.swift */,
 				0A1B2C3D4E5F600000000012 /* ContentView.swift */,
 				0A1B2C3D4E5F600000000018 /* SecurityStandardsView.swift */,
@@ -178,6 +208,16 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA0000000000000000000001 /* LocalAIClient.swift in Sources */,
+				AA0000000000000000000011 /* LocalAIView.swift in Sources */,
+				AA0000000000000000000021 /* NativeLocalAIFix.swift in Sources */,
+				AA0000000000000000000091 /* NativeLocalAISourceValidator.swift in Sources */,
+				AA0000000000000000000031 /* LocalAIProfiles.swift in Sources */,
+				AA0000000000000000000041 /* NativeLocalAITestPlan.swift in Sources */,
+				AA0000000000000000000051 /* NativeLocalAITriageReview.swift in Sources */,
+				AA0000000000000000000061 /* NativeLocalAIImpact.swift in Sources */,
+				AA0000000000000000000071 /* NativeAIReport.swift in Sources */,
+				AA0000000000000000000081 /* LocalAIReportView.swift in Sources */,
 				0A1B2C3D4E5F600000000001 /* KODAApp.swift in Sources */,
 				0A1B2C3D4E5F600000000002 /* ContentView.swift in Sources */,
 				0A1B2C3D4E5F600000000003 /* ScannerBridge.swift in Sources */,

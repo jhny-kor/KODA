@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import hmac
 import uuid
 from dataclasses import dataclass
 
@@ -45,10 +46,26 @@ def _display(value: str) -> str:
     return text
 
 
-def identity_from_headers(headers) -> PortalIdentity:
-    subject = str(headers.get("X-KODA-Identity-ID", "")).strip()
-    expires_text = str(headers.get("X-KODA-Identity-Expires", "")).strip()
-    display = _display(str(headers.get("X-KODA-Identity-Display", "")))
+def _one_header(headers, name: str) -> str:
+    # email.message.Message (used by BaseHTTPRequestHandler) retains duplicate
+    # fields; dicts are accepted for direct callers and tests.
+    values = headers.get_all(name, []) if hasattr(headers, "get_all") else [
+        value for key, value in headers.items() if key.lower() == name.lower()
+    ]
+    if len(values) != 1 or not isinstance(values[0], str):
+        raise IdentityError("invalid trusted identity")
+    return values[0]
+
+
+def identity_from_headers(headers, expected_proof: str = "") -> PortalIdentity:
+    if len(expected_proof) < 32:
+        raise IdentityUnavailable("gateway identity proof is not configured")
+    supplied_proof = _one_header(headers, "X-KODA-Gateway-Proof")
+    if not hmac.compare_digest(supplied_proof, expected_proof):
+        raise IdentityError("invalid trusted identity")
+    subject = _one_header(headers, "X-KODA-Identity-ID").strip()
+    expires_text = _one_header(headers, "X-KODA-Identity-Expires").strip()
+    display = _display(_one_header(headers, "X-KODA-Identity-Display"))
     try:
         subject = str(uuid.UUID(subject))
         expires = dt.datetime.fromisoformat(expires_text.replace("Z", "+00:00"))

@@ -19,10 +19,10 @@ KODA keeps scans local by default. The native macOS app has its own Swift scanne
 ## Documentation status — 2026-10-11
 
 The [current implementation and verification snapshot](docs/current-status.en.md)
-separates committed source, local development changes, and released binaries.
-This GitHub update publishes documentation only. Local macOS AI, scanner fixes,
-packaging changes, worker code, tests, assets, and validation binaries remain
-unpublished. The [latest validation record](docs/verification-2026-10-11.md)
+separates published source, validation conditions, and released binaries.
+This GitHub update publishes the validated product source, tests, build scripts,
+and documentation. Java assets, validation app binaries, Docker images, and raw
+logs remain local; this is not a production or App Store deployment. The [latest validation record](docs/verification-2026-10-11.md)
 includes a Java-enabled universal macOS build with ARM execution and actual Linux
 amd64 container checks. It does not certify the Mac App Store app or an existing
 offline package. Check the snapshot before using development-only commands.

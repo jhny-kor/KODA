@@ -1,9 +1,9 @@
 # macOS Local AI Development Guide
 
 > As of **2026-10-11**, this guide describes the implementation inspected in the
-> local working tree. Its AI source, development script, and tests are unpublished
-> working files. Publishing these docs alone does not make the commands available
-> in a GitHub checkout or establish availability in the Mac App Store app.
+> local working tree. Its AI source, development script, and tests are included
+> in this GitHub publication. The commands require a development environment such
+> as Xcode; publishing source does not establish availability in the Mac App Store app.
 > Store distribution, notarization, and inclusion in a release are separate checks.
 
 The native macOS app uses an OpenAI-compatible local server's `/models` and
@@ -121,7 +121,7 @@ preserved behavior.
 
 ## Verification commands and historical records
 
-These tests require the unpublished development files. **On 2026-10-11, all ten
+These test files are included in this GitHub publication and require a configured development environment. **On 2026-10-11, all ten
 macOS validation scripts passed, including the seven local AI fixtures below.**
 The Java-enabled arm64/x86_64 Release build and static analysis succeeded. Actual
 ARM execution checked the app window and the headless Java scan. This does not

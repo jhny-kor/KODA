@@ -45,6 +45,19 @@ def _sbom_component(component: object, *, version: str | None = None, sha256: st
 
 
 class SbomVerificationTests(unittest.TestCase):
+    def test_archive_limit_fails_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jar = root / "oversized.jar"
+            _write_jar(jar, "org.example", "demo", "1.0", "x" * 1024)
+            sbom = root / "sbom.json"
+            sbom.write_text(json.dumps({"bomFormat": "CycloneDX", "components": []}), encoding="utf-8")
+            from unittest.mock import patch
+            with patch("security_scanner.java_archives.MAX_SINGLE_ARCHIVE_BYTES", 100):
+                result = run_sbom_verification(SbomVerificationOptions(target=jar, sbom=sbom, output_dir=root / "report"))
+            self.assertEqual(result.exit_code, 2)
+            self.assertTrue(result.warnings)
+
     def test_current_sbom_compares_internal_version_and_hash_both_ways(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

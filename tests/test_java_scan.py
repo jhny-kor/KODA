@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import socket
 import stat
 import subprocess
@@ -17,12 +18,12 @@ SHARED_PYTHON = ROOT / "platforms" / "shared" / "python"
 if str(SHARED_PYTHON) not in sys.path:
     sys.path.insert(0, str(SHARED_PYTHON))
 
-from security_scanner.java_archives import scan_archives
+from security_scanner.java_archives import scan_archive_targets, scan_archives
 from security_scanner.java_inventory import inventory_components
 from security_scanner.java_vulnerability_scan import JavaScanOptions, VulnerabilityRecord, _merge_syft, aggregate_vulnerabilities, run_java_scan
 from security_scanner.grype_adapter import GrypeMatch, GrypeResult
 from security_scanner.java_vulnerability_reporting import write_reports
-from security_scanner.syft_adapter import run_syft
+from security_scanner.syft_adapter import _run as run_syft_process, run_syft
 
 
 def _write_jar(path: Path, files: dict[str, str | bytes]) -> None:
@@ -32,6 +33,103 @@ def _write_jar(path: Path, files: dict[str, str | bytes]) -> None:
 
 
 class JavaInventoryTests(unittest.TestCase):
+    def test_suspicious_nested_archive_ratio_is_not_expanded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory) / "outer.jar"
+            with zipfile.ZipFile(outer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("lib/bomb.jar", b"A" * 1_000_000)
+
+            result = scan_archives(outer)
+            self.assertEqual([artifact.filename for artifact in result.artifacts], ["outer.jar"])
+            self.assertTrue(any("compression ratio" in warning for warning in result.warnings))
+
+    def test_expanded_byte_budget_is_cumulative_across_nested_archives(self) -> None:
+        def archive_bytes(files: dict[str, bytes]) -> bytes:
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
+                for name, data in files.items():
+                    archive.writestr(name, data)
+            return output.getvalue()
+
+        with tempfile.TemporaryDirectory() as directory:
+            inner = archive_bytes({"readme.txt": b"safe"})
+            middle = archive_bytes({"lib/inner.jar": inner})
+            outer = Path(directory) / "outer.jar"
+            outer.write_bytes(archive_bytes({"one.jar": middle, "two.jar": middle}))
+            limit = 2 * len(middle) + len(inner)
+
+            result = scan_archives(outer, max_uncompressed_bytes=limit)
+            self.assertEqual(len(result.artifacts), 4)
+            self.assertTrue(any("byte limit" in warning for warning in result.warnings))
+
+    def test_multiple_targets_share_the_retained_byte_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "first.jar"
+            second = Path(directory) / "second.jar"
+            _write_jar(first, {"META-INF/MANIFEST.MF": "Manifest-Version: 1.0\n"})
+            _write_jar(second, {"META-INF/MANIFEST.MF": "Manifest-Version: 1.0\n"})
+            with patch("security_scanner.java_archives.MAX_RETAINED_ARCHIVE_BYTES", first.stat().st_size + second.stat().st_size - 1):
+                result = scan_archive_targets((first, second))
+            self.assertEqual([artifact.filename for artifact in result.artifacts], ["first.jar"])
+            self.assertTrue(any("byte limit" in warning for warning in result.warnings))
+
+    def test_large_zip_directory_is_rejected_before_materializing_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory) / "many.jar"
+            _write_jar(outer, {f"lib/{number}.jar": b"x" for number in range(10)})
+            with patch("security_scanner.java_archives.MAX_CENTRAL_DIRECTORY_BYTES", 64):
+                result = scan_archives(outer)
+            self.assertEqual([artifact.filename for artifact in result.artifacts], ["many.jar"])
+            self.assertTrue(any("central-directory limit" in warning for warning in result.warnings))
+
+    def test_product_default_expansion_budget_is_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory) / "outer.jar"
+            inner = Path(directory) / "inner.jar"
+            _write_jar(inner, {"readme.txt": "ordinary content"})
+            with zipfile.ZipFile(outer, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.writestr("lib/inner.jar", inner.read_bytes())
+            with patch("security_scanner.java_archives.DEFAULT_MAX_UNCOMPRESSED_BYTES", inner.stat().st_size - 1):
+                result = scan_archive_targets((outer,))
+            self.assertEqual([artifact.filename for artifact in result.artifacts], ["outer.jar"])
+            self.assertTrue(any("byte limit" in warning for warning in result.warnings))
+
+    def test_oversized_manifest_metadata_is_not_decompressed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            jar = Path(directory) / "metadata.jar"
+            with zipfile.ZipFile(jar, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("META-INF/MANIFEST.MF", b"A" * (2 * 1024 * 1024))
+            artifacts = scan_archives(jar)
+            with patch("zipfile.ZipFile.read", side_effect=AssertionError("unbounded metadata read")):
+                component = inventory_components(artifacts)[0]
+            self.assertEqual(component.identification_source, "metadata-limit")
+            self.assertTrue(component.manual_review_required)
+
+    def test_zero_byte_outer_archives_obey_file_count_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(4):
+                (root / f"empty-{index}.jar").write_bytes(b"")
+            with patch("security_scanner.java_archives.DEFAULT_MAX_ENTRIES", 2):
+                result = scan_archive_targets((root,))
+            self.assertEqual(len(result.artifacts), 2)
+            self.assertTrue(result.limit_exceeded)
+
+    def test_overlapping_targets_do_not_consume_budget_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            group = root / "group"
+            group.mkdir()
+            first = group / "first.jar"
+            duplicate = group / "duplicate.jar"
+            separate = root / "separate.jar"
+            for path in (first, duplicate, separate):
+                _write_jar(path, {})
+            with patch("security_scanner.java_archives.MAX_RETAINED_ARCHIVE_BYTES", 2 * first.stat().st_size + separate.stat().st_size):
+                result = scan_archive_targets((group, duplicate, separate))
+            self.assertEqual({artifact.filename for artifact in result.artifacts}, {"first.jar", "duplicate.jar", "separate.jar"})
+            self.assertFalse(result.limit_exceeded)
+
     def test_manifest_version_is_resolved_without_maven_coordinates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -122,6 +220,44 @@ class JavaInventoryTests(unittest.TestCase):
 
 
 class JavaScanTests(unittest.TestCase):
+    def test_syft_process_output_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "large-output"
+            binary.write_text("#!/usr/bin/env python3\nimport sys\nsys.stdout.write('A' * 1024)\n", encoding="utf-8")
+            binary.chmod(0o700)
+            with patch("security_scanner.syft_adapter.MAX_SYFT_STDOUT_BYTES", 128):
+                result = run_syft_process(binary, (), 2, {})
+            self.assertEqual(result.returncode, 125)
+            self.assertIn("output byte limit", result.stderr)
+            self.assertEqual(result.stdout, "")
+
+    def test_syft_process_accepts_small_utf8_cyclonedx_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "small-output"
+            binary.write_text(
+                "#!/usr/bin/env python3\nimport sys\n"
+                "print('syft 1.0' if '--version' in sys.argv else '{\"bomFormat\":\"CycloneDX\",\"components\":[]}')\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o700)
+            result = run_syft(root, binary, 2)
+            self.assertFalse(result.fatal)
+            self.assertEqual(result.version, "syft 1.0")
+            self.assertEqual(result.payload["components"], [])
+
+    def test_archive_limit_fails_scan_and_skips_syft(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outer = root / "outer.jar"
+            _write_jar(outer, {"lib/inner.jar": b"a" * 100})
+            with patch("security_scanner.java_archives.DEFAULT_MAX_UNCOMPRESSED_BYTES", 99), \
+                 patch("security_scanner.java_vulnerability_scan.run_syft") as syft:
+                result = run_java_scan(JavaScanOptions(target=outer, output_dir=root / "output", no_grype=True))
+            self.assertEqual(result.exit_code, 2)
+            self.assertTrue(any("incomplete" in warning for warning in result.warnings))
+            syft.assert_not_called()
+
     def test_syft_components_omit_null_purl(self) -> None:
         payload = _merge_syft(
             {"components": [{"type": "library", "name": "internal", "version": "1.0", "purl": None}]},
@@ -592,7 +728,7 @@ class JavaScanTests(unittest.TestCase):
             kev.write_text(json.dumps({"vulnerabilities": [{"cveID": "CVE-2026-0001"}]}), encoding="utf-8")
             match = GrypeMatch("CVE-2026-0001", ("CVE-2026-0001",), "demo", "1.2.3", "pkg:maven/org.example/demo@1.2.3", (), "low", (), ())
             with patch("security_scanner.java_vulnerability_scan.run_grype", return_value=GrypeResult((match,), "test", {}, "", False)):
-                result = run_java_scan(JavaScanOptions(target=target, output_dir=root / "reports", cisa_kev=kev, fail_on_kev=True))
+                result = run_java_scan(JavaScanOptions(target=target, output_dir=root / "reports", grype_bin=root / "grype", cisa_kev=kev, fail_on_kev=True))
             self.assertEqual(result.exit_code, 1)
 
     def test_fail_on_kev_without_kev_data_is_exit_two(self) -> None:
@@ -603,7 +739,7 @@ class JavaScanTests(unittest.TestCase):
             _write_jar(target / "demo.jar", {"META-INF/maven/org.example/demo/pom.properties": "groupId=org.example\nartifactId=demo\nversion=1.2.3\n"})
             match = GrypeMatch("CVE-2026-0001", ("CVE-2026-0001",), "demo", "1.2.3", "pkg:maven/org.example/demo@1.2.3", (), "low", (), ())
             with patch("security_scanner.java_vulnerability_scan.run_grype", return_value=GrypeResult((match,), "test", {}, "", False)):
-                result = run_java_scan(JavaScanOptions(target=target, output_dir=root / "reports", fail_on_kev=True))
+                result = run_java_scan(JavaScanOptions(target=target, output_dir=root / "reports", grype_bin=root / "grype", fail_on_kev=True))
             self.assertEqual(result.exit_code, 2)
             self.assertTrue(any("--fail-on-kev requires CISA KEV data" in warning for warning in result.warnings))
 
@@ -613,7 +749,7 @@ class JavaScanTests(unittest.TestCase):
             binary = root / "syft"
             binary.write_text("placeholder", encoding="utf-8")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
-            with patch("security_scanner.syft_adapter.subprocess.run", side_effect=subprocess.TimeoutExpired(str(binary), 1)):
+            with patch("security_scanner.syft_adapter._run", return_value=subprocess.CompletedProcess([str(binary)], 124, "", "timed out after 1s")):
                 result = run_syft(root, binary, 1)
             self.assertTrue(result.fatal)
             self.assertIn("Syft failed", result.warning)
@@ -625,7 +761,7 @@ class JavaScanTests(unittest.TestCase):
             binary.write_text("placeholder", encoding="utf-8")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             payload = {"bomFormat": "CycloneDX", "components": []}
-            with patch("security_scanner.syft_adapter.subprocess.run") as run:
+            with patch("security_scanner.syft_adapter._run") as run:
                 run.side_effect = [
                     type("Completed", (), {"returncode": 0, "stdout": "syft 1.0.0", "stderr": ""})(),
                     type("Completed", (), {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""})(),

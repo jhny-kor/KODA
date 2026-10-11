@@ -11,6 +11,7 @@ services:
     environment:
       KODA_PORTAL_UPSTREAM: ${KODA_PORTAL_UPSTREAM:-koda-dashboard:8765}
       TRACKER_SESSION_UPSTREAM: ${TRACKER_SESSION_UPSTREAM:-portal-api:8000}
+      KODA_GATEWAY_PROOF: ${KODA_GATEWAY_PROOF:?KODA_GATEWAY_PROOF is required}
     networks:
       - edge
       - app

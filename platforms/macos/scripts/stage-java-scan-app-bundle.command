@@ -51,6 +51,10 @@ if [[ -x "$main_executable" ]]; then
         echo "Java scanner assets are missing for KODA.app architecture $app_architecture: $required" >&2
         exit 2
       fi
+      if ! lipo -verify_arch "$app_architecture" "$required"; then
+        echo "Java scanner asset has the wrong architecture for $app_architecture: $required" >&2
+        exit 2
+      fi
     done
   done
 fi

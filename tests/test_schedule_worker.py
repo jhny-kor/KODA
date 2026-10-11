@@ -53,6 +53,31 @@ class ScheduleWorkerTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_new_manual_submission_does_not_pause_legacy_schedule_owner(self):
+        collector = FakeCollector()
+        original_list = collector.list_files
+        manual = []
+
+        def list_with_manual(target):
+            path = Path(self.tmp.name) / 'late-manual.py'
+            path.write_text('print(2)\n')
+            input_id = self.store.add_input(self.project, path.name, path)
+            manual.append(self.store.create_scan(self.admin, self.project, input_id, 'local', 'all', 'source'))
+            self.assertFalse(self.store.mark_run_running(manual[0]['run_id']))
+            return original_list(target)
+
+        def analyze(run_id, deadline):
+            self.assertTrue(self.store.mark_run_running(run_id))
+            self.store.complete_run(run_id, result={'findings': []})
+
+        runner = ScheduleRunner(self.store, collector=collector, work_dir=Path(self.tmp.name) / 'work')
+        with patch.object(collector, 'list_files', side_effect=list_with_manual), \
+             patch.object(runner, '_analyze', side_effect=analyze), \
+             patch.object(runner, '_sleep', side_effect=AssertionError('Reserved owner must not wait for queued manual work')):
+            result = runner.run_target(self.target, scheduled_for='2026-09-07')
+        self.assertEqual(result['status'], 'completed', result)
+        self.assertEqual(result['cleanup_status'], 'completed')
+
     def test_success_deletes_archive_and_keeps_hash_baseline(self):
         collector = FakeCollector()
 
@@ -139,6 +164,29 @@ class ScheduleWorkerTests(unittest.TestCase):
             "tracker_environment_id": "environment-1", "tracker_token_ref": "demo.token",
         }], self.admin)[0]
         return self.store.save_schedule_target({**self.target, "gitlab_mapping_id": mapping["mapping_id"]}, self.admin)
+
+    def test_gitlab_snapshot_preserves_source_identity_and_directory(self):
+        source = self.store.set_gitlab_repositories(self.project, [{
+            "gitlab_project_id": 7, "path_with_namespace": "group/source", "name": "source",
+            "default_branch": "main", "tracker_service_id": "service-source",
+            "tracker_environment_id": "environment-source", "tracker_token_ref": "source.token",
+        }], self.admin)[0]
+        publication = self.store.set_gitlab_repositories(self.project, [{
+            "gitlab_project_id": 99, "path_with_namespace": "group/results", "name": "results",
+            "default_branch": "main", "tracker_service_id": "service-results",
+            "tracker_environment_id": "environment-results", "tracker_token_ref": "results.token",
+        }], self.admin)[0]
+        target = self.store.save_schedule_target({**self.target,
+            "source_kind": "gitlab", "source_gitlab_mapping_id": source["mapping_id"],
+            "source_gitlab_ref": "main", "source_gitlab_directory": "services/api",
+            "gitlab_mapping_id": publication["mapping_id"],
+        }, self.admin)
+        runner = self.runner()
+        scheduled = self.store.begin_schedule_run(target["target_id"], "2026-09-07", "full", target["config_version"])
+        snapshot = runner._snapshot(target, scheduled, "full", [])
+        self.assertEqual(snapshot["scheduled_source_kind"], "gitlab")
+        self.assertEqual(snapshot["source_gitlab_project_id"], 7)
+        self.assertEqual(snapshot["source_gitlab_directory"], "services/api")
 
     def test_real_analyzer_process_stores_result_and_cleans_every_copy(self):
         runner = self.runner()

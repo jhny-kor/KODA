@@ -269,7 +269,11 @@ def _next(store, worker_id):
             token = secrets.token_urlsafe(32)
             with store._db() as db:
                 db.execute("BEGIN IMMEDIATE")
-                if db.execute("SELECT 1 FROM schedule_api_lease").fetchone() or db.execute("SELECT 1 FROM schedule_runs WHERE status IN ('running','cancelling')").fetchone():
+                if (store._manual_work_busy(db)
+                    or db.execute("SELECT 1 FROM scan_runs WHERE status IN ('running','cancelling')").fetchone()
+                    or db.execute("SELECT 1 FROM schedule_api_lease").fetchone()
+                    or db.execute("SELECT 1 FROM schedule_runs WHERE status IN ('running','cancelling')").fetchone()):
+                    db.execute("ROLLBACK")
                     return {"settings": settings, "job": None}
                 db.execute("INSERT INTO schedule_api_lease VALUES(1,?,?,?,?)", (worker_id, token, row["schedule_run_id"], json.dumps(context)))
                 db.execute("UPDATE schedule_runs SET status='running',stage='collecting',cleanup_status='pending',mode=?,config_version=?,started_at=?,updated_at=? WHERE schedule_run_id=?", (row["mode"], row["config_version"], store._now(), store._now(), row["schedule_run_id"]))
@@ -325,15 +329,20 @@ def _persist(store, row, context, payload):
     target = context["target"]
     snapshot = {**context["snapshot"], "files_total": counts["files_total"], "changed_files": counts["changed_paths"]}
     now, run_id, input_id, revision_id = store._now(), str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    # Large evidence and manifest snapshots are encoded once before acquiring
+    # the writer lock; both immutable result copies use the same encoding.
+    snapshot_json, result_json = store._json(snapshot), store._json(result)
+    result_summary_json = store._json(store._result_summary(result))
+    metadata = {"result_digest":fingerprint,"server":target["host"],"directory":target["remote_directory"],"mode":row["mode"]}
+    metadata_json = store._json(metadata)
     with store._db() as db:
         db.execute("BEGIN IMMEDIATE")
         number = (db.execute("SELECT max(round_number) FROM scan_runs WHERE project_id=?", (target["project_id"],)).fetchone()[0] or 0) + 1
         db.execute("INSERT INTO inputs(input_id,project_id,name,path,content_hash,created_at,registered_by) VALUES(?,?,?,?,?,?,?)", (input_id, target["project_id"], "scheduled-result.json", "", "", now, "schedule-worker"))
-        db.execute("INSERT INTO scan_runs(run_id,project_id,round_number,status,standard,standard_category,input_id,policy_version,requested_by,snapshot_json,created_at,result_json,completed_at,progress,stage) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                   (run_id,target["project_id"],number,"completed",target["standard"],target["standard_category"],input_id,context["policy"]["version"],"schedule-worker",store._json(snapshot),now,store._json(result),now,100,"completed"))
-        db.execute("INSERT INTO analysis_revisions(revision_id,run_id,sequence,snapshot_json,result_json,created_at) VALUES(?,?,?,?,?,?)", (revision_id,run_id,1,store._json(snapshot),store._json(result),now))
-        metadata = {"result_digest":fingerprint,"server":target["host"],"directory":target["remote_directory"],"mode":row["mode"]}
-        db.execute("UPDATE schedule_runs SET run_id=?,stage='persisted',files_total=?,changed_files=?,metadata_json=?,updated_at=? WHERE schedule_run_id=?", (run_id,counts["files_total"],counts["changed_files"],store._json(metadata),now,row["schedule_run_id"]))
+        db.execute("INSERT INTO scan_runs(run_id,project_id,round_number,status,standard,standard_category,input_id,policy_version,requested_by,snapshot_json,created_at,result_json,result_summary_json,completed_at,progress,stage) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (run_id,target["project_id"],number,"completed",target["standard"],target["standard_category"],input_id,context["policy"]["version"],"schedule-worker",snapshot_json,now,result_json,result_summary_json,now,100,"completed"))
+        db.execute("INSERT INTO analysis_revisions(revision_id,run_id,sequence,snapshot_json,result_json,created_at) VALUES(?,?,?,?,?,?)", (revision_id,run_id,1,snapshot_json,result_json,now))
+        db.execute("UPDATE schedule_runs SET run_id=?,stage='persisted',files_total=?,changed_files=?,metadata_json=?,updated_at=? WHERE schedule_run_id=?", (run_id,counts["files_total"],counts["changed_files"],metadata_json,now,row["schedule_run_id"]))
         # Baseline commits with the result. New collection remains blocked by
         # the lease until cleanup is acknowledged.
         db.execute("DELETE FROM schedule_files WHERE target_id=?", (target["target_id"],))
@@ -346,6 +355,10 @@ def _persist(store, row, context, payload):
 
 
 def _tick(store):
+    if os.environ.get("KODA_PORTAL_EXTERNAL_WORKER") == "1":
+        # Completed schedule rows form the durable delivery queue. The
+        # dedicated delivery owner handles recovery, publication and retention.
+        return
     def deliver():
         from .schedule_worker import ScheduleRunner
         try:

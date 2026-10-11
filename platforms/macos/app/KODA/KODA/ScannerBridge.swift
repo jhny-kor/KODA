@@ -5072,11 +5072,11 @@ private enum NativeWebScanner {
         "returnto", "return_to", "dest", "destination", "continue", "redir", "goto", "u", "r",
     ]
     private static let activeOOBHost = "koda-open-redirect.example"
-    // SSTI: each payload targets a different template syntax; all share the same
-    // inner expression so one check (result present, literal absent) covers them.
+    // SSTI: each syntax needs two distinct evaluated expressions and a clean
+    // control response before it is reported.
     private static let sstiExpr = "1337*1337"
     private static let sstiResult = "1787569"
-    private static let sstiPayloads = ["{{1337*1337}}", "${1337*1337}", "<%= 1337*1337 %>", "#{1337*1337}"]
+    private static let sstiPayloads = ["{{1337*1337}}", "${1337*1337}", "<%= 1337*1337 %>", "#{1337*1337}", "*{1337*1337}", "@(1337*1337)"]
     private static let injectableHeaders = ["Referer", "X-Forwarded-For"]
     // Intrusive time-delay payloads: {n} is the delay in seconds. Benign sleep
     // proof only — no data-altering payloads.
@@ -5095,11 +5095,25 @@ private enum NativeWebScanner {
         ("${31337-1}", "Freemarker/JSP-EL (${...})"),
         ("<%= 31337-1 %>", "ERB/JSP (<%= %>)"),
         ("#{31337-1}", "Ruby/EL (#{...})"),
+        ("*{31337-1}", "Thymeleaf (*{...})"),
+        ("@(31337-1)", "Razor (@(...))"),
     ]
 
     /// True when the SSTI product appears but its literal does not (evaluated, not echoed).
     private static func sstiEvaluated(_ body: String) -> Bool {
         body.contains(sstiResult) && !body.contains(sstiExpr)
+    }
+
+    private static func sstiConfirmed(
+        payload: String, proof: String, send: (String) async -> String?
+    ) async -> Bool {
+        guard let first = await send(payload), sstiEvaluated(first),
+              let second = await send(proof), second.contains("31336"), !second.contains("31337-1"),
+              let control = await send("koda-ssti-control-\(UUID().uuidString)"),
+              !control.contains(sstiResult), !control.contains("31336") else {
+            return false
+        }
+        return true
     }
 
     /// True when `marker` is reflected inside an inline <script> block.
@@ -5225,13 +5239,14 @@ private enum NativeWebScanner {
                 }
             }
             // SSTI: template expressions that only resolve if evaluated server-side.
-            for payload in sstiPayloads {
-                if let target = withQueryParam(url, name, payload),
-                   let body = await probeBody(target, session: session, options: options, jar: jar, timeout: timeout),
-                   sstiEvaluated(body) {
+            for (index, payload) in sstiPayloads.enumerated() {
+                if await sstiConfirmed(payload: payload, proof: sstiProof[index].0, send: { value in
+                    guard let target = withQueryParam(url, name, value) else { return nil }
+                    return await probeBody(target, session: session, options: options, jar: jar, timeout: timeout)
+                }) {
                     findings.append(finding("web.ssti-verified", "high",
                         "입력의 템플릿 표현식이 서버에서 평가됨 (SSTI)", url.absoluteString,
-                        evidence: "param '\(name)': \(payload) -> \(sstiResult)",
+                        evidence: "param '\(name)': \(payload) -> \(sstiResult), \(sstiProof[index].0) -> 31336; 대조 요청에는 결과 없음",
                         recommendation: "사용자 입력을 템플릿으로 렌더링하지 말고 샌드박스 엔진에 데이터로 전달하세요."))
                     break
                 }
@@ -5361,12 +5376,13 @@ private enum NativeWebScanner {
                     evidence: "request header '\(headerName)'가 마커를 인코딩 없이 반사함",
                     recommendation: "출력 시 컨텍스트 인코딩을 적용하고 엄격한 CSP를 설정하세요."))
             }
-            for payload in sstiPayloads {
-                if let body = await probeBody(url, extraHeader: (headerName, payload), session: session, options: options, jar: jar, timeout: timeout),
-                   sstiEvaluated(body) {
+            for (index, payload) in sstiPayloads.enumerated() {
+                if await sstiConfirmed(payload: payload, proof: sstiProof[index].0, send: { value in
+                    await probeBody(url, extraHeader: (headerName, value), session: session, options: options, jar: jar, timeout: timeout)
+                }) {
                     findings.append(finding("web.ssti-verified", "high",
                         "입력의 템플릿 표현식이 서버에서 평가됨 (SSTI)", url.absoluteString,
-                        evidence: "request header '\(headerName)': \(payload) -> \(sstiResult)",
+                        evidence: "request header '\(headerName)': \(payload) -> \(sstiResult), \(sstiProof[index].0) -> 31336; 대조 요청에는 결과 없음",
                         recommendation: "사용자 입력을 템플릿으로 렌더링하지 말고 샌드박스 엔진에 데이터로 전달하세요."))
                     break
                 }

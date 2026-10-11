@@ -4,6 +4,7 @@ import base64
 import datetime as dt
 import json
 import os
+import secrets
 from pathlib import Path
 import tempfile
 import uuid
@@ -12,6 +13,7 @@ import uuid
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=0)
+    parser.add_argument('--metadata', type=Path, default=Path('output/playwright/sample-preview.json'))
     args = parser.parse_args()
     for key in list(os.environ):
         if key.startswith('KODA_'):
@@ -19,12 +21,14 @@ def main():
     from security_scanner.linux_portal import create_portal_server
     from security_scanner.schedule_api import _job_context
     root = tempfile.TemporaryDirectory(prefix='koda-sample-ui-')
-    server = create_portal_server('127.0.0.1', args.port, db_path=Path(root.name)/'sample.sqlite3', input_dir=Path(root.name)/'inputs')
+    gateway_proof = secrets.token_urlsafe(48)
+    server = create_portal_server('127.0.0.1', args.port, db_path=Path(root.name)/'sample.sqlite3', input_dir=Path(root.name)/'inputs', gateway_proof=gateway_proof)
     store = server.portal_store
     admin = str(uuid.uuid4())
     store.bootstrap(admin)
     store.ensure_subject(admin, 'sample.admin')
     project = store.create_project('샘플 · 결제 서비스 보안 점검', admin)
+    disposable_project = store.create_project('샘플 · 삭제 기능 확인용 빈 프로젝트', admin)
     users = []
     for login in ('sample.uploader', 'sample.operator', 'sample.viewer'):
         subject = str(uuid.uuid4())
@@ -39,6 +43,37 @@ def main():
     store.complete_run(run['run_id'], result={'findings': [], 'summary': {'total': 0}})
     source.unlink(missing_ok=True)
     mapping = store.set_gitlab_repositories(project, [dict(gitlab_project_id=101, path_with_namespace='sample-platform/payment-service-security-inspection', name='샘플 결제 서비스', default_branch='main', tracker_service_id='sample-service', tracker_environment_id='sample-environment', tracker_token_ref='sample-no-token')])[0]
+    # Enough rows to exercise page-size changes and a branch comparison without
+    # contacting GitLab or starting a scanner/worker.
+    comparison_ids = []
+    for index in range(24):
+        archive_root = 'payment-main-a1b2c3' if index % 2 == 0 else 'payment-feature-d4e5f6'
+        source = Path(root.name) / f'{archive_root}-{index}.tar.gz'
+        source.write_text('# isolated preview fixture\n')
+        input_id = store.add_input(project, source.name, source, users[0])
+        snapshot = dict(gitlab_mapping_id=mapping['mapping_id'], gitlab_project_id=101,
+            gitlab_path_with_namespace=mapping['path_with_namespace'],
+            gitlab_ref_type='branch', gitlab_ref_name='main' if index % 2 == 0 else 'feature/payment',
+            gitlab_commit_sha=('a' if index % 2 == 0 else 'b') * 40,
+            gitlab_archive_root=archive_root, gitlab_default_branch='main')
+        manual_run = store.create_scan(users[1], project, input_id, 'local', 'all', 'source', source_snapshot=snapshot)
+        findings = [dict(rule_id='sample-sql-injection', category='code', severity='high',
+            title='[샘플] SQL 매개변수 처리 확인', path=f'{archive_root}/services/payment-api/src/payment.py',
+            line=42, evidence='query = "SELECT ..." + user_input', recommendation='매개변수화된 쿼리를 사용하세요.')]
+        store.complete_run(manual_run['run_id'], result={'findings': findings, 'summary': {'total': 1, 'high': 1}})
+        with store._db() as db:
+            db.execute("UPDATE tracker_deliveries SET status='skipped',gitlab_result_status='completed',gitlab_merge_request_url=? WHERE run_id=?",
+                (f'https://gitlab.example.invalid/{mapping["path_with_namespace"]}/-/merge_requests/{index+11}', manual_run['run_id']))
+        store.claim_gitlab_issue_delivery(manual_run['run_id'])
+        key = f'sample-finding-{index}'
+        store.prepare_gitlab_issue_items(manual_run['run_id'], 101, [{'finding_key': key, 'finding_index': 0}])
+        store.claim_gitlab_issue_item(manual_run['run_id'], key)
+        store.finish_gitlab_issue_item(manual_run['run_id'], key, 'created', issue_iid=index+41,
+            issue_url=f'https://gitlab.example.invalid/{mapping["path_with_namespace"]}/-/issues/{index+41}')
+        store.finish_gitlab_issue_delivery(manual_run['run_id'])
+        if index < 2:
+            comparison_ids.append(manual_run['run_id'])
+        source.unlink(missing_ok=True)
     connection = store.save_server_connection(dict(name='샘플 운영 서버', host='sample-production.example.invalid', port=22, username='sample-reader', ssh_key_ref='/run/koda/ssh/sample-key', known_hosts_file='/run/koda/ssh/sample-known-hosts', project_ids=[project]), admin)
     detail_ids = []
     for i, (name, kind, scope, status) in enumerate([
@@ -73,7 +108,7 @@ def main():
             store.complete_run(run_id,result=dict(findings=findings,sbom={'components':[]},summary={'total':len(findings),'high':1 if findings else 0,'medium':1 if findings else 0},analysis_stages={'source':{'status':'completed','finding_count':len(findings)},'library':{'status':'skipped' if scope=='source' else 'completed','finding_count':0},'quality':{'status':'skipped','finding_count':0}}))
             source.unlink(missing_ok=True)
             with store._db() as db:
-                db.execute("UPDATE tracker_deliveries SET status=?,gitlab_result_status='completed' WHERE run_id=?",('skipped' if scope=='source' else 'completed',run_id))
+                db.execute("UPDATE tracker_deliveries SET status=?,gitlab_result_status='completed',gitlab_merge_request_url=? WHERE run_id=?",('skipped' if scope=='source' else 'completed',f'https://gitlab.example.invalid/{mapping["path_with_namespace"]}/-/merge_requests/{100+i}',run_id))
                 db.execute("UPDATE gitlab_issue_deliveries SET status='completed' WHERE run_id=?",(run_id,))
         store.update_schedule_run(scheduled['schedule_run_id'],run_id=run_id,status=status,stage=status,
             cleanup_status='failed' if i==5 else 'pending' if status=='queued' else 'completed',
@@ -86,11 +121,12 @@ def main():
     class SampleHandler(original):
         def parse_request(self):
             if not super().parse_request(): return False
-            for key in ('X-KODA-Identity-ID','X-KODA-Identity-Expires','X-KODA-Identity-Display'):
+            for key in ('X-KODA-Identity-ID','X-KODA-Identity-Expires','X-KODA-Identity-Display','X-KODA-Gateway-Proof'):
                 if key in self.headers: del self.headers[key]
             self.headers['X-KODA-Identity-ID']=admin
             self.headers['X-KODA-Identity-Expires']=(dt.datetime.now(dt.timezone.utc)+dt.timedelta(hours=1)).isoformat()
             self.headers['X-KODA-Identity-Display']=base64.urlsafe_b64encode('sample.admin'.encode()).decode().rstrip('=')
+            self.headers['X-KODA-Gateway-Proof']=gateway_proof
             return True
         sample_branches = ['main', 'release/2026-09-payment-security-improvements']
         def do_GET(self):
@@ -99,15 +135,17 @@ def main():
                 return self._json(200, [{'name': name} for name in names])
             return super().do_GET()
         def do_POST(self):
-            if self.path not in {'/koda/api/v1/admin/schedules', '/koda/api/v1/admin/schedule-settings', '/koda/api/v1/admin/memberships', '/koda/api/v1/admin/server-connections'}:
+            if self.path not in {'/koda/api/v1/admin/schedules', '/koda/api/v1/admin/schedule-settings', '/koda/api/v1/admin/memberships', '/koda/api/v1/admin/server-connections', '/koda/api/v1/admin/roles', '/koda/api/v1/admin/rules', '/koda/api/v1/projects'}:
                 return self._json(403, {'detail':'샘플 미리보기에서는 실제 점검·외부 연동 실행을 지원하지 않습니다.'})
             return super().do_POST()
         def do_DELETE(self):
+            if self.path.startswith('/koda/api/v1/projects/') and len(self.path.strip('/').split('/')) == 5:
+                return super().do_DELETE()
             return self._json(403, {'detail':'샘플 미리보기입니다.'})
     server.RequestHandlerClass=SampleHandler
-    output=Path('output/playwright');output.mkdir(parents=True,exist_ok=True)
+    args.metadata.parent.mkdir(parents=True,exist_ok=True)
     url=f'http://127.0.0.1:{server.server_address[1]}'
-    (output/'sample-preview.json').write_text(json.dumps({'url':url,'details':detail_ids,'project_id':project},indent=2))
+    args.metadata.write_text(json.dumps({'url':url,'details':detail_ids,'comparison_ids':comparison_ids,'project_id':project,'disposable_project_id':disposable_project},indent=2))
     print(url,flush=True)
     try: server.serve_forever()
     finally: server.server_close();root.cleanup()

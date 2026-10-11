@@ -19,6 +19,39 @@ fi
 dashboard_name="koda-dashboard"
 dashboard_network="koda-dashboard"
 schedule_worker_name="koda-schedule-worker"
+scan_worker_name="koda-scan-worker"
+delivery_worker_name="koda-delivery-worker"
+
+portal_worker_is_owned() {
+  local name="$1" offline_label
+  docker container inspect "$name" >/dev/null 2>&1 || return 1
+  offline_label="$(docker inspect -f '{{index .Config.Labels "io.koda.offline"}}' "$name")"
+  if [ "$offline_label" != true ]; then
+    echo "error: refusing to replace foreign container named $name" >&2
+    exit 2
+  fi
+}
+
+stop_portal_worker() {
+  local name="$1"
+  if portal_worker_is_owned "$name"; then
+    # SIGTERM lets the supervisor reap its analysis process group before Docker
+    # reaches the finite stop deadline. The persisted job is recovered on start.
+    docker stop --time "${KODA_WORKER_STOP_TIMEOUT_SECONDS:-20}" "$name" >/dev/null
+    docker rm "$name" >/dev/null
+  fi
+}
+
+portal_container_current() {
+  local name="$1" role="$2" current_image target_image current_role
+  current_image="$(docker inspect -f '{{.Image}}' "$name")"
+  target_image="$(docker image inspect -f '{{.Id}}' "$image")" || {
+    echo "error: KODA image is not loaded: $image" >&2
+    exit 2
+  }
+  current_role="$(docker inspect -f '{{index .Config.Labels "io.koda.portal-role"}}' "$name")"
+  [ "$current_image" = "$target_image" ] && [ "$current_role" = "$role" ]
+}
 
 dashboard_is_owned() {
   local offline_label
@@ -55,6 +88,15 @@ read-write) are bind-mounted automatically at the same absolute path.
 Environment:
   KODA_IMAGE            image reference, default from image-ref.txt
   KODA_CPUS             default 2
+  KODA_SCAN_CPUS        portal scan worker CPU limit, default 1
+  KODA_SCAN_MEMORY      portal scan worker memory limit, default 4g
+  KODA_DELIVERY_CPUS    portal delivery worker CPU limit, default 0.5
+  KODA_DELIVERY_MEMORY  portal delivery worker memory limit, default 512m
+  KODA_SCAN_TIMEOUT_SECONDS analysis time limit, default 21600
+  KODA_SCAN_TERMINATE_GRACE_SECONDS analysis termination grace, default 3
+  KODA_WORKER_STOP_TIMEOUT_SECONDS Docker stop deadline, default 20
+  KODA_PORTAL_REPORT_TIMEOUT_SECONDS report rendering time limit, default 90
+  KODA_PORTAL_REPORT_MEMORY_BYTES report child memory limit, default 2147483648
   KODA_SCHEDULE_CPUS    schedule worker CPU limit, default 1
   KODA_SCHEDULE_MEMORY  schedule worker memory limit, default 4g
   KODA_SCHEDULE_RATE_BYTES maximum collection rate, default 5242880
@@ -79,10 +121,12 @@ Environment:
   KODA_TRACKER_PROVISIONING_TOKEN_FILE shared Tracker provisioning token file
   KODA_TRACKER_RESULT_TIMEOUT_SECONDS analysis-result wait limit, default 900
   KODA_JSON_MAX_BYTES  scheduled API JSON limit, default 524288000
+  KODA_GATEWAY_PROOF   gateway-to-portal identity proof (at least 32 characters)
+  KODA_PORTAL_UPLOAD_QUOTA_BYTES total retained portal input limit, default 10737418240
   KODA_TRACKER_CA_FILE   optional private CA bundle for Tracker
   KODA_SCHEDULE_ENABLED  set 1 to start the nightly remote-directory worker (default 0)
   KODA_SCHEDULE_SSH_DIR  host directory containing read-only SSH keys and known_hosts
-  KODA_DOCKER_EXTRA_ARGS extra docker run options, whitespace-separated
+  KODA_DOCKER_EXTRA_ARGS extra CLI/dashboard options, whitespace-separated (workers do not inherit)
 EOF
 }
 
@@ -233,7 +277,7 @@ dashboard_start() {
   local portal_data="${KODA_PORTAL_DATA_DIR:-$script_dir/data/portal}"
   local schedule_ssh_dir="${KODA_SCHEDULE_SSH_DIR:-}"
   local run_network="$dashboard_network" run_network_arg server_major
-  local dashboard_running=0 worker_running=0
+  local dashboard_running=0 worker_running=0 scan_running=0 delivery_running=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --reports) reports="${2:-}"; shift 2 ;;
@@ -260,15 +304,32 @@ dashboard_start() {
       exit 2
     }
   fi
+  # Audit all names before deleting any owned container.
+  dashboard_is_owned || true
+  schedule_worker_is_owned || true
+  portal_worker_is_owned "$scan_worker_name" || true
+  portal_worker_is_owned "$delivery_worker_name" || true
   if dashboard_is_owned; then
-    if docker ps --format '{{.Names}}' | grep -qx "$dashboard_name"; then
+    if docker ps --format '{{.Names}}' | grep -qx "$dashboard_name" && portal_container_current "$dashboard_name" web; then
       dashboard_running=1
     else
+      stop_portal_worker "$scan_worker_name"
+      stop_portal_worker "$delivery_worker_name"
       docker rm -f "$dashboard_name" >/dev/null
     fi
   fi
+  for role in scan delivery; do
+    local name="koda-${role}-worker"
+    if portal_worker_is_owned "$name"; then
+      if docker ps --format '{{.Names}}' | grep -qx "$name" && portal_container_current "$name" "$role"; then
+        if [ "$role" = scan ]; then scan_running=1; else delivery_running=1; fi
+      else
+        stop_portal_worker "$name"
+      fi
+    fi
+  done
   if schedule_worker_is_owned; then
-    if [ "${KODA_SCHEDULE_ENABLED:-0}" = "1" ] && docker ps --format '{{.Names}}' | grep -qx "$schedule_worker_name"; then
+    if [ "${KODA_SCHEDULE_ENABLED:-0}" = "1" ] && docker ps --format '{{.Names}}' | grep -qx "$schedule_worker_name" && portal_container_current "$schedule_worker_name" schedule; then
       worker_running=1
     else
       docker rm -f "$schedule_worker_name" >/dev/null
@@ -304,7 +365,7 @@ dashboard_start() {
       run_network_arg="name=$run_network,gw-priority=1"
     fi
   fi
-  local run_opts=(-d --name "$dashboard_name" --network "$run_network_arg")
+  local run_opts=(-d --name "$dashboard_name" --network "$run_network_arg" --restart unless-stopped --init --label io.koda.portal-role=web)
   while IFS= read -r line; do run_opts+=("$line"); done < <(base_run_opts)
   # -d and --rm conflict with container inspection after exit; drop --rm.
   local filtered=() opt
@@ -316,12 +377,13 @@ dashboard_start() {
   fi
   mkdir -p "$portal_data"
   portal_data="$(realpath "$portal_data")"
-  filtered+=(
+  local portal_data_opts=(
     -v "$portal_data:/var/lib/koda:rw"
     -e KODA_PORTAL_DATA_DIR=/var/lib/koda
     -e KODA_PORTAL_DB=/var/lib/koda/portal.sqlite3
     -e KODA_PORTAL_INPUT_DIR=/var/lib/koda/inputs
   )
+  filtered+=("${portal_data_opts[@]}" -e KODA_PORTAL_EXTERNAL_WORKER=1)
   if [ -n "$schedule_ssh_dir" ]; then
     filtered+=(-v "$schedule_ssh_dir:/run/koda/ssh:ro")
   fi
@@ -343,44 +405,50 @@ dashboard_start() {
     filtered+=(-v "$schedule_auth:/run/koda/schedule:ro"
       -e KODA_SCHEDULE_API_TOKEN_FILE=/run/koda/schedule/token)
   fi
+  local integration_opts=()
   if [ -n "${KODA_SSBOM_TRACKER_URL:-}" ]; then
     filtered+=(-e "KODA_SSBOM_TRACKER_URL=${KODA_SSBOM_TRACKER_URL}")
   fi
-  [ -z "${KODA_GITLAB_URL:-}" ] || filtered+=(-e "KODA_GITLAB_URL=${KODA_GITLAB_URL}")
-  [ -z "${KODA_TRACKER_URL:-}" ] || filtered+=(-e "KODA_TRACKER_URL=${KODA_TRACKER_URL}")
-  [ -z "${KODA_TRACKER_RESULT_TIMEOUT_SECONDS:-}" ] || filtered+=(-e "KODA_TRACKER_RESULT_TIMEOUT_SECONDS=${KODA_TRACKER_RESULT_TIMEOUT_SECONDS}")
-  [ -z "${KODA_JSON_MAX_BYTES:-}" ] || filtered+=(-e "KODA_JSON_MAX_BYTES=${KODA_JSON_MAX_BYTES}")
+  [ -z "${KODA_GITLAB_URL:-}" ] || integration_opts+=(-e "KODA_GITLAB_URL=${KODA_GITLAB_URL}")
+  [ -z "${KODA_TRACKER_URL:-}" ] || integration_opts+=(-e "KODA_TRACKER_URL=${KODA_TRACKER_URL}")
+  [ -z "${KODA_TRACKER_RESULT_TIMEOUT_SECONDS:-}" ] || integration_opts+=(-e "KODA_TRACKER_RESULT_TIMEOUT_SECONDS=${KODA_TRACKER_RESULT_TIMEOUT_SECONDS}")
+  [ -z "${KODA_JSON_MAX_BYTES:-}" ] || integration_opts+=(-e "KODA_JSON_MAX_BYTES=${KODA_JSON_MAX_BYTES}")
+  [ -z "${KODA_GATEWAY_PROOF:-}" ] || filtered+=(-e "KODA_GATEWAY_PROOF=${KODA_GATEWAY_PROOF}")
+  [ -z "${KODA_PORTAL_UPLOAD_QUOTA_BYTES:-}" ] || filtered+=(-e "KODA_PORTAL_UPLOAD_QUOTA_BYTES=${KODA_PORTAL_UPLOAD_QUOTA_BYTES}")
+  [ -z "${KODA_PORTAL_REPORT_TIMEOUT_SECONDS:-}" ] || filtered+=(-e "KODA_PORTAL_REPORT_TIMEOUT_SECONDS=${KODA_PORTAL_REPORT_TIMEOUT_SECONDS}")
+  [ -z "${KODA_PORTAL_REPORT_MEMORY_BYTES:-}" ] || filtered+=(-e "KODA_PORTAL_REPORT_MEMORY_BYTES=${KODA_PORTAL_REPORT_MEMORY_BYTES}")
   local source_path
   if [ -n "${KODA_GITLAB_TOKEN_FILE:-}" ]; then
     source_path="$(realpath "$KODA_GITLAB_TOKEN_FILE")"
     [ -f "$source_path" ] && [ -r "$source_path" ] || { echo "error: GitLab token file is not readable by uid $(id -u)" >&2; exit 2; }
-    filtered+=(-v "$source_path:/run/secrets/koda-gitlab-token:ro" -e KODA_GITLAB_TOKEN_FILE=/run/secrets/koda-gitlab-token)
+    integration_opts+=(-v "$source_path:/run/secrets/koda-gitlab-token:ro" -e KODA_GITLAB_TOKEN_FILE=/run/secrets/koda-gitlab-token)
   fi
   if [ -n "${KODA_GITLAB_WRITE_TOKEN_FILE:-}" ]; then
     source_path="$(realpath "$KODA_GITLAB_WRITE_TOKEN_FILE")"
     [ -f "$source_path" ] && [ -r "$source_path" ] || { echo "error: GitLab write token file is not readable by uid $(id -u)" >&2; exit 2; }
-    filtered+=(-v "$source_path:/run/secrets/koda-gitlab-write-token:ro" -e KODA_GITLAB_WRITE_TOKEN_FILE=/run/secrets/koda-gitlab-write-token)
+    integration_opts+=(-v "$source_path:/run/secrets/koda-gitlab-write-token:ro" -e KODA_GITLAB_WRITE_TOKEN_FILE=/run/secrets/koda-gitlab-write-token)
   fi
   if [ -n "${KODA_TRACKER_TOKEN_DIR:-}" ]; then
     source_path="$(realpath "$KODA_TRACKER_TOKEN_DIR")"
     [ -d "$source_path" ] && [ -r "$source_path" ] && [ -w "$source_path" ] && [ -x "$source_path" ] || { echo "error: Tracker token directory is not private and writable by uid $(id -u)" >&2; exit 2; }
-    filtered+=(-v "$source_path:/run/koda/tracker-tokens:rw" -e KODA_TRACKER_TOKEN_DIR=/run/koda/tracker-tokens)
+    integration_opts+=(-v "$source_path:/run/koda/tracker-tokens:rw" -e KODA_TRACKER_TOKEN_DIR=/run/koda/tracker-tokens)
   fi
   if [ -n "${KODA_TRACKER_PROVISIONING_TOKEN_FILE:-}" ]; then
     source_path="$(realpath "$KODA_TRACKER_PROVISIONING_TOKEN_FILE")"
     [ -f "$source_path" ] && [ -r "$source_path" ] || { echo "error: Tracker provisioning token file is not readable by uid $(id -u)" >&2; exit 2; }
-    filtered+=(-v "$source_path:/run/secrets/koda-tracker-provisioning:ro" -e KODA_TRACKER_PROVISIONING_TOKEN_FILE=/run/secrets/koda-tracker-provisioning)
+    integration_opts+=(-v "$source_path:/run/secrets/koda-tracker-provisioning:ro" -e KODA_TRACKER_PROVISIONING_TOKEN_FILE=/run/secrets/koda-tracker-provisioning)
   fi
   if [ -n "${KODA_GITLAB_CA_FILE:-}" ]; then
     source_path="$(realpath "$KODA_GITLAB_CA_FILE")"
     [ -f "$source_path" ] || { echo "error: GitLab CA file not found" >&2; exit 2; }
-    filtered+=(-v "$source_path:/run/secrets/koda-gitlab-ca.pem:ro" -e KODA_GITLAB_CA_FILE=/run/secrets/koda-gitlab-ca.pem)
+    integration_opts+=(-v "$source_path:/run/secrets/koda-gitlab-ca.pem:ro" -e KODA_GITLAB_CA_FILE=/run/secrets/koda-gitlab-ca.pem)
   fi
   if [ -n "${KODA_TRACKER_CA_FILE:-}" ]; then
     source_path="$(realpath "$KODA_TRACKER_CA_FILE")"
     [ -f "$source_path" ] || { echo "error: Tracker CA file not found" >&2; exit 2; }
-    filtered+=(-v "$source_path:/run/secrets/koda-tracker-ca.pem:ro" -e KODA_TRACKER_CA_FILE=/run/secrets/koda-tracker-ca.pem)
+    integration_opts+=(-v "$source_path:/run/secrets/koda-tracker-ca.pem:ro" -e KODA_TRACKER_CA_FILE=/run/secrets/koda-tracker-ca.pem)
   fi
+  if [ "${#integration_opts[@]}" -gt 0 ]; then filtered+=("${integration_opts[@]}"); fi
   if [ -n "$reports" ]; then
     mkdir -p "$reports"
     reports="$(realpath "$reports")"
@@ -394,6 +462,53 @@ dashboard_start() {
     docker run "${docker_opts[@]}" "$image" \
       serve --host 0.0.0.0 --port 8765 >/dev/null
   fi
+  if [ "$dashboard_running" = "0" ] && [ "$run_network" != "$dashboard_network" ] && ! docker network connect "$dashboard_network" "$dashboard_name"; then
+    docker rm -f "$dashboard_name" >/dev/null 2>&1 || true
+    echo "error: could not connect dashboard to $dashboard_network" >&2
+    exit 2
+  fi
+  for role in scan delivery; do
+    if [ "$role" = scan ] && [ "$scan_running" = 1 ]; then continue; fi
+    if [ "$role" = delivery ] && [ "$delivery_running" = 1 ]; then continue; fi
+    local name="koda-${role}-worker" role_cpus role_memory worker_network
+    if [ "$role" = scan ]; then
+      role_cpus="${KODA_SCAN_CPUS:-1}"
+      role_memory="${KODA_SCAN_MEMORY:-4g}"
+      worker_network=none
+    else
+      role_cpus="${KODA_DELIVERY_CPUS:-0.5}"
+      role_memory="${KODA_DELIVERY_MEMORY:-512m}"
+      worker_network="$run_network_arg"
+    fi
+    local portal_worker_opts=(-d --name "$name" --network "$worker_network"
+      --init --restart unless-stopped --label "io.koda.portal-role=$role"
+      --stop-timeout "${KODA_WORKER_STOP_TIMEOUT_SECONDS:-20}"
+      --health-cmd '/opt/koda/bin/koda portal-worker --healthcheck'
+      --health-interval 30s --health-timeout 10s --health-start-period 60s --health-retries 3)
+    while IFS= read -r opt; do
+      [ "$opt" = --rm ] || portal_worker_opts+=("$opt")
+    done < <(KODA_CPUS="$role_cpus" KODA_MEMORY="$role_memory" base_run_opts)
+    portal_worker_opts+=("${portal_data_opts[@]}" -e "KODA_PORTAL_WORKER_ROLE=$role")
+    if [ "$role" = scan ]; then
+      portal_worker_opts+=(-e "KODA_SCAN_TIMEOUT_SECONDS=${KODA_SCAN_TIMEOUT_SECONDS:-21600}"
+        -e "KODA_SCAN_TERMINATE_GRACE_SECONDS=${KODA_SCAN_TERMINATE_GRACE_SECONDS:-3}")
+      if [ -n "$data_volume" ]; then
+        portal_worker_opts+=(-v "$data_volume:/var/lib/koda-vuln-data:ro" -e KODA_VULN_DATA_ROOT=/var/lib/koda-vuln-data)
+      fi
+    else
+      if [ "${#integration_opts[@]}" -gt 0 ]; then portal_worker_opts+=("${integration_opts[@]}"); fi
+    fi
+    if ! docker run "${portal_worker_opts[@]}" "$image" portal-worker >/dev/null; then
+      docker rm -f "$name" >/dev/null 2>&1 || true
+      echo "error: could not start $name" >&2
+      exit 2
+    fi
+    if [ "$role" = delivery ] && [ "$run_network" != "$dashboard_network" ] && ! docker network connect "$dashboard_network" "$name"; then
+      stop_portal_worker "$name"
+      echo "error: could not connect $name to $dashboard_network" >&2
+      exit 2
+    fi
+  done
   if [ "${KODA_SCHEDULE_ENABLED:-0}" = "1" ] && [ "$worker_running" = "0" ]; then
     # Only the worker needs outbound SSH; the dashboard bridge keeps its no-egress policy.
     local schedule_network="${dashboard_network}-schedule"
@@ -402,7 +517,7 @@ dashboard_start() {
     fi
     # Worker never inherits portal DB, uploads, reports, or publication credentials.
     local worker_opts=(-d --name "$schedule_worker_name" --network "$schedule_network"
-      --restart unless-stopped --label io.koda.offline=true --platform linux/amd64 --pull never --read-only
+      --restart unless-stopped --init --label io.koda.offline=true --label io.koda.portal-role=schedule --platform linux/amd64 --pull never --read-only
       --cap-drop ALL --security-opt no-new-privileges --pids-limit "${KODA_PIDS_LIMIT:-256}"
       --user "$(id -u):$(id -g)" --tmpfs "/tmp:rw,noexec,nosuid,size=${KODA_TMPFS_SIZE:-512m}"
       --cpus "${KODA_SCHEDULE_CPUS:-1}" --memory "${KODA_SCHEDULE_MEMORY:-4g}"
@@ -430,11 +545,6 @@ dashboard_start() {
       exit 2
     fi
   fi
-  if [ "$dashboard_running" = "0" ] && [ "$run_network" != "$dashboard_network" ] && ! docker network connect "$dashboard_network" "$dashboard_name"; then
-    docker rm -f "$schedule_worker_name" "$dashboard_name" >/dev/null 2>&1 || true
-    echo "error: could not connect dashboard to $dashboard_network" >&2
-    exit 2
-  fi
   if [ "${KODA_PUBLISH_DASHBOARD:-1}" = 1 ]; then
     echo "dashboard started: http://$bind:$port/koda/"
   else
@@ -459,6 +569,8 @@ case "${1:-}" in
         printf 'NAME\tSTATUS\tPORTS\n'
         docker ps --all --filter "name=^${dashboard_name}\$" --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
         docker ps --all --filter "name=^${schedule_worker_name}\$" --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
+        docker ps --all --filter "name=^${scan_worker_name}\$" --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
+        docker ps --all --filter "name=^${delivery_worker_name}\$" --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
         ;;
       logs) shift; docker logs ${1:+"$1"} "$dashboard_name" ;;
       bootstrap)
@@ -469,6 +581,13 @@ case "${1:-}" in
           --tracker-user-id "$2" --db /var/lib/koda/portal.sqlite3
         ;;
       stop)
+        # Complete the ownership audit before the first shutdown/removal.
+        dashboard_is_owned || true
+        schedule_worker_is_owned || true
+        portal_worker_is_owned "$scan_worker_name" || true
+        portal_worker_is_owned "$delivery_worker_name" || true
+        stop_portal_worker "$scan_worker_name"
+        stop_portal_worker "$delivery_worker_name"
         if schedule_worker_is_owned; then
           docker rm -f "$schedule_worker_name" >/dev/null
         fi

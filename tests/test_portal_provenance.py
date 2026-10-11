@@ -47,7 +47,7 @@ class PortalProvenanceTests(unittest.TestCase):
 
     def test_admin_sees_other_users_audit_and_username_not_uuid(self):
         with tempfile.TemporaryDirectory() as root:
-            server = create_portal_server('127.0.0.1', 0, db_path=Path(root)/'db', input_dir=Path(root)/'inputs')
+            server = create_portal_server('127.0.0.1', 0, db_path=Path(root)/'db', input_dir=Path(root)/'inputs', gateway_proof='test-gateway-proof-0123456789abcdef0123456789abcdef')
             admin, other = str(uuid.uuid4()), str(uuid.uuid4())
             store = server.portal_store
             store.bootstrap(admin)
@@ -57,7 +57,8 @@ class PortalProvenanceTests(unittest.TestCase):
             thread.start()
             try:
                 def get(path, actor=admin, username='admin.user'):
-                    headers = {'X-KODA-Identity-ID': actor,
+                    headers = {'X-KODA-Gateway-Proof': 'test-gateway-proof-0123456789abcdef0123456789abcdef',
+                               'X-KODA-Identity-ID': actor,
                                'X-KODA-Identity-Expires': (dt.datetime.now(dt.timezone.utc)+dt.timedelta(minutes=5)).isoformat(),
                                'X-KODA-Identity-Display': base64.urlsafe_b64encode(username.encode()).decode().rstrip('=')}
                     request = urllib.request.Request(f'http://127.0.0.1:{server.server_port}'+path, headers=headers)

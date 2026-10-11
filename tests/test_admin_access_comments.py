@@ -11,6 +11,8 @@ from pathlib import Path
 
 from security_scanner.linux_portal import create_portal_server
 
+TEST_GATEWAY_PROOF = "test-gateway-proof-0123456789abcdef0123456789abcdef"
+
 
 class AdminAccessCommentTests(unittest.TestCase):
     def setUp(self):
@@ -20,6 +22,7 @@ class AdminAccessCommentTests(unittest.TestCase):
             "127.0.0.1", 0,
             db_path=Path(self.tmp.name) / "portal.sqlite3",
             input_dir=Path(self.tmp.name) / "inputs",
+            gateway_proof=TEST_GATEWAY_PROOF,
         )
         self.server.portal_store.bootstrap(self.admin)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -35,6 +38,7 @@ class AdminAccessCommentTests(unittest.TestCase):
     def headers(self, subject=None, display="admin"):
         encoded = base64.urlsafe_b64encode(display.encode()).rstrip(b"=").decode()
         return {
+            "X-KODA-Gateway-Proof": TEST_GATEWAY_PROOF,
             "X-KODA-Identity-ID": subject or self.admin,
             "X-KODA-Identity-Expires": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat(),
             "X-KODA-Identity-Display": encoded,

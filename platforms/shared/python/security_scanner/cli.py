@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .archive_input import prepare_input_target
 from .config import ConfigError, expand_path, load_config
-from .models import CATEGORIES, DEFAULT_CATEGORIES, SEVERITIES, ReportConfig, ScannerConfig, TargetConfig
+from .models import CATEGORIES, SEVERITIES, ReportConfig, ScannerConfig, TargetConfig
 from .reporting import filter_by_min_severity, render_html_pair, render_report, write_report
 from .scanner import SecurityScanner
 from .standards import (

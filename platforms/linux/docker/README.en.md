@@ -1,8 +1,8 @@
 # KODA Offline Docker Delivery
 
-> Updated 2026-10-11 against the local source checkout, including changes under
-> development. Publishing this documentation does not publish those source changes
-> or establish that GitHub main or previously built release images include them.
+> Updated 2026-10-11 against the validated source checkout. Product source, tests,
+> and build scripts are included in this GitHub publication. Previously built
+> release images are not updated by publishing source.
 > Confirm the deployed version and rebuild/validate the matching bundle before
 > relying on the checkout behavior described below.
 
@@ -15,7 +15,7 @@ global `PATH`.
 
 The following changes are under development in the 2026-10-11 checkout. Rebuild
 and validate the corresponding bundle before applying them to an existing
-installation; publishing the docs does not update its images or wrappers.
+installation; publishing source does not update its images or wrappers.
 
 - The suite generates `KODA_GATEWAY_PROOF` in its `.env`, preserves existing
   `[A-Za-z0-9_-]` values of 32–128 characters, writes the environment file with
@@ -65,7 +65,7 @@ physical x86_64 server or a native x86_64 kernel. Linux ARM64 was outside scope.
   and operational Suite upgrade/rollback remain unverified. Installer/rollback
   unit tests use Docker test doubles, not a live production upgrade.
 
-This GitHub documentation publication does not publish execution source or deploy
+This GitHub publication includes execution source, tests, and build scripts, but does not deploy
 runtime images. See the [verification summary](../../../docs/verification-2026-10-11.md)
 and confirm the installed version and matching bundle separately.
 

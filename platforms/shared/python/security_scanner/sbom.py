@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Iterable, Mapping
@@ -34,6 +35,17 @@ NIS_SBOM_COLUMNS = (
     "Vul. DB",
     "Vul. Info",
 )
+
+
+_CSV_FORMULA_PREFIX = re.compile(r"^[\s\ufeff\x00]*[=+\-@＝＋－＠]")
+
+
+def safe_csv_cell(value: object) -> str:
+    """Keep spreadsheet formulas inert in CSV exports intended for people."""
+    text = str(value or "")
+    if _CSV_FORMULA_PREFIX.match(text):
+        return "\t" + text
+    return text
 
 
 def cyclonedx_payload(components: tuple[DependencyComponent, ...] | list[DependencyComponent]) -> dict[str, object]:
@@ -118,9 +130,9 @@ def render_nis_sbom_rows(
         sbom_type=sbom_type,
     )
     output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=NIS_SBOM_COLUMNS, lineterminator="\r\n")
+    writer = csv.DictWriter(output, fieldnames=NIS_SBOM_COLUMNS, lineterminator="\r\n", quoting=csv.QUOTE_ALL)
     writer.writeheader()
-    writer.writerows(payload["rows"])
+    writer.writerows({column: safe_csv_cell(row[column]) for column in NIS_SBOM_COLUMNS} for row in payload["rows"])
     return "\ufeff" + output.getvalue()
 
 

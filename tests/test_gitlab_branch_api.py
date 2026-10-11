@@ -13,12 +13,14 @@ from unittest.mock import patch
 from security_scanner.linux_portal import create_portal_server
 from security_scanner.portal_integrations import create_gitlab_branch
 
+TEST_GATEWAY_PROOF = "test-gateway-proof-0123456789abcdef0123456789abcdef"
+
 
 class GitLabBranchApiTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.admin = str(uuid.uuid4())
-        self.server = create_portal_server("127.0.0.1", 0, db_path=Path(self.tmp.name) / "portal.sqlite3")
+        self.server = create_portal_server("127.0.0.1", 0, db_path=Path(self.tmp.name) / "portal.sqlite3", gateway_proof=TEST_GATEWAY_PROOF)
         store = self.server.portal_store
         store.bootstrap(self.admin)
         project = store.create_project("demo")
@@ -40,6 +42,7 @@ class GitLabBranchApiTests(unittest.TestCase):
 
     def headers(self, subject=None):
         return {
+            "X-KODA-Gateway-Proof": TEST_GATEWAY_PROOF,
             "X-KODA-Identity-ID": subject or self.admin,
             "X-KODA-Identity-Expires": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat(),
             "X-KODA-Identity-Display": base64.urlsafe_b64encode(b"admin").rstrip(b"=").decode(),

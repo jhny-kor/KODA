@@ -1,7 +1,7 @@
 # KODA macOS Install
 
-> As of **2026-10-11**, source behavior below is based on the local working tree,
-> including uncommitted development changes. This docs refresh does not establish
+> As of **2026-10-11**, source behavior below is included in this GitHub publication.
+> The validated worktree included uncommitted development changes. Publishing source does not establish
 > an App Store update, notarization, or production release validation. Check the installed
 > release before assuming feature availability.
 
@@ -95,7 +95,7 @@ The local working tree includes saved model connections, explanations, risk
 review, Python/Java/XML/JavaScript candidate previews, regression plans, Python
 impact search, and separate AI reports. AI requests use this Mac's loopback server
 and do not automatically change original source. These features require the
-unpublished development files and a separate ad-hoc development build. See the
+the published development source and a separate ad-hoc development build. See the
 [local AI development guide](../macos-local-ai.md) for commands, data sent, tool
 requirements, and verification limits.
 

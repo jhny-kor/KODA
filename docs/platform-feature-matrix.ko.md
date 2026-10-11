@@ -1,6 +1,6 @@
 # KODA OS별 전체 기능 구현표
 
-기준일: **2026-10-11 (Asia/Seoul)**. 현재 로컬 작업 트리의 소스와 사용자에게 제공되는 실행 경로를 기준으로 한다. 기능은 메뉴·명령·포털 작업 단위로 정리했으며, 개별 탐지 규칙을 모두 별도 행으로 나열하지 않는다. **이번 GitHub 게시에는 문서만 포함하며 표에 반영된 로컬 개발 코드·수정·테스트는 별도 미게시 상태다.** [현재 상태](current-status.ko.md)와 [검증 기록](verification-2026-10-11.ko.md)을 함께 확인한다.
+기준일: **2026-10-11 (Asia/Seoul)**. 현재 로컬 작업 트리의 소스와 사용자에게 제공되는 실행 경로를 기준으로 한다. 기능은 메뉴·명령·포털 작업 단위로 정리했으며, 개별 탐지 규칙을 모두 별도 행으로 나열하지 않는다. **이번 GitHub 게시에는 표에 반영된 제품 소스·테스트·빌드 스크립트와 문서를 포함한다. Java 자산·바이너리·Docker 이미지·원시 로그는 제외하며 운영·App Store 배포와는 별개다.** [현재 상태](current-status.ko.md)와 [검증 기록](verification-2026-10-11.ko.md)을 함께 확인한다.
 
 **O = 해당 OS의 제품 실행 경로에 구현됨. X = 해당 실행 경로에 구현되지 않음.** O는 실제 OS에서의 실행 검증 완료, 모든 입력의 탐지 성공 또는 보안 기준 전체 준수를 의미하지 않는다. 계획·체크리스트 생성은 해당 문서 생성 기능만 O로 표시한다.
 
@@ -154,7 +154,7 @@
 ## 소스 근거와 상세 안내
 
 - macOS 기능 진입점: [ContentView.swift](../platforms/macos/app/KODA/KODA/ContentView.swift), [ScannerBridge.swift](../platforms/macos/app/KODA/KODA/ScannerBridge.swift), [NativeSecurityScanner.swift](../platforms/macos/app/KODA/KODA/NativeSecurityScanner.swift), [BundledJavaArchiveScanner.swift](../platforms/macos/app/KODA/KODA/BundledJavaArchiveScanner.swift).
-- macOS 로컬 AI: 미게시 개발 파일 `LocalAIView.swift`와 `NativeLocalAI*` 구현은 [로컬 AI 가이드](macos-local-ai.ko.md)에 설명한다.
+- macOS 로컬 AI: 이번 GitHub 게시에 포함된 개발 소스 `LocalAIView.swift`와 `NativeLocalAI*` 구현은 [로컬 AI 가이드](macos-local-ai.ko.md)에 설명한다.
 - Windows/Linux 공통 기능: [cli.py](../platforms/shared/python/security_scanner/cli.py), [scanner.py](../platforms/shared/python/security_scanner/scanner.py), [server.py](../platforms/shared/python/security_scanner/server.py), [toolkit.py](../platforms/shared/python/security_scanner/toolkit.py), [공통 사용법](usage.ko.md).
 - 보고서·SBOM: [reporting.py](../platforms/shared/python/security_scanner/reporting.py), [리포트 계약](report-contract.ko.md), [Java 런북](security/java-sbom-vulnerability-scan.md).
 - 웹·네트워크: [web.py](../platforms/shared/python/security_scanner/web.py), [web_audit.py](../platforms/shared/python/security_scanner/web_audit.py), [netprobe.py](../platforms/shared/python/security_scanner/netprobe.py), [웹 점검 런북](security/WEB_AUDIT.ko.md).

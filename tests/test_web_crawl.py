@@ -519,7 +519,7 @@ class LiveCrawlTests(unittest.TestCase):
                 from urllib.parse import parse_qs, urlparse
                 value = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
                 # Evaluate the {{...}} expression like a vulnerable template engine.
-                body = value.replace("{{1337*1337}}", "1787569").encode()
+                body = value.replace("{{1337*1337}}", "1787569").replace("{{31337-1}}", "31336").encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
@@ -544,13 +544,28 @@ class LiveCrawlTests(unittest.TestCase):
         self.assertFalse(web._ssti_evaluated("you sent {{1337*1337}}"))
         self.assertFalse(web._ssti_evaluated("nothing here"))
 
+    def test_ssti_confirmation_rejects_static_result_and_single_expression(self):
+        calls = []
+
+        def static_page(value):
+            calls.append(value)
+            return "static page contains 1787569 and 31336"
+
+        self.assertEqual(web._ssti_findings(static_page, "http://example.test", "test", "param 'q'"), [])
+        self.assertIn("{{31337-1}}", calls)
+
+        def one_expression(value):
+            return value.replace("{{1337*1337}}", "1787569")
+
+        self.assertEqual(web._ssti_findings(one_expression, "http://example.test", "test", "param 'q'"), [])
+
     def test_ssti_dollar_brace_engine(self):
         class Templater(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 from urllib.parse import parse_qs, urlparse
                 value = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
                 # Only ${...} evaluates here (Freemarker/EL-style), not {{...}}.
-                body = value.replace("${1337*1337}", "1787569").encode()
+                body = value.replace("${1337*1337}", "1787569").replace("${31337-1}", "31336").encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
@@ -574,7 +589,31 @@ class LiveCrawlTests(unittest.TestCase):
             def do_GET(self):
                 from urllib.parse import parse_qs, urlparse
                 value = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
-                body = value.replace("*{1337*1337}", "1787569")  # only *{...} evaluates
+                body = value.replace("*{1337*1337}", "1787569").replace("*{31337-1}", "31336")  # only *{...} evaluates
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Templater)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/p?name=x"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, active=True)
+            self.assertIn("web.ssti-verified", {f.rule_id for f in findings})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_ssti_razor_engine(self):
+        class Templater(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+                body = value.replace("@(1337*1337)", "1787569").replace("@(31337-1)", "31336")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()

@@ -1,17 +1,17 @@
 {
   "verification_date": "2026-10-11",
   "timezone": "Asia/Seoul",
-  "publication_scope": "documentation only; implementation, tests, assets, binaries and raw logs remain local",
+  "publication_scope": "validated product source, tests, build scripts and documentation on GitHub only; Java assets, binaries, Docker images and raw logs remain local; no production or App Store deployment",
   "source_snapshot": {
     "base_revision": "4efb0bce1e0f5a00a078c77d9f91608d5127a757",
-    "contains_unpublished_worktree_changes": true,
     "changed_file_sha256": {
       "platforms/macos/scripts/prepare-java-scan-assets.command": "fe8864ba9f41f57449bf394779279ecd5ed01d995883a49f64bc59379249e307",
       "platforms/macos/scripts/stage-java-scan-app-bundle.command": "6dabe69a12145c23b18d1a5c34a6b291336864814eef82156ba8c60d6f3f4260",
       "platforms/macos/app/KODA/KODA/BundledJavaArchiveScanner.swift": "cd5b20389197eecc29f318020b3af73120a0e67a850e47c8063361ea18a7541f",
       "platforms/macos/tests/test_java_asset_packaging.py": "08504bdedfcd52c9a787477b423959a32ec9494334798a7128c6702eeff4070c",
       "tests/test_scheduled_release_install.py": "ce58104818aa9a2b559be07f0831f810c2458d80669e51518d9e8a8323c3e723"
-    }
+    },
+    "uncommitted_at_validation": true
   },
   "linux": {
     "platform": "linux/amd64",
@@ -199,5 +199,16 @@
     "real external-web efficacy",
     "local-model generation quality and AI functional equivalence",
     "developer signing/notarization/App Store submission"
-  ]
+  ],
+  "publication_validation": {
+    "python": "3.14.6",
+    "total": 768,
+    "passed": 760,
+    "failed": 0,
+    "skipped": 8,
+    "seconds": 136.82,
+    "environment": "macOS publication source snapshot with synthetic Git metadata; no local report-design samples",
+    "macos_harness_scripts": 10,
+    "product_source_files": 100
+  }
 }

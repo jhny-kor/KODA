@@ -2,8 +2,8 @@
 
 Source review and verification: **2026-10-11** · [한국어](linux-scan-queue.ko.md)
 
-This describes current local source behavior. This GitHub documentation
-publication excludes implementation/test files and operational image deployment.
+This describes current source behavior. This GitHub publication includes product
+source, tests, build scripts, and documentation; it excludes operational image deployment.
 Running an amd64 test image is separate from deploying an operational server.
 
 ## User-visible behavior
@@ -67,7 +67,7 @@ The results below and the unavailable Docker daemon describe the 2026-10-02 run.
 Use the current results above for the latest full regression count.
 
 These commands ran in the local development worktree containing the new tests
-and modified source. Implementation and test files are excluded from this documentation publication.
+and modified source. Implementation and test files were excluded from that documentation publication.
 
 ```bash
 PYTHONPATH=platforms/shared/python python3 -m unittest discover -s tests -q

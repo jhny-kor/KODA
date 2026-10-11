@@ -3,9 +3,20 @@
 [한국어](verification-2026-10-11.ko.md) · [Current status](current-status.en.md) · [Machine-readable summary](verification-2026-10-11.json)
 
 Validation covers GitHub source baseline `4efb0bce1e0f5a00a078c77d9f91608d5127a757`
-plus local modified/new development source. **Only documentation is published.
-Fixed source, new tests, assets, binaries, and raw logs remain local.** These
+plus local modified/new development source that was uncommitted at validation.
+**This GitHub publication includes the validated product source, tests, build
+scripts, and documentation. Java assets, binaries, images, and raw logs remain
+local.** These
 results do not validate an existing installer, App Store app, or fresh GitHub clone.
+
+## Additional regression checks before source publication
+
+The source selected for the commit was exported to a separate directory with
+synthetic Git metadata and tested on macOS with Python 3.14.6. **Of 768 cases,
+760 passed, none failed, and eight were skipped (136.820 seconds).** All ten
+macOS harness scripts also passed. The report classification test now generates
+actual HTML without local-only design samples. These checks are separate from
+the Linux execution below and do not add native Windows runtime validation.
 
 ## Fixes
 

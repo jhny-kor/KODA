@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct BundledJavaScanOutcome {
     let exitCode: Int32
@@ -30,7 +31,8 @@ enum BundledJavaArchiveScanner {
 
         let result = try run(
             executable: assets.scanner,
-            arguments: ["jar-scan", "--target", stagingDirectory.path, "--output-dir", outputDirectory.path, "--language", language.rawValue],
+            // Java reports follow the Korean-only CLI contract independently of UI locale.
+            arguments: ["jar-scan", "--target", stagingDirectory.path, "--output-dir", outputDirectory.path, "--language", "ko"],
             environment: [
                 "KODA_SYFT_BIN": assets.syft.path,
                 "KODA_GRYPE_BIN": assets.grype.path,
@@ -118,21 +120,66 @@ enum BundledJavaArchiveScanner {
         try Data().write(to: marker, options: .atomic)
     }
 
-    private static func run(executable: URL, arguments: [String], environment: [String: String]) throws -> ProcessResult {
+    private static func run(executable: URL, arguments: [String], environment: [String: String], timeout: TimeInterval = 1800) throws -> ProcessResult {
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
+        let readers = [stdout.fileHandleForReading, stderr.fileHandleForReading]
+        defer { readers.forEach { try? $0.close() } }
+        for reader in readers {
+            let flags = fcntl(reader.fileDescriptor, F_GETFL)
+            guard flags >= 0, fcntl(reader.fileDescriptor, F_SETFL, flags | O_NONBLOCK) >= 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
         process.executableURL = executable
         process.arguments = arguments
         process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, replacement in replacement }
         process.standardOutput = stdout
         process.standardError = stderr
+        process.standardInput = FileHandle.nullDevice
+        let terminated = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in terminated.signal() }
         try process.run()
-        process.waitUntilExit()
+        defer {
+            if process.isRunning {
+                process.terminate()
+                if terminated.wait(timeout: .now() + .seconds(1)) == .timedOut, process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                    _ = terminated.wait(timeout: .now() + .seconds(1))
+                }
+            }
+        }
+        let deadline = DispatchTime.now() + timeout
+        var output = Data()
+        var errors = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        func drain(_ reader: FileHandle, into data: inout Data) throws {
+            // Bound each turn so a noisy stream cannot starve its peer or the deadline.
+            for _ in 0..<16 {
+                let count = Darwin.read(reader.fileDescriptor, &buffer, buffer.count)
+                if count > 0 { data.append(contentsOf: buffer.prefix(count)) }
+                else if count == 0 || errno == EAGAIN || errno == EWOULDBLOCK { return }
+                else if errno != EINTR { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            }
+        }
+        while true {
+            try drain(readers[0], into: &output)
+            try drain(readers[1], into: &errors)
+            if !process.isRunning { break }
+            guard DispatchTime.now() < deadline else {
+                throw JavaScanError.processTimeout(executable.lastPathComponent, timeout)
+            }
+            // Both pipes are consumed while the child is running, without waiting
+            // for EOF on one stream while the other stream fills its pipe.
+            _ = terminated.wait(timeout: .now() + .milliseconds(10))
+        }
+        try drain(readers[0], into: &output)
+        try drain(readers[1], into: &errors)
         return ProcessResult(
             exitCode: process.terminationStatus,
-            stdout: String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
-            stderr: String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            stdout: String(decoding: output, as: UTF8.self),
+            stderr: String(decoding: errors, as: UTF8.self)
         )
     }
 
@@ -184,6 +231,7 @@ private enum JavaScanError: LocalizedError {
     case missingAsset(String)
     case databaseImport(String)
     case missingSBOM(String)
+    case processTimeout(String, TimeInterval)
 
     var errorDescription: String? {
         switch self {
@@ -195,6 +243,8 @@ private enum JavaScanError: LocalizedError {
             return "Bundled Grype database import failed: \(detail)"
         case .missingSBOM(let detail):
             return "Bundled Java scanner did not generate an SBOM: \(detail)"
+        case .processTimeout(let executable, let seconds):
+            return "Bundled Java scanner process timed out after \(seconds) seconds: \(executable)"
         }
     }
 }

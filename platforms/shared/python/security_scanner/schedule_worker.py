@@ -9,21 +9,16 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import json
 import os
-import re
 import signal
 import sys
-import shlex
 import shutil
 import subprocess
 import tarfile
 import tempfile
 import time
-import uuid
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterable, Protocol
+from typing import Callable
 
 from .portal_store import PortalStore
 
@@ -100,8 +95,11 @@ def schedule_probe_target(payload: dict) -> dict:
 
 
 from .schedule_transport import (
-    OpenSSHCollector, RemoteFile, RemoteCollector, _ssh_options,
-    _remote_name, _excluded, _retryable_remote_error,
+    OpenSSHCollector, RemoteFile, RemoteCollector,
+    _ssh_options as _ssh_options,
+    _remote_name as _remote_name,
+    _excluded as _excluded,
+    _retryable_remote_error,
 )
 
 
@@ -411,6 +409,20 @@ class ScheduleRunner:
             # the actual scheduled scan archive has no top-level root.
             "gitlab_archive_root": "" if target.get("source_kind") == "gitlab" else None,
         }
+        if target.get("source_kind") == "gitlab" and target.get("source_gitlab_mapping_id"):
+            try:
+                source_mapping = self.store.gitlab_repository(target["source_gitlab_mapping_id"], target["project_id"])
+            except KeyError:
+                source_mapping = None
+            if source_mapping:
+                snapshot.update({
+                    "scheduled_source_kind": "gitlab",
+                    "source_gitlab_project_id": source_mapping["gitlab_project_id"],
+                    "source_gitlab_path": source_mapping["path_with_namespace"],
+                    "source_gitlab_ref": target.get("source_gitlab_ref") or "",
+                    "source_gitlab_ref_type": target.get("source_gitlab_ref_type", "branch"),
+                    "source_gitlab_directory": target.get("source_gitlab_directory") or "",
+                })
         if target.get("gitlab_mapping_id"):
             try:
                 mapping = self.store.gitlab_repository(target["gitlab_mapping_id"], target["project_id"])
@@ -490,10 +502,8 @@ class ScheduleRunner:
             )
             run_id = run["run_id"]
             self.store.update_schedule_run(schedule_run["schedule_run_id"], run_id=run["run_id"])
-            while self.store.has_active_manual_work():
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("수동 점검 대기 중 스케줄 제한시간을 초과했습니다")
-                self._sleep(1)
+            # claim_schedule_run owns the execution slot until source cleanup.
+            # A later manual submission must not deadlock this reserved owner.
             self._analyze(run["run_id"], deadline)
             if time.monotonic() > deadline:
                 raise TimeoutError("스케줄 디렉토리 제한시간을 초과했습니다")

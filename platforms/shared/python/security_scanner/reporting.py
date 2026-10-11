@@ -7,7 +7,6 @@ import json
 import os
 import re
 import zipfile
-import hashlib
 from dataclasses import asdict, is_dataclass
 from functools import lru_cache
 from collections import Counter, defaultdict
@@ -2600,7 +2599,6 @@ def _source_sw49_table_markup(payload: dict[str, object], language: str) -> str:
 
 
 def _render_html_main(payload: dict[str, object], language: str, detail_href: str) -> str:
-    labels = _labels(language)
     summary = payload.get("summary", {})
     if not isinstance(summary, dict):
         summary = {}
@@ -2609,7 +2607,6 @@ def _render_html_main(payload: dict[str, object], language: str, detail_href: st
         scan = {}
     standards = payload.get("standards", [])
     standard_label = str(scan.get("standard", DEFAULT_STANDARD))
-    standard_id = standard_label
     category_label = str(scan.get("standard_category", DEFAULT_STANDARD_CATEGORY))
     for item in standards:
         if isinstance(item, dict) and item.get("id") == standard_label:
@@ -2754,7 +2751,6 @@ def _source_location(item: dict[str, object]) -> str:
 
 def _source_collapsible_lines(values: list[str], language: str) -> str:
     unique_values = list(dict.fromkeys(str(value) for value in values if str(value).strip())) or ["—"]
-    visible = unique_values[:3]
     hidden = unique_values[3:]
     items = "".join(
         f'<code class="source-collapse-item"{" hidden" if index >= 3 else ""}>{html.escape(value)}</code>'

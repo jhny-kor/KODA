@@ -207,6 +207,7 @@ ensure_tracker_integration_secrets() {
   token_dir="$(env_value "$env_file" KODA_TRACKER_TOKEN_DIR "$prefix/config/tracker-tokens")"
   python3 - "$env_file" "$secret_file" "$token_dir" "$prefix/config" <<'PY'
 import os
+import re
 import secrets
 import stat
 import sys
@@ -241,11 +242,14 @@ if not secret_file.exists():
     temporary.replace(secret_file)
 os.chmod(secret_file, 0o444)
 
+lines = env_file.read_text(encoding="utf-8").splitlines()
+configured_proof = next((line.split("=", 1)[1] for line in lines if line.startswith("KODA_GATEWAY_PROOF=")), "")
+gateway_proof = configured_proof if re.fullmatch(r"[A-Za-z0-9_-]{32,128}", configured_proof) else secrets.token_urlsafe(48)
 values = {
     "KODA_TRACKER_PROVISIONING_TOKEN_FILE": str(secret_file),
     "KODA_TRACKER_TOKEN_DIR": str(token_dir),
+    "KODA_GATEWAY_PROOF": gateway_proof,
 }
-lines = env_file.read_text(encoding="utf-8").splitlines()
 seen = set()
 for index, line in enumerate(lines):
     key = line.split("=", 1)[0]
@@ -256,8 +260,10 @@ for key, value in values.items():
     if key not in seen:
         lines.append(f"{key}={value}")
 temporary = env_file.with_name(f".{env_file.name}.{os.getpid()}.tmp")
-temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
-os.chmod(temporary, env_file.stat().st_mode & 0o777)
+with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as output:
+    output.write("\n".join(lines) + "\n")
+    output.flush()
+    os.fsync(output.fileno())
 temporary.replace(env_file)
 PY
 }
@@ -305,10 +311,21 @@ runtime_values() {
   tracker_provisioning_file="${KODA_TRACKER_PROVISIONING_TOKEN_FILE:-$(env_value "$env_file" KODA_TRACKER_PROVISIONING_TOKEN_FILE "")}"
   tracker_result_timeout="${KODA_TRACKER_RESULT_TIMEOUT_SECONDS:-$(env_value "$env_file" KODA_TRACKER_RESULT_TIMEOUT_SECONDS 900)}"
   json_max_bytes="${KODA_JSON_MAX_BYTES:-$(env_value "$env_file" KODA_JSON_MAX_BYTES 524288000)}"
+  gateway_proof="$(env_value "$env_file" KODA_GATEWAY_PROOF "")"
+  upload_quota_bytes="${KODA_PORTAL_UPLOAD_QUOTA_BYTES:-$(env_value "$env_file" KODA_PORTAL_UPLOAD_QUOTA_BYTES 10737418240)}"
   dashboard_cpus="${KODA_CPUS:-$(env_value "$env_file" KODA_CPUS 2)}"
   dashboard_memory="${KODA_MEMORY:-$(env_value "$env_file" KODA_MEMORY 4g)}"
   dashboard_pids="${KODA_PIDS_LIMIT:-$(env_value "$env_file" KODA_PIDS_LIMIT 256)}"
   dashboard_tmpfs="${KODA_TMPFS_SIZE:-$(env_value "$env_file" KODA_TMPFS_SIZE 512m)}"
+  scan_cpus="${KODA_SCAN_CPUS:-$(env_value "$env_file" KODA_SCAN_CPUS 1)}"
+  scan_memory="${KODA_SCAN_MEMORY:-$(env_value "$env_file" KODA_SCAN_MEMORY 4g)}"
+  delivery_cpus="${KODA_DELIVERY_CPUS:-$(env_value "$env_file" KODA_DELIVERY_CPUS 0.5)}"
+  delivery_memory="${KODA_DELIVERY_MEMORY:-$(env_value "$env_file" KODA_DELIVERY_MEMORY 512m)}"
+  scan_timeout="${KODA_SCAN_TIMEOUT_SECONDS:-$(env_value "$env_file" KODA_SCAN_TIMEOUT_SECONDS 21600)}"
+  scan_terminate_grace="${KODA_SCAN_TERMINATE_GRACE_SECONDS:-$(env_value "$env_file" KODA_SCAN_TERMINATE_GRACE_SECONDS 3)}"
+  worker_stop_timeout="${KODA_WORKER_STOP_TIMEOUT_SECONDS:-$(env_value "$env_file" KODA_WORKER_STOP_TIMEOUT_SECONDS 20)}"
+  report_timeout="${KODA_PORTAL_REPORT_TIMEOUT_SECONDS:-$(env_value "$env_file" KODA_PORTAL_REPORT_TIMEOUT_SECONDS 90)}"
+  report_memory="${KODA_PORTAL_REPORT_MEMORY_BYTES:-$(env_value "$env_file" KODA_PORTAL_REPORT_MEMORY_BYTES 2147483648)}"
   vuln_data_volume="${KODA_VULN_DATA_VOLUME:-$(env_value "$env_file" KODA_VULN_DATA_VOLUME "")}"
   tracker_ca_file="${KODA_TRACKER_CA_FILE:-$(env_value "$env_file" KODA_TRACKER_CA_FILE "")}"
   schedule_enabled="${KODA_SCHEDULE_ENABLED:-$(env_value "$env_file" KODA_SCHEDULE_ENABLED 0)}"
@@ -351,7 +368,8 @@ PY
 suite_compose() {
   local prefix="$1"
   shift
-  docker compose --project-directory "$prefix/tracker" --env-file "$prefix/tracker/.env" \
+  local proof="$(env_value "$prefix/tracker/.env" KODA_GATEWAY_PROOF "")"
+  KODA_GATEWAY_PROOF="$proof" docker compose --project-directory "$prefix/tracker" --env-file "$prefix/tracker/.env" \
     -f "$prefix/tracker/compose.yaml" -f "$prefix/tracker/compose.airgap.yaml" \
     -f "$prefix/tracker/compose.integration.yaml" "$@"
 }
@@ -381,10 +399,21 @@ start_dashboard() {
   KODA_TRACKER_PROVISIONING_TOKEN_FILE="$tracker_provisioning_file" \
   KODA_TRACKER_RESULT_TIMEOUT_SECONDS="$tracker_result_timeout" \
   KODA_JSON_MAX_BYTES="$json_max_bytes" \
+  KODA_GATEWAY_PROOF="$gateway_proof" \
+  KODA_PORTAL_UPLOAD_QUOTA_BYTES="$upload_quota_bytes" \
   KODA_CPUS="$dashboard_cpus" \
   KODA_MEMORY="$dashboard_memory" \
   KODA_PIDS_LIMIT="$dashboard_pids" \
   KODA_TMPFS_SIZE="$dashboard_tmpfs" \
+  KODA_SCAN_CPUS="$scan_cpus" \
+  KODA_SCAN_MEMORY="$scan_memory" \
+  KODA_DELIVERY_CPUS="$delivery_cpus" \
+  KODA_DELIVERY_MEMORY="$delivery_memory" \
+  KODA_SCAN_TIMEOUT_SECONDS="$scan_timeout" \
+  KODA_SCAN_TERMINATE_GRACE_SECONDS="$scan_terminate_grace" \
+  KODA_WORKER_STOP_TIMEOUT_SECONDS="$worker_stop_timeout" \
+  KODA_PORTAL_REPORT_TIMEOUT_SECONDS="$report_timeout" \
+  KODA_PORTAL_REPORT_MEMORY_BYTES="$report_memory" \
   KODA_TRACKER_CA_FILE="$tracker_ca_file" \
   KODA_VULN_DATA_VOLUME="$vuln_data_volume" \
   KODA_SCHEDULE_ENABLED="$schedule_enabled" \
@@ -399,11 +428,28 @@ start_dashboard() {
     "$prefix/koda/koda-docker" dashboard start
 }
 
+wait_portal_workers() {
+  local name state dashboard_image worker_image attempt
+  dashboard_image="$(docker inspect -f '{{.Image}}' koda-dashboard)"
+  for name in koda-scan-worker koda-delivery-worker; do
+    for attempt in {1..30}; do
+      state="$(docker inspect -f '{{if .State.Running}}{{if .State.Health}}{{.State.Health.Status}}{{end}}{{else}}stopped{{end}}' "$name" 2>/dev/null || true)"
+      [[ "$state" == healthy ]] && break
+      [[ "$state" != stopped && "$state" != unhealthy ]] || fail "$name is $state; inspect docker logs before retrying."
+      sleep 2
+    done
+    [[ "$state" == healthy ]] || fail "$name heartbeat health check did not become healthy."
+    worker_image="$(docker inspect -f '{{.Image}}' "$name")"
+    [[ "$worker_image" == "$dashboard_image" ]] || fail "$name image differs from koda-dashboard; restart the Suite together."
+  done
+}
+
 runtime_health() {
   local prefix="$1" env_file="$prefix/tracker/.env" internal masquerade port_bindings
   runtime_values "$env_file"
   wait_http "http://127.0.0.1:$public_port/healthz" "" 30
   wait_http "http://127.0.0.1:$public_port/koda/live" "" 30
+  wait_portal_workers
   wait_http "http://127.0.0.1:$public_port/api/v1/healthz" "" 30
   wait_http "http://127.0.0.1:$public_port/dependency-track/" "Dependency-Track" 60
   wait_http "http://127.0.0.1:$public_port/dependency-track/static/config.json" "API_BASE_URL" 60
@@ -627,6 +673,7 @@ patch_suite() {
   require_same_file "$install_tmp/tracker/compose.yaml" "$prefix/tracker/compose.yaml"
   require_same_file "$install_tmp/tracker/compose.airgap.yaml" "$prefix/tracker/compose.airgap.yaml"
   require_same_file "$script_dir/compose.integration.yaml" "$prefix/tracker/compose.integration.yaml"
+  ensure_tracker_integration_secrets "$prefix/tracker/.env"
   validate_preflight "$prefix/tracker/.env" 0
   [[ -f "$install_tmp/tracker/config/.env.example" ]] \
     || fail "Tracker release env example is missing."
@@ -699,8 +746,8 @@ stop_suite() {
   require_runtime
   [[ -f "$prefix/tracker/.env" && -x "$prefix/koda/koda-docker" ]] \
     || fail "suite is not installed at $prefix."
-  suite_compose "$prefix" stop
   "$prefix/koda/koda-docker" dashboard stop
+  suite_compose "$prefix" stop
   echo "suite stopped; named volumes were preserved"
 }
 

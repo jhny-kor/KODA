@@ -34,6 +34,7 @@ struct ContentView: View {
             } else if let activeRemediationReport {
                 RemediationGuideScreen(
                     report: activeRemediationReport,
+                    targets: scanner.selectedTargets,
                     language: $language
                 ) {
                     self.activeRemediationReport = nil
@@ -2005,6 +2006,7 @@ private struct ScanReportDetailScreen: View {
     let onRemediation: () -> Void
     let onExport: (ReportExportFormat) -> Void
     @Environment(\.colorScheme) private var colorScheme
+    @State private var showAIReport = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2014,6 +2016,9 @@ private struct ScanReportDetailScreen: View {
                 .id(report.htmlURL(language: language))
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(isPresented: $showAIReport) {
+            LocalAIReportView(report: report, language: language)
+        }
     }
 
     private var detailTopBar: some View {
@@ -2028,6 +2033,14 @@ private struct ScanReportDetailScreen: View {
                     .foregroundStyle(.white.opacity(0.75))
             }
         } actions: {
+            Button {
+                showAIReport = true
+            } label: {
+                Label(language == .ko ? "AI 보조 보고서" : "AI report", systemImage: "sparkles")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.white)
+
             Menu {
                 Toggle(language.maskReportExportTitle, isOn: $maskReportExports)
                 Divider()
@@ -2072,6 +2085,7 @@ private struct ScanReportDetailScreen: View {
 
 private struct RemediationGuideScreen: View {
     let report: ScanReportItem
+    let targets: [URL]
     @Binding var language: AppLanguage
     let onBack: () -> Void
 
@@ -2147,7 +2161,7 @@ private struct RemediationGuideScreen: View {
                             } else {
                                 LazyVGrid(columns: columns(width: proxy.size.width), spacing: 12) {
                                     ForEach(Array(prioritizedFindings.prefix(18).enumerated()), id: \.offset) { _, finding in
-                                        RemediationFindingCard(finding: finding, language: language)
+                                        RemediationFindingCard(finding: finding, targets: targets, language: language)
                                     }
                                 }
                             }
@@ -2257,7 +2271,9 @@ private struct RemediationGuideScreen: View {
 }
 
 private struct RemediationFindingCard: View {
+    @State private var showLocalAI = false
     let finding: NativeFinding
+    let targets: [URL]
     let language: AppLanguage
 
     var body: some View {
@@ -2289,6 +2305,17 @@ private struct RemediationFindingCard: View {
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            Button(language == .ko ? "로컬 AI 설명" : "Local AI explanation") { showLocalAI = true }
+                .sheet(isPresented: $showLocalAI) {
+                    VStack {
+                        ScrollView {
+                            LocalAIView(language: language, finding: finding, targets: targets)
+                        }
+                        .frame(maxHeight: 720)
+                        Button(language == .ko ? "닫기" : "Close") { showLocalAI = false }.padding(.bottom)
+                    }.frame(width: 640)
+                }
 
             if let pane = settingsPane {
                 Button {

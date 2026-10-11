@@ -80,9 +80,10 @@ struct SettingsView: View {
         groups.filter { $0.kind == tab }
     }
 
-    private var title: String { language == .ko ? "점검 규칙 설정" : "Check rule settings" }
+    private var title: String { language == .ko ? "KODA 설정" : "KODA settings" }
     private var intro: String {
-        language == .ko
+        if tab == "ai" { return language == .ko ? "OpenAI 호환 로컬 모델 연결을 설정합니다." : "Configure an OpenAI-compatible local model." }
+        return language == .ko
             ? "규칙을 개별적으로 켜거나 끌 수 있습니다. 끈 규칙은 점검 결과에서 제외됩니다."
             : "Turn individual rules on or off. Disabled rules are excluded from scan results."
     }
@@ -103,24 +104,29 @@ struct SettingsView: View {
             HStack(spacing: 8) {
                 tabButton("security", language == .ko ? "보안점검" : "Security check")
                 tabButton("quality", language == .ko ? "품질점검" : "Quality check")
+                tabButton("ai", language == .ko ? "로컬 AI" : "Local AI")
                 Spacer()
-                Button(language == .ko ? "모두 사용" : "Enable all") {
-                    disabled.removeAll()
-                    KodaRuleSettings.save(disabled)
-                }
-                .disabled(disabled.isEmpty)
+                if tab != "ai" {
+                    Button(language == .ko ? "모두 사용" : "Enable all") {
+                        disabled.removeAll()
+                        KodaRuleSettings.save(disabled)
+                    }
+                    .disabled(disabled.isEmpty)
 
-                Button(language == .ko ? "모두 닫기" : "Collapse all") {
-                    expandedGroups.removeAll()
+                    Button(language == .ko ? "모두 닫기" : "Collapse all") {
+                        expandedGroups.removeAll()
+                    }
+                    .disabled(visibleGroups.isEmpty || expandedGroups.isEmpty)
                 }
-                .disabled(visibleGroups.isEmpty || expandedGroups.isEmpty)
             }
             .padding(.horizontal, 20)
 
             Divider().padding(.top, 12)
 
             ScrollView {
-                if isLoading {
+                if tab == "ai" {
+                    LocalAIView(language: language)
+                } else if isLoading {
                     ProgressView(language == .ko ? "기준 목록을 준비하고 있습니다…" : "Loading standards…")
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(20)

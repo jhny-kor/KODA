@@ -7,12 +7,13 @@ documents are labeled explicitly.
 ## Documentation baseline — 2026-10-11
 
 The [current implementation and verification snapshot](current-status.en.md)
-distinguishes committed source, unpublished local development work, and released
+distinguishes published product source, development builds, and released
 binaries. Development-only commands and old validation records are not evidence
 that a downloaded installer or the Mac App Store app includes those changes.
 
-This GitHub publication contains documentation only. Product code, new tests,
-Java assets, app binaries, and Docker images remain local. The
+This GitHub publication includes validated product source, tests, build scripts,
+and documentation. Java assets, app binaries, Docker images, and raw logs remain
+local; production and App Store deployment are separate. The
 [latest validation record](verification-2026-10-11.md) describes Java-enabled
 universal macOS builds/ARM execution and actual Linux amd64 container checks.
 

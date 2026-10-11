@@ -51,7 +51,7 @@ not the API key. Native local-server keys are stored separately in the macOS
 Keychain by server URL. AI supplemental reports send bounded finding metadata,
 without source, paths, evidence, or warning text.
 
-This describes unpublished local development work as of 2026-10-11 and does not
+This describes local development source published to GitHub as of 2026-10-11 and does not
 establish availability in the Mac App Store app.
 
 ## Server and external integrations

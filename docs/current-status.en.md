@@ -2,18 +2,19 @@
 
 Baseline: **2026-10-11 (Asia/Seoul)** · [한국어](current-status.ko.md)
 
-This snapshot covers the current local worktree, fixes, builds, and runtime checks.
-**This GitHub publication contains documentation only. The uncommitted product
-sources, tests, Java assets, app, and Docker images used for these checks are not
-published.** A fresh GitHub clone or an existing installation does not necessarily
-contain the same capabilities, fixes, or vulnerability data.
+This snapshot covers the local worktree at validation, fixes, builds, and runtime checks.
+**This GitHub publication includes the validated product source, tests, build
+scripts, and documentation. Java assets, app binaries, Docker images, and raw logs
+remain local.** Publishing source does not update an existing installation,
+App Store app, or production server, or provide the same vulnerability data.
 
 ## Source and publication scope
 
 | Area | Observed state | Meaning |
 | --- | --- | --- |
-| GitHub source before this documentation update | `4efb0bce1e0f5a00a078c77d9f91608d5127a757` | Validation includes that revision plus local modified and new source files |
-| This publication | GitHub documentation only | Separate from code, tests, binaries, and production deployment |
+| GitHub source baseline at validation | `4efb0bce1e0f5a00a078c77d9f91608d5127a757` | Validation includes that revision plus local modified and new source files |
+| Earlier documentation publication | `f1f040193ae74609e089b4af486dd46dca0bc2d4` | Documentation-only record; source publication follows below |
+| This publication | GitHub product source, tests, build scripts, and documentation | Java assets, binaries, images, and raw logs excluded; no production or App Store deployment |
 | macOS | Java-enabled universal Release build/analyze and ARM execution | Separate validation app; existing App Store app was not replaced |
 | Linux | Installed amd64 source image and web/scan/delivery workers | amd64 user space emulated in Docker LinuxKit on Apple Silicon |
 | Windows | Source, package dependencies, PowerShell, and process contracts reviewed | Native Windows execution excluded at the user's request |
@@ -45,7 +46,9 @@ security rescans of an AI candidate do not establish functional equivalence.
 
 The [2026-10-11 validation record](verification-2026-10-11.md) and
 [machine-readable summary](verification-2026-10-11.json) record conditions and
-identifiers. Results cover the local development source, not only published code.
+identifiers. The validated product source, tests, and build scripts are included
+in this GitHub publication. Reproducing the results also requires the recorded
+tools, Java assets, and runtime environments.
 
 | Check | Observed result | Conditions |
 | --- | --- | --- |

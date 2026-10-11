@@ -115,12 +115,14 @@ case "$1" in
     [[ "$2" == inspect ]] || exit 1
     [[ "$FAKE_KIND" == container && "$3" == koda-sbom-gateway ]] && exit 0
     [[ "$FAKE_KIND" == dashboard && "$3" == koda-dashboard ]] && exit 0
+    [[ "$FAKE_KIND" == worker && "$3" == koda-delivery-worker ]] && exit 0
     exit 1
     ;;
   inspect)
     target="${@: -1}"
     [[ "$FAKE_KIND" == container && "$target" == koda-sbom-gateway ]] && { echo foreign-project; exit 0; }
     [[ "$FAKE_KIND" == dashboard && "$target" == koda-dashboard ]] && { echo false; exit 0; }
+    [[ "$FAKE_KIND" == worker && "$target" == koda-delivery-worker ]] && { echo false; exit 0; }
     exit 1
     ;;
   network)
@@ -177,7 +179,7 @@ exit 1
                 'DOCKER_LOG': str(log),
                 'HOME': str(root / 'home'),
             }
-            for kind in ('container', 'dashboard', 'network', 'volume'):
+            for kind in ('container', 'dashboard', 'worker', 'network', 'volume'):
                 with self.subTest(kind=kind):
                     log.write_text('')
                     result = subprocess.run(
@@ -482,7 +484,12 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
                 '  [[ "$3" == koda-dashboard ]] && exit 0\n'
                 '  exit 1\n'
                 'fi\n'
-                'if [[ "$1" == inspect ]]; then echo true; exit 0; fi\n'
+                'if [[ "$1" == inspect ]]; then\n'
+                '  [[ "$3" == *io.koda.portal-role* ]] && { echo web; exit 0; }\n'
+                '  [[ "$3" == *Image* ]] && { echo sha256:test; exit 0; }\n'
+                '  echo true; exit 0\n'
+                'fi\n'
+                '[[ "$1" == image && "$2" == inspect ]] && { echo sha256:test; exit 0; }\n'
                 'if [[ "$1" == ps ]]; then echo koda-dashboard; exit 0; fi\n'
                 'if [[ "$1" == network && "$2" == inspect ]]; then exit 0; fi\n'
                 'if [[ "$1" == network && "$2" == connect ]]; then exit 0; fi\n'
@@ -583,6 +590,14 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
         self.assertIn('proxy_request_buffering off;', api_location)
         self.assertIn('error_page 500 = @koda_auth_unavailable;', api_location)
         self.assertNotIn('error_page 500 502 503 504 = @koda_auth_unavailable;', api_location)
+
+    def test_gateway_proof_is_provisioned_and_overwrites_client_header(self) -> None:
+        self.assertIn('proxy_set_header X-KODA-Gateway-Proof "";', self.gateway)
+        self.assertEqual(self.gateway.count('proxy_set_header X-KODA-Gateway-Proof ${KODA_GATEWAY_PROOF};'), 3)
+        self.assertIn('location = /koda/ready {', self.gateway)
+        self.assertIn('KODA_GATEWAY_PROOF: ${KODA_GATEWAY_PROOF:?', self.compose)
+        self.assertIn('KODA_GATEWAY_PROOF="$gateway_proof"', self.launcher)
+        self.assertIn('KODA_GATEWAY_PROOF=${KODA_GATEWAY_PROOF}', self.docker_wrapper)
 
     def test_large_json_limit_reaches_dashboard_and_schedule_worker(self) -> None:
         self.assertIn('KODA_JSON_MAX_BYTES=524288000', self.suite_env)

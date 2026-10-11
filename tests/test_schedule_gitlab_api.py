@@ -1,10 +1,14 @@
 import io
+import json
 import tarfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from unittest.mock import patch
 
 import test_schedule_api as api_tests
-from security_scanner.schedule_api import API_PREFIX, ScheduleApiError
+from security_scanner.schedule_api import API_PREFIX, ScheduleApiError, _OPENER
 from security_scanner.portal_integrations import _gitlab_scan_report
 
 
@@ -75,3 +79,40 @@ class GitLabScheduleApiTests(unittest.TestCase):
                     self.client.request('POST', API_PREFIX + '/gitlab-archive', payload)
                 self.assertEqual(caught.exception.status, status)
             upstream.assert_not_called()
+
+    def test_archive_stream_keeps_heartbeat_available_and_bounds_second_stream(self):
+        raw = self.prepare_gitlab()
+        job = self.next()
+        reading, release = threading.Event(), threading.Event()
+
+        class SlowArchive(Archive):
+            def read(self, size=-1):
+                reading.set()
+                release.wait(5)
+                return super().read(size)
+
+        request = urllib.request.Request(
+            self.client.base_url + API_PREFIX + '/gitlab-archive',
+            data=json.dumps({
+                'schedule_run_id': job['schedule_run_id'], 'lease_token': job['lease_token'],
+            }).encode(),
+            headers={'Authorization': 'Bearer ' + self.client.token, 'Content-Type': 'application/json'},
+        )
+        response = None
+        with patch('security_scanner.schedule_gitlab_proxy.resolve_gitlab_ref', return_value='a' * 40), \
+             patch('security_scanner.schedule_gitlab_proxy._gitlab_open', side_effect=lambda *a, **k: SlowArchive(raw)):
+            try:
+                response = _OPENER.open(request, timeout=5)
+                self.assertTrue(reading.wait(2))
+                heartbeat = self.client.action('heartbeat', job)
+                self.assertFalse(heartbeat['cancel_requested'])
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    _OPENER.open(request, timeout=5)
+                self.assertEqual(caught.exception.code, 429)
+                caught.exception.close()
+                release.set()
+                self.assertEqual(response.read(), raw)
+            finally:
+                release.set()
+                if response is not None:
+                    response.close()

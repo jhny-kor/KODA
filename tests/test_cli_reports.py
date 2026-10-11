@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,50 @@ from security_scanner.reporting import _render_html_main, _source_main_filter_ma
 
 
 class CliReportTests(unittest.TestCase):
+    def test_missing_scan_target_returns_error_without_clean_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for options in ([], ["--fail-on", "high"], ["--discover-projects"]):
+                with self.subTest(options=options):
+                    output = root / "report.json"
+                    errors = io.StringIO()
+                    with redirect_stderr(errors):
+                        exit_code = main([
+                            "scan", "--target", str(root / "missing"),
+                            "--format", "json", "--output", str(output), *options,
+                        ])
+                    self.assertEqual(exit_code, 2)
+                    self.assertIn("Target does not exist", errors.getvalue())
+                    self.assertFalse(output.exists())
+
+    def test_scan_rejects_missing_member_of_multiple_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "clean.py"
+            source.write_text("print('hello')\n", encoding="utf-8")
+            output = root / "report.json"
+            with redirect_stderr(io.StringIO()):
+                exit_code = main([
+                    "scan", "--target", str(source), "--target", str(root / "missing"),
+                    "--format", "json", "--output", str(output),
+                ])
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(output.exists())
+
+    def test_existing_clean_target_still_passes_severity_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "clean.py"
+            source.write_text("print('hello')\n", encoding="utf-8")
+            output = root / "report.json"
+            with redirect_stderr(io.StringIO()):
+                exit_code = main([
+                    "scan", "--target", str(source), "--category", "secrets",
+                    "--fail-on", "high", "--format", "json", "--output", str(output),
+                ])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["findings"], [])
+
     def test_no_command_shows_available_commands_without_error(self) -> None:
         output = io.StringIO()
         with redirect_stdout(output):
@@ -51,13 +96,21 @@ class CliReportTests(unittest.TestCase):
         self.assertNotIn('class="source-severity-details" open', document)
         self.assertIn("점검 기준명\n매핑 항목", document)
 
-    def test_report_samples_mark_external_distribution(self) -> None:
-        samples = sorted((ROOT / "samples" / "report-designs").glob("*.html"))
-        self.assertTrue(samples)
-        for sample in samples:
-            document = sample.read_text(encoding="utf-8")
-            self.assertIn("대외 비공개", document, sample.name)
-            self.assertRegex(document, r"border: ?2px solid #(ef4444|ff4d5e|b42318)", sample.name)
+    def test_empty_report_marks_external_distribution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "clean.py"
+            source.write_text("print('hello')\n", encoding="utf-8")
+            output = root / "reports" / "source.html"
+            exit_code = main([
+                "scan", "--target", str(source), "--category", "secrets",
+                "--format", "html", "--output", str(output),
+            ])
+            self.assertEqual(exit_code, 0)
+            for report in (output, output.with_name("source-detail.html")):
+                document = report.read_text(encoding="utf-8")
+                self.assertIn("대외 비공개", document, report.name)
+                self.assertRegex(document, r"border: ?2px solid #(ef4444|ff4d5e|b42318)", report.name)
 
     def test_standard_is_selected_from_registered_profiles(self) -> None:
         args = build_parser().parse_args(

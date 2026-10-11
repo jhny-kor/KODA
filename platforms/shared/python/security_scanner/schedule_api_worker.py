@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 
 from .schedule_api import API_PREFIX, ScheduleApiClient, ScheduleApiError, configured_json_bytes
-from .schedule_transport import OpenSSHCollector, RemoteFile, _retryable_remote_error
+from .schedule_transport import OpenSSHCollector, RemoteFile as RemoteFile, _retryable_remote_error
 
 
 def _save(path, value):
@@ -212,12 +212,9 @@ class ApiScheduleRunner:
                 self._retry(lambda: collector.fetch(current_target() | {'remaining_bytes': remaining}, item, destination, cancel=cancelled), job, deadline)
                 hashes[item.relative_path] = _hash(destination)
                 remaining -= destination.stat().st_size
-            while True:
-                state = self._heartbeat(job, deadline)
-                if not state['manual_busy'] and state['settings']['enabled']:
-                    self.settings = state['settings']
-                    break
-                self.sleep(1)
+            # The schedule lease already owns the sole execution slot. New
+            # queued manual requests wait for cleanup rather than pausing its owner.
+            self.settings = self._heartbeat(job, deadline)['settings']
             result = self._analyze(source, root, {'target': target, 'settings': self.settings}, job, deadline)
             self._heartbeat(job, deadline)
             manifest = [{'relative_path': f.relative_path, 'size': f.size, 'mtime': f.mtime,

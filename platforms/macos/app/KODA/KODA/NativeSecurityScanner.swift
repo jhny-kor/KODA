@@ -1,4 +1,4 @@
-import Compression
+import zlib
 import AppKit
 import CoreText
 import Foundation
@@ -54,6 +54,7 @@ enum NativeScanError: Error, LocalizedError {
     case unsupportedArchive(String)
     case corruptArchive(String)
     case compressionFailed(String)
+    case archiveLimit(String)
 
     var errorDescription: String? {
         switch self {
@@ -65,6 +66,8 @@ enum NativeScanError: Error, LocalizedError {
             return "압축파일을 읽을 수 없습니다: \(path)"
         case .compressionFailed(let path):
             return "압축 해제에 실패했습니다: \(path)"
+        case .archiveLimit(let path):
+            return "압축파일 처리 한도를 초과했습니다: \(path)"
         }
     }
 }
@@ -167,6 +170,15 @@ private enum NativeIgnoreRules {
 final class NativeSecurityScanner {
     private let fileManager: FileManager
     private let maxFileSize = 524_288
+    private let maxArchiveInputBytes = 256 * 1024 * 1024
+    private let maxArchiveMemberBytes = 256 * 1024 * 1024
+    private let maxArchiveExpandedBytes = 512 * 1024 * 1024
+    private let maxArchiveEntries = 10_000
+    private let maxArchiveDepth = 5
+    private struct ArchiveBudget {
+        var expandedBytes = 0
+        var entries = 0
+    }
     private let excludedDirectoryNames: Set<String> = [
         ".git",
         ".hg",
@@ -206,6 +218,7 @@ final class NativeSecurityScanner {
         var findings: [NativeFinding] = []
         var warnings: [String] = []
         var scannedFileCount = 0
+        var archiveBudget = ArchiveBudget()
 
         for target in targets {
             let resolvedTarget = target.standardizedFileURL
@@ -218,7 +231,7 @@ final class NativeSecurityScanner {
             let findingStartIndex = findings.count
             if isArchive(resolvedTarget) {
                 do {
-                    let extractedRoot = try extractArchive(resolvedTarget, under: temporaryRoot)
+                    let extractedRoot = try extractArchive(resolvedTarget, under: temporaryRoot, budget: &archiveBudget, depth: 1)
                     var scannedFileURLs: [URL] = []
                     scanDirectory(
                         extractedRoot,
@@ -228,7 +241,9 @@ final class NativeSecurityScanner {
                         findings: &findings,
                         warnings: &warnings,
                         scannedFileCount: &scannedFileCount,
-                        scannedFileURLs: &scannedFileURLs
+                        scannedFileURLs: &scannedFileURLs,
+                        archiveBudget: &archiveBudget,
+                        archiveDepth: 1
                     )
                     if !screenQualityOnly {
                         appendFindings(checkPrevention(root: extractedRoot, files: scannedFileURLs), targetName: targetName, findings: &findings)
@@ -253,7 +268,9 @@ final class NativeSecurityScanner {
                     findings: &findings,
                     warnings: &warnings,
                     scannedFileCount: &scannedFileCount,
-                    scannedFileURLs: &scannedFileURLs
+                    scannedFileURLs: &scannedFileURLs,
+                    archiveBudget: &archiveBudget,
+                    archiveDepth: 0
                 )
                 if !screenQualityOnly {
                     appendFindings(checkPrevention(root: resolvedTarget, files: scannedFileURLs), targetName: targetName, findings: &findings)
@@ -1321,7 +1338,9 @@ final class NativeSecurityScanner {
         findings: inout [NativeFinding],
         warnings: inout [String],
         scannedFileCount: inout Int,
-        scannedFileURLs: inout [URL]
+        scannedFileURLs: inout [URL],
+        archiveBudget: inout ArchiveBudget,
+        archiveDepth: Int
     ) {
         guard let enumerator = fileManager.enumerator(
             at: root,
@@ -1342,7 +1361,8 @@ final class NativeSecurityScanner {
 
             if isArchive(item) {
                 do {
-                    let extractedRoot = try extractArchive(item, under: fileManager.temporaryDirectory)
+                    let extractedRoot = try extractArchive(item, under: fileManager.temporaryDirectory, budget: &archiveBudget, depth: archiveDepth + 1)
+                    defer { try? fileManager.removeItem(at: extractedRoot) }
                     scanDirectory(
                         extractedRoot,
                         targetName: targetName,
@@ -1351,9 +1371,10 @@ final class NativeSecurityScanner {
                         findings: &findings,
                         warnings: &warnings,
                         scannedFileCount: &scannedFileCount,
-                        scannedFileURLs: &scannedFileURLs
+                        scannedFileURLs: &scannedFileURLs,
+                        archiveBudget: &archiveBudget,
+                        archiveDepth: archiveDepth + 1
                     )
-                    try? fileManager.removeItem(at: extractedRoot)
                 } catch {
                     warnings.append(error.localizedDescription)
                 }
@@ -3384,38 +3405,60 @@ final class NativeSecurityScanner {
         return textExtensions.contains(file.pathExtension.lowercased())
     }
 
-    private func extractArchive(_ archive: URL, under root: URL) throws -> URL {
+    private func extractArchive(_ archive: URL, under root: URL, budget: inout ArchiveBudget, depth: Int) throws -> URL {
+        guard depth <= maxArchiveDepth else { throw NativeScanError.archiveLimit(archive.lastPathComponent) }
         let output = root.appendingPathComponent("\(archive.lastPathComponent)-\(UUID().uuidString)")
         try fileManager.createDirectory(at: output, withIntermediateDirectories: true)
+        let startingBudget = budget
+        var completed = false
+        defer {
+            if !completed {
+                budget = startingBudget
+                try? fileManager.removeItem(at: output)
+            }
+        }
         let lowerName = archive.lastPathComponent.lowercased()
-        let data = try Data(contentsOf: archive)
+        let handle = try FileHandle(forReadingFrom: archive)
+        defer { try? handle.close() }
+        var data = Data()
+        while data.count <= maxArchiveInputBytes {
+            let chunk = try handle.read(upToCount: min(1024 * 1024, maxArchiveInputBytes + 1 - data.count)) ?? Data()
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        guard data.count <= maxArchiveInputBytes else { throw NativeScanError.archiveLimit(archive.lastPathComponent) }
 
         if lowerName.hasSuffix(".zip") || lowerName.hasSuffix(".jar") || lowerName.hasSuffix(".war") || lowerName.hasSuffix(".ear") {
-            try extractZip(data, to: output)
+            try extractZip(data, to: output, budget: &budget)
+            completed = true
             return output
         }
 
         if lowerName.hasSuffix(".tar") {
-            try extractTar(data, to: output)
+            try extractTar(data, to: output, budget: &budget)
+            completed = true
             return output
         }
 
         if lowerName.hasSuffix(".tar.gz") || lowerName.hasSuffix(".tgz") {
-            try extractTar(try gunzip(data, sourceName: archive.lastPathComponent), to: output)
+            try extractTar(try gunzip(data, sourceName: archive.lastPathComponent), to: output, budget: &budget)
+            completed = true
             return output
         }
 
         if lowerName.hasSuffix(".gz") {
             let decompressed = try gunzip(data, sourceName: archive.lastPathComponent)
+            try reserveArchiveBytes(decompressed.count, label: archive.lastPathComponent, budget: &budget)
             let fileName = String(archive.deletingPathExtension().lastPathComponent.prefix(120))
             try decompressed.write(to: safeDestination(root: output, memberName: fileName))
+            completed = true
             return output
         }
 
         throw NativeScanError.unsupportedArchive(archive.lastPathComponent)
     }
 
-    private func extractZip(_ data: Data, to output: URL) throws {
+    private func extractZip(_ data: Data, to output: URL, budget: inout ArchiveBudget) throws {
         var offset = 0
         while offset + 30 <= data.count {
             let signature = data.u32(offset)
@@ -3445,17 +3488,21 @@ final class NativeSecurityScanner {
             guard let memberName = String(data: nameData, encoding: .utf8), !memberName.isEmpty else {
                 throw NativeScanError.corruptArchive("zip filename")
             }
+            try reserveArchiveEntry(memberName, budget: &budget)
             let destination = try safeDestination(root: output, memberName: memberName)
             if memberName.hasSuffix("/") {
                 try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
             } else {
+                guard uncompressedSize <= maxArchiveMemberBytes else { throw NativeScanError.archiveLimit(memberName) }
+                try reserveArchiveBytes(uncompressedSize, label: memberName, budget: &budget)
                 try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 let compressed = Data(data[dataStart..<dataStart + compressedSize])
                 switch method {
                 case 0:
+                    guard compressed.count == uncompressedSize else { throw NativeScanError.corruptArchive(memberName) }
                     try compressed.write(to: destination)
                 case 8:
-                    try inflate(compressed, expectedSize: uncompressedSize, label: memberName).write(to: destination)
+                    try inflate(compressed, expectedSize: uncompressedSize, maxSize: uncompressedSize, label: memberName).write(to: destination)
                 default:
                     throw NativeScanError.unsupportedArchive("zip method \(method)")
                 }
@@ -3464,7 +3511,7 @@ final class NativeSecurityScanner {
         }
     }
 
-    private func extractTar(_ data: Data, to output: URL) throws {
+    private func extractTar(_ data: Data, to output: URL, budget: inout ArchiveBudget) throws {
         var offset = 0
         while offset + 512 <= data.count {
             let block = data[offset..<offset + 512]
@@ -3475,17 +3522,21 @@ final class NativeSecurityScanner {
             if name.isEmpty {
                 break
             }
+            try reserveArchiveEntry(name, budget: &budget)
             let sizeText = tarString(data, offset: offset + 124, length: 12)
-            let size = Int(sizeText.trimmingCharacters(in: .whitespacesAndNewlines), radix: 8) ?? 0
+            guard let size = Int(sizeText.trimmingCharacters(in: .whitespacesAndNewlines), radix: 8), size >= 0 else {
+                throw NativeScanError.corruptArchive("tar size")
+            }
             let typeFlag = data[offset + 156]
             let dataStart = offset + 512
-            guard dataStart + size <= data.count else {
+            guard size <= data.count - dataStart else {
                 throw NativeScanError.corruptArchive("tar")
             }
             let destination = try safeDestination(root: output, memberName: name)
             if typeFlag == 53 || name.hasSuffix("/") {
                 try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
             } else if typeFlag == 0 || typeFlag == 48 {
+                try reserveArchiveBytes(size, label: name, budget: &budget)
                 try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try Data(data[dataStart..<dataStart + size]).write(to: destination)
             }
@@ -3519,32 +3570,61 @@ final class NativeSecurityScanner {
             throw NativeScanError.corruptArchive(sourceName)
         }
         let expectedSize = Int(data.u32(data.count - 4))
-        return try inflate(Data(data[offset..<data.count - 8]), expectedSize: expectedSize, label: sourceName)
+        return try inflate(Data(data[offset..<data.count - 8]), expectedSize: expectedSize, maxSize: maxArchiveMemberBytes, label: sourceName)
     }
 
-    private func inflate(_ data: Data, expectedSize: Int, label: String) throws -> Data {
-        if data.isEmpty {
-            return Data()
+    private func inflate(_ data: Data, expectedSize: Int, maxSize: Int, label: String) throws -> Data {
+        guard expectedSize <= maxSize else { throw NativeScanError.archiveLimit(label) }
+        guard !data.isEmpty else { throw NativeScanError.corruptArchive(label) }
+        let capacity = 64 * 1024
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
+        defer { buffer.deallocate() }
+        var stream = z_stream()
+        guard inflateInit2_(&stream, -MAX_WBITS, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+            throw NativeScanError.compressionFailed(label)
         }
-        var outputSize = max(expectedSize, data.count * 4, 1024)
-        for _ in 0..<8 {
-            var output = [UInt8](repeating: 0, count: outputSize)
-            let written = data.withUnsafeBytes { source in
-                compression_decode_buffer(
-                    &output,
-                    output.count,
-                    source.bindMemory(to: UInt8.self).baseAddress!,
-                    data.count,
-                    nil,
-                    COMPRESSION_ZLIB
-                )
+        defer { inflateEnd(&stream) }
+
+        return try data.withUnsafeBytes { source in
+            stream.next_in = UnsafeMutablePointer(mutating: source.bindMemory(to: UInt8.self).baseAddress!)
+            stream.avail_in = uInt(data.count)
+            var output = Data()
+            while true {
+                let remainingInput = stream.avail_in
+                let outputSize = min(capacity, maxSize - output.count + 1)
+                stream.next_out = buffer
+                stream.avail_out = uInt(outputSize)
+                let status = zlib.inflate(&stream, Z_NO_FLUSH)
+                let written = outputSize - Int(stream.avail_out)
+                guard written <= maxSize - output.count else { throw NativeScanError.archiveLimit(label) }
+                output.append(buffer, count: written)
+                // STREAM_END distinguishes a valid empty DEFLATE stream from corrupt or
+                // truncated input, which the buffer API reports as the same zero.
+                if status == Z_STREAM_END {
+                    guard stream.avail_in == 0, output.count == expectedSize else {
+                        throw NativeScanError.corruptArchive(label)
+                    }
+                    return output
+                }
+                guard status == Z_OK,
+                      written > 0 || stream.avail_in < remainingInput else {
+                    throw NativeScanError.compressionFailed(label)
+                }
             }
-            if written > 0 {
-                return Data(output.prefix(written))
-            }
-            outputSize *= 2
         }
-        throw NativeScanError.compressionFailed(label)
+    }
+
+    private func reserveArchiveEntry(_ label: String, budget: inout ArchiveBudget) throws {
+        guard budget.entries < maxArchiveEntries else { throw NativeScanError.archiveLimit(label) }
+        budget.entries += 1
+    }
+
+    private func reserveArchiveBytes(_ count: Int, label: String, budget: inout ArchiveBudget) throws {
+        guard count >= 0, count <= maxArchiveMemberBytes,
+              budget.expandedBytes <= maxArchiveExpandedBytes - count else {
+            throw NativeScanError.archiveLimit(label)
+        }
+        budget.expandedBytes += count
     }
 
     private func safeDestination(root: URL, memberName: String) throws -> URL {
@@ -4521,6 +4601,9 @@ private extension NativeSecurityScanner {
         }
         if warning.hasPrefix("압축 해제에 실패했습니다:") {
             return warning.replacingOccurrences(of: "압축 해제에 실패했습니다:", with: "Archive extraction failed:")
+        }
+        if warning.hasPrefix("압축파일 처리 한도를 초과했습니다:") {
+            return warning.replacingOccurrences(of: "압축파일 처리 한도를 초과했습니다:", with: "Archive processing limit exceeded:")
         }
         return warning
     }

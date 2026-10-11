@@ -76,6 +76,46 @@ class PortalUiRegressionTests(unittest.TestCase):
         result = _comparison_data(_ComparisonStore({"left": left, "right": right}), "subject", "left", "right")
         self.assertEqual(result["counts"], {"new": 0, "resolved": 0, "persistent": 1})
 
+    def test_comparison_normalizes_nested_gitlab_archive_and_extraction_roots(self):
+        base = {"project_id": "p", "status": "completed", "snapshot": {
+            "gitlab_project_id": 7, "gitlab_path_with_namespace": "group/demo",
+            "gitlab_commit_sha": "a" * 40,
+        }}
+        left = {**base, "snapshot": {**base["snapshot"], "gitlab_archive_root": "demo-main-a1",
+                                      "input_id": "left"},
+                "result": {"findings": [{"rule_id": "R", "path": "left.tar.gz.extracted/demo-main-a1/src/a.py", "line": 3}]}}
+        right = {**base, "snapshot": {**base["snapshot"], "gitlab_archive_root": "demo-feature-b2",
+                                       "input_id": "right"},
+                 "result": {"findings": [{"rule_id": "R", "path": "right.tar.gz.extracted/demo-feature-b2/src/a.py", "line": 3}]}}
+        store = _ComparisonStore({"left": left, "right": right}, {
+            "left": {"name": "left.tar.gz"}, "right": {"name": "right.tar.gz"},
+        })
+        result = _comparison_data(store, "subject", "left", "right")
+        self.assertEqual(result["counts"], {"new": 0, "resolved": 0, "persistent": 1})
+
+    def test_scheduled_gitlab_comparison_restores_selected_source_directory(self):
+        base = {"project_id": "p", "status": "completed", "snapshot": {
+            "source_type": "scheduled_server", "scheduled_source_kind": "gitlab",
+            "source_gitlab_project_id": 7, "source_gitlab_path": "group/demo",
+            "gitlab_project_id": 99, "gitlab_path_with_namespace": "group/results",
+            "source_gitlab_directory": "services/api",
+        }}
+        left = {**base, "result": {"findings": [{"rule_id": "R", "path": "main.py", "line": 3}]}}
+        right = {**base, "result": {"findings": [{"rule_id": "R", "path": "services/api/main.py", "line": 3}]}}
+        result = _comparison_data(_ComparisonStore({"left": left, "right": right}), "subject", "left", "right")
+        self.assertEqual(result["counts"], {"new": 0, "resolved": 0, "persistent": 1})
+
+    def test_scheduled_gitlab_comparison_rejects_different_source_repo_with_same_result_repo(self):
+        base = {"project_id": "p", "status": "completed", "snapshot": {
+            "source_type": "scheduled_server", "scheduled_source_kind": "gitlab",
+            "source_gitlab_project_id": 7, "source_gitlab_path": "group/demo",
+            "gitlab_project_id": 99, "gitlab_path_with_namespace": "group/results",
+        }}
+        right = {**base, "snapshot": {**base["snapshot"], "source_gitlab_project_id": 8,
+                                       "source_gitlab_path": "group/other"}}
+        with self.assertRaises(ValueError):
+            _comparison_data(_ComparisonStore({"left": base, "right": right}), "subject", "left", "right")
+
     def test_comparison_does_not_guess_legacy_gitlab_archive_root(self):
         base = {"project_id": "p", "status": "completed", "snapshot": {
             "gitlab_project_id": 7, "gitlab_path_with_namespace": "group/demo",
@@ -116,7 +156,56 @@ class PortalUiRegressionTests(unittest.TestCase):
         self.assertIn("권한관리", admin_page("x", ""))
         source = Path("platforms/shared/python/security_scanner/linux_portal.py").read_text(encoding="utf-8")
         self.assertIn("syncMembershipForProject", source)
-        self.assertIn("permission-screen", source)
+        self.assertNotIn("<details class='permission-screen'>", source)
+        self.assertIn("permission-feature-screen", source)
+
+    def test_role_feature_permissions_are_screen_grouped_and_role_scoped(self):
+        source = Path("platforms/shared/python/security_scanner/linux_portal.py").read_text(encoding="utf-8")
+        self.assertIn("permission-feature-screen", source)
+        self.assertIn("data-permission-shared", source)
+        self.assertIn("box.dataset.permissionShared", source)
+        self.assertIn("box.name", source)
+        self.assertIn("!roles[k].includes(v)", source)
+
+    def test_result_and_project_buttons_follow_feature_permissions(self):
+        from security_scanner.portal_views import projects_page, project_page, run_page, runs_page
+        project = {"project_id": "p", "name": "demo"}
+        run = {"run_id": "r", "project_id": "p", "status": "completed", "round_number": 1,
+               "policy_version": 1, "snapshot": {"gitlab_project_id": 1}, "result": {"findings": []}}
+        delivery = {"status": "failed", "gitlab_result_status": "failed"}
+        denied = run_page(run, admin=False, feature_permissions=set(), tracker=delivery, gitlab_issues={"status": "failed"})
+        for marker in ("?format=pdf", "id='tracker-retry'", "id='gitlab-result-retry'", "id='gitlab-issues-retry'"):
+            self.assertNotIn(marker, denied)
+        allowed = run_page(run, admin=False, feature_permissions={"runs.export", "runs.tracker.publish", "runs.gitlab.result.publish", "runs.gitlab.issues.publish"}, tracker=delivery, gitlab_issues={"status": "failed"})
+        for marker in ("?format=pdf", "id='tracker-retry'", "id='gitlab-result-retry'", "id='gitlab-issues-retry'"):
+            self.assertIn(marker, allowed)
+        active_run = {**run, "status": "running", "snapshot": {"scan_scope": "source"}}
+        self.assertNotIn("id='cancel'", run_page(active_run, admin=False, feature_permissions={"scan.library.create"}))
+        self.assertIn("id='cancel'", run_page(active_run, admin=False, feature_permissions={"scan.source.create"}))
+        self.assertIn("id='create'", projects_page([project], admin=False, can_create=True))
+        self.assertNotIn("id='create'", projects_page([project], admin=False, can_create=False))
+        self.assertIn("data-delete-project='p'", project_page(project, [], [], admin=False, can_upload=False, can_scan=False, can_delete=True))
+        self.assertNotIn("data-delete-project='p'", project_page(project, [], [], admin=False, can_upload=False, can_scan=False, can_delete=False))
+        self.assertIn("data-delete-run='r'", runs_page([(project, [run])], admin=False, run_permissions={"r": {"runs.delete"}}))
+        self.assertNotIn("data-delete-run='r'", runs_page([(project, [run])], admin=False, run_permissions={"r": set()}))
+
+    def test_role_scan_execution_permissions_are_independent_by_screen(self):
+        source = Path("platforms/shared/python/security_scanner/linux_portal.py").read_text(encoding="utf-8")
+        views = Path("platforms/shared/python/security_scanner/portal_views.py").read_text(encoding="utf-8")
+        self.assertIn('feature_accordion("라이브러리 취약점", ("input.manage", "scan.library.create")', source)
+        self.assertIn('feature_accordion("소스코드 취약점", ("input.manage", "scan.source.create")', source)
+        self.assertIn('"scan.library.create":', views)
+        self.assertIn('"scan.source.create":', views)
+        self.assertNotIn('feature_accordion("라이브러리 취약점", ("input.manage", "scan.create")', source)
+        self.assertNotIn('feature_accordion("소스코드 취약점", ("input.manage", "scan.create")', source)
+
+    def test_rule_bulk_controls_cover_groups_and_visible_search_scope(self):
+        source = Path("platforms/shared/python/security_scanner/linux_portal.py").read_text(encoding="utf-8")
+        self.assertIn("data-rule-group-action='enable'", source)
+        self.assertIn("data-rule-group-action='disable'", source)
+        self.assertIn("data-rule-action='enable'", source)
+        self.assertIn("visibleRuleCards", source)
+        self.assertIn("peer.dataset.ruleId===box.dataset.ruleId", source)
 
 
 if __name__ == "__main__":

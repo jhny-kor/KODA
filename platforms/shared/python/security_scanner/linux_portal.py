@@ -2,22 +2,25 @@
 from __future__ import annotations
 
 import csv
+from contextlib import nullcontext
 import datetime as dt
+import fcntl
 import hashlib
+import hmac
 import io
 import json
 import os
 import queue
 import re
 import subprocess
-import tempfile
 import threading
-import zipfile
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .grype_adapter import inspect_grype
+from .sbom import safe_csv_cell
 from .portal_identity import IdentityError, IdentityUnavailable, identity_from_headers
 from .portal_integrations import (
     IntegrationError,
@@ -44,7 +47,7 @@ from .portal_integrations import (
     test_gitlab_configuration,
     test_gitlab_write_configuration,
 )
-from .portal_store import SCREEN_PERMISSIONS, PortalStore, VersionConflict
+from .portal_store import SCOPED_SCAN_PERMISSIONS, SCREEN_PERMISSIONS, PortalStore, UploadQuotaExceeded, VersionConflict
 from .tracker_subject_sync import TrackerSubjectSynchronizer, fetch_tracker_users
 from .portal_views import (
     PERMISSION_METADATA,
@@ -65,14 +68,36 @@ from .portal_views import (
     runs_page,
     script_json,
 )
-from .schedule_api import API_PREFIX, ScheduleApiError, authorize as authorize_schedule_api, configured_json_bytes, dispatch as dispatch_schedule_api
+from .schedule_api import API_PREFIX, authorize as authorize_schedule_api, configured_json_bytes, dispatch as dispatch_schedule_api
 
 # MAX_JSON_BYTES is the source-level hard ceiling; configured_json_bytes() supplies the same safe default.
 MAX_JSON_BYTES = 500 * 1024 * 1024
+MAX_PUBLIC_JSON_BYTES = 1024 * 1024
 MAX_INPUT_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_UPLOAD_QUOTA_BYTES = 10 * 1024 * 1024 * 1024
 MAX_ARCHIVE_FILES = 400_000
 MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
 _KODA_ICON = Path(__file__).with_name("assets") / "KODA.ico"
+
+
+def _page_parameters(query: dict[str, list[str]], default_size: int = 25) -> dict:
+    try:
+        current = int(query.get("page", ["1"])[0])
+        size = int(query.get("page_size", [str(default_size)])[0])
+    except (ValueError, TypeError):
+        raise ValueError("page and page_size must be integers") from None
+    if not 1 <= current <= 2_147_483_647 or not 1 <= size <= 100:
+        raise ValueError("page must be between 1 and 2147483647 and page_size must be between 1 and 100")
+    return {"page": current, "page_size": size}
+
+
+def _can_scan_scope(store: PortalStore, subject_id: str, project_id: str, scan_scope: str) -> bool:
+    permissions = {
+        "library": ("scan.library.create",),
+        "source": ("scan.source.create",),
+        "all": tuple(SCOPED_SCAN_PERMISSIONS),
+    }.get(scan_scope, ())
+    return bool(permissions) and all(store.can(subject_id, project_id, permission) for permission in permissions)
 
 
 def _safe_next(value: str) -> str:
@@ -94,9 +119,9 @@ def _vulnerability_database_status() -> dict[str, object]:
         return {"available": False, "warning": str(exc), "database": {}}
 
 
-def _run_scan(store: PortalStore, run_id: str) -> None:
-    if not store.mark_run_running(run_id):
-        return
+def _run_scan(store: PortalStore, run_id: str, *, claimed: bool = False, deliver: bool = True) -> bool | None:
+    if not claimed and not store.mark_run_running(run_id):
+        return False
     try:
         run = store.run(run_id)
         source = store.input(run["input_id"])
@@ -105,14 +130,16 @@ def _run_scan(store: PortalStore, run_id: str) -> None:
             return store.complete_run(run_id)
         work_root = (Path(source["path"]).parent / "extracted" if snapshot.get("source_type") == "scheduled_server"
                      else Path(source["path"]).parent.parent / "work")
-        work_root.mkdir(parents=True, exist_ok=True)
         from .data_release import pinned_release, release_metadata
-        with pinned_release(), tempfile.TemporaryDirectory(prefix="koda-portal-", dir=work_root) as extraction:
-            from .archive_input import prepare_input_target
+        from .archive_input import looks_like_archive, prepare_input_target
+        from .portal_workspace import extraction_workspace
+        source_path = Path(source["path"])
+        workspace = extraction_workspace(work_root, run_id) if source_path.is_file() and looks_like_archive(source_path) else nullcontext(None)
+        with pinned_release(), workspace as extraction:
             from .server import scan_directory_payload
 
             target = prepare_input_target(
-                Path(source["path"]), Path(extraction),
+                source_path, extraction,
                 max_files=min(MAX_ARCHIVE_FILES, int(snapshot.get("schedule_max_files", MAX_ARCHIVE_FILES))),
                 max_bytes=min(MAX_EXTRACTED_BYTES, int(snapshot.get("schedule_max_bytes", MAX_EXTRACTED_BYTES))),
             )
@@ -136,7 +163,7 @@ def _run_scan(store: PortalStore, run_id: str) -> None:
             if not store.set_run_progress(run_id, "finalizing", 90):
                 return store.complete_run(run_id)
         store.complete_run(run_id, result=result)
-        if snapshot.get("gitlab_mapping_id") and snapshot.get("source_type") != "scheduled_server":
+        if deliver and snapshot.get("gitlab_mapping_id") and snapshot.get("source_type") != "scheduled_server":
             try:
                 _deliver_tracker(store, run_id)
             except Exception as exc:  # Tracker failure must not change the KODA result.
@@ -226,7 +253,6 @@ def _deliver_gitlab_result(
         store.skip_source_tracker_delivery(run_id)
     delivery = store.tracker_delivery(run_id) or {}
     tracker_run_id = "" if source_only else str(delivery.get("tracker_run_id") or "")
-    scheduled = (run.get("snapshot") or {}).get("source_type") == "scheduled_server"
     if not source_only and ((not tracker_run_id and not allow_tracker_failure) or (delivery.get("status") != "completed" and not (allow_tracker_failure and delivery.get("status") == "failed"))):
         raise ValueError("completed Tracker delivery required")
     snapshot = run.get("snapshot") or {}
@@ -450,19 +476,15 @@ def _analysis_stages(result: dict, scan_scope: str = "all") -> dict[str, dict[st
 
 
 class _PortalWorker:
-    def __init__(self, store: PortalStore):
-        self.store = store
+    def __init__(self, store: PortalStore, *, role="all", isolated=False):
+        if role not in {"all", "scan", "delivery"}:
+            raise ValueError("invalid portal worker role")
+        self.store, self.role, self.isolated = store, role, isolated
         self.jobs: queue.Queue[tuple[str, str] | None] = queue.Queue()
-        self.thread = threading.Thread(target=self._work, name="koda-portal-worker", daemon=True)
+        self.stop_event = threading.Event()
+        self.ready_event = threading.Event()
+        self.thread = threading.Thread(target=self._work, name="koda-portal-worker-" + role, daemon=True)
         self.thread.start()
-        for run_id in store.recover_incomplete_runs():
-            self.jobs.put(("scan", run_id))
-        for run_id in store.recover_tracker_deliveries():
-            self.jobs.put(("tracker", run_id))
-        for run_id in store.recover_gitlab_results():
-            self.jobs.put(("gitlab_result", run_id))
-        for run_id in store.recover_gitlab_issue_deliveries():
-            self.jobs.put(("issues", run_id))
 
     @property
     def available(self) -> bool:
@@ -474,20 +496,100 @@ class _PortalWorker:
         self.jobs.put(("scan", run_id))
 
     def _work(self) -> None:
-        while (job := self.jobs.get()) is not None:
-            kind, run_id = job
-            if kind == "scan":
-                _run_scan(self.store, run_id)
-            elif kind in {"tracker", "gitlab_result", "issues"}:
+        from .portal_worker import (ScanSupervisor, data_root, ensure_delivery_queue,
+                                    next_publication, process_publication, write_heartbeat,
+                                    recover_scheduled_publications, process_scheduled_publications)
+        from .portal_workspace import cleanup_workspaces
+        suffix = ".delivery.lock" if self.role == "delivery" else ".worker.lock"
+        lock_path = Path(str(Path(self.store.path).resolve()) + suffix)
+        heartbeat_role = "delivery" if self.role == "delivery" else "scan"
+        def heartbeat():
+            while not self.stop_event.is_set():
                 try:
-                    _run_delivery(self.store, kind, run_id)
-                except Exception:
+                    write_heartbeat(self.store, heartbeat_role, self.ready_event.is_set())
+                except OSError:
+                    pass
+                self.stop_event.wait(2)
+        heartbeat_thread = None
+        try:
+            with lock_path.open("a") as lock:
+                os.fchmod(lock.fileno(), 0o600)
+                while not self.stop_event.is_set():
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        self.stop_event.wait(.25)
+                if self.stop_event.is_set():
+                    return
+                if self.role != "delivery":
+                    roots = {data_root(self.store) / "work"}
+                    with self.store._db() as db:
+                        paths = db.execute("SELECT i.path FROM inputs i JOIN scan_runs r USING(input_id) WHERE json_extract(r.snapshot_json,'$.source_type') IS NOT 'scheduled_server'").fetchall()
+                    roots.update(Path(row[0]).parent.parent / "work" for row in paths if row[0])
+                    for root in roots:
+                        errors = cleanup_workspaces(root)
+                        if errors:
+                            self.store.record_audit("portal-worker", "scan.workspace_cleanup_failed", {"errors": errors})
+                            raise OSError("portal workspace recovery incomplete")
+                    self.store.recover_incomplete_runs()
+                ensure_delivery_queue(self.store)
+                if self.role != "scan":
+                    self.store.recover_tracker_deliveries()
+                    self.store.recover_gitlab_results()
+                    self.store.recover_gitlab_issue_deliveries()
+                    with self.store._db() as db:
+                        db.execute("UPDATE portal_delivery_jobs SET status='queued' WHERE status='running'")
+                    if self.role == "delivery":
+                        recover_scheduled_publications(self.store)
+                self.ready_event.set()
+                heartbeat_thread = threading.Thread(target=heartbeat, name="koda-portal-heartbeat", daemon=True)
+                heartbeat_thread.start()
+                supervisor = ScanSupervisor(self.store, self.stop_event) if self.isolated else None
+                scheduled_check = 0
+                summary_check = 0
+                while not self.stop_event.is_set():
+                    if self.role != "delivery":
+                        run_id = self.store.next_queued_manual_run()
+                        if run_id is not None:
+                            done = supervisor.execute(run_id) if supervisor else _run_scan(self.store, run_id, deliver=False)
+                            if done is False:
+                                self.stop_event.wait(.25)
+                            continue
+                    if self.role != "scan":
+                        if self.role == "delivery" and time.monotonic() >= scheduled_check:
+                            process_scheduled_publications(self.store)
+                            scheduled_check = time.monotonic() + 15
+                        job = next_publication(self.store)
+                        if job:
+                            process_publication(self.store, job)
+                            continue
+                    if self.role != "delivery" and time.monotonic() >= summary_check:
+                        # Existing large results are migrated only while idle;
+                        # HTTP dashboard requests never build their summaries.
+                        migrated = self.store.backfill_result_summaries(limit=1)
+                        summary_check = time.monotonic() + (.25 if migrated else 30)
+                    try:
+                        job = self.jobs.get(timeout=.25)
+                    except queue.Empty:
+                        continue
+                    if job is None:
+                        break
+        finally:
+            self.ready_event.clear()
+            self.stop_event.set()
+            if heartbeat_thread:
+                heartbeat_thread.join(timeout=3)
+                try:
+                    write_heartbeat(self.store, heartbeat_role, False)
+                except OSError:
                     pass
 
     def close(self) -> None:
+        self.stop_event.set()
         if self.available:
             self.jobs.put(None)
-            self.thread.join(timeout=5)
+            self.thread.join(timeout=12 if self.isolated else 5)
 
 
 class _PortalServer(ThreadingHTTPServer):
@@ -529,10 +631,17 @@ class _TrackerIdentityWorker:
         self.thread.join(timeout=5)
 
 
-def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=None, input_dir=None):
+def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=None, input_dir=None, gateway_proof=None, upload_quota_bytes=None):
     store = PortalStore(db_path or os.environ.get("KODA_PORTAL_DB", "koda-portal.sqlite3"))
     uploads = Path(input_dir or os.environ.get("KODA_PORTAL_INPUT_DIR", "koda-portal-inputs")).expanduser()
     uploads.mkdir(parents=True, exist_ok=True)
+    expected_gateway_proof = gateway_proof if gateway_proof is not None else os.environ.get("KODA_GATEWAY_PROOF", "")
+    try:
+        upload_quota_bytes = int(upload_quota_bytes if upload_quota_bytes is not None else os.environ.get("KODA_PORTAL_UPLOAD_QUOTA_BYTES", str(DEFAULT_UPLOAD_QUOTA_BYTES)))
+    except ValueError as exc:
+        raise ValueError("KODA_PORTAL_UPLOAD_QUOTA_BYTES must be an integer") from exc
+    if upload_quota_bytes <= 0:
+        raise ValueError("KODA_PORTAL_UPLOAD_QUOTA_BYTES must be positive")
     portal_data = Path(os.environ.get("KODA_PORTAL_DATA_DIR") or Path(store.path).parent).expanduser()
     gitlab_settings_dir = portal_data / "integrations"
 
@@ -559,7 +668,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
 
         def _identity(self, api=False):
             try:
-                identity = identity_from_headers(self.headers)
+                identity = identity_from_headers(self.headers, expected_gateway_proof)
             except IdentityUnavailable as exc:
                 self._json(503, {"code": "identity_unavailable", "detail": str(exc)})
                 return None
@@ -627,11 +736,22 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 admin=admin, nav_permissions=nav_permissions,
             ))
 
-        def _payload(self):
+        def _payload(self, *, internal=False):
+            slot = None if internal else self.server.public_json_slot
+            if slot is not None and not slot.acquire(blocking=False):
+                self._json(429, {"code": "json_capacity_exceeded"})
+                return None
+            try:
+                return self._read_json_payload(internal=internal)
+            finally:
+                if slot is not None:
+                    slot.release()
+
+        def _read_json_payload(self, *, internal=False):
             if self.headers.get_content_type() != "application/json":
                 self._json(415, {"code": "json_required", "detail": "Content-Type application/json이 필요합니다"})
                 return None
-            json_limit = configured_json_bytes()
+            json_limit = configured_json_bytes() if internal else MAX_PUBLIC_JSON_BYTES
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
@@ -671,6 +791,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
             safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(str(name)).name)[:180] or "input.bin"
             temporary = uploads / f".upload-{os.urandom(12).hex()}"
             target = uploads / f"{os.urandom(8).hex()}-{safe_name}"
+            reservation_id, _ = store.reserve_upload(uploads, temporary, target, length, upload_quota_bytes)
             digest, remaining = hashlib.sha256(), length
             try:
                 with temporary.open("xb") as output:
@@ -683,13 +804,15 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                         remaining -= len(chunk)
                 temporary.replace(target)
                 try:
-                    input_id = store.add_input(project_id, safe_name, target, identity.subject_id, digest.hexdigest())
+                    input_id = store.add_input(project_id, safe_name, target, identity.subject_id, digest.hexdigest(), reservation_id=reservation_id)
                 except Exception:
                     target.unlink(missing_ok=True)
                     raise
             except Exception:
                 temporary.unlink(missing_ok=True)
                 raise
+            finally:
+                store.release_upload(reservation_id)
             return self._json(201, {"input_id": input_id, "name": safe_name, "size": length})
 
         def do_GET(self):
@@ -718,6 +841,8 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 return self._json(200, {"status": "live"})
             if path == "/koda/ready":
                 try:
+                    if len(expected_gateway_proof) < 32 or not self.headers.get("X-KODA-Gateway-Proof") or not hmac.compare_digest(self.headers["X-KODA-Gateway-Proof"], expected_gateway_proof):
+                        raise RuntimeError("gateway identity proof unavailable")
                     with store._db() as db:
                         db.execute("SELECT 1").fetchone()
                     if not self.server.portal_worker.available:
@@ -746,11 +871,17 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 visible = self._screen_projects(identity, subject, projects, "dashboard.view")
                 if not admin and not visible:
                     return self._deny_screen(admin, nav_permissions)
-                project_runs = [
-                    (project, [store.run(run["run_id"]) for run in store.list_runs(project["project_id"])])
-                    for project in visible
-                ]
-                return self._html(200, dashboard(identity, visible, project_runs, admin=admin, nav_permissions=nav_permissions))
+                statistics = store.dashboard_summary([project["project_id"] for project in visible])
+                summaries = {item["project_id"]: item for item in statistics["projects"]}
+                project_runs = []
+                for project in visible:
+                    summary = summaries.get(project["project_id"], {})
+                    latest, completed = summary.get("latest"), summary.get("latest_completed")
+                    rows = [latest] if latest else []
+                    if completed and (not latest or completed["run_id"] != latest["run_id"]):
+                        rows.append(completed)
+                    project_runs.append((project, rows))
+                return self._html(200, dashboard(identity, visible, project_runs, statistics=statistics, admin=admin, nav_permissions=nav_permissions))
             if path in {"/koda/scans/new", "/koda/scans/library", "/koda/scans/source"}:
                 if path == "/koda/scans/new":
                     scope = "all"
@@ -775,7 +906,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     {
                         **project,
                         "can_upload": store.can(identity.subject_id, project["project_id"], "input.manage"),
-                        "can_scan": store.can(identity.subject_id, project["project_id"], "scan.create"),
+                        "can_scan": _can_scan_scope(store, identity.subject_id, project["project_id"], scope),
                     }
                     for project in visible
                 ]
@@ -788,42 +919,69 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     {**project, "inputs": store.list_inputs(project["project_id"]), "runs": store.list_runs(project["project_id"])}
                     for project in visible
                 ]
-                return self._html(200, projects_page(enriched, admin=admin, nav_permissions=nav_permissions))
+                return self._html(200, projects_page(enriched, can_create=store.can_global(identity.subject_id, "project.create"), admin=admin, nav_permissions=nav_permissions))
             match = re.fullmatch(r"/koda/projects/([0-9a-f-]+)", path)
             if match:
                 project = self._project(identity, match.group(1), "projects.view")
                 if not project:
                     return self._html(404, page("찾을 수 없음", "<p>프로젝트가 없습니다.</p>", admin=admin, nav_permissions=nav_permissions))
                 project_id = project["project_id"]
-                return self._html(200, project_page(project, store.list_inputs(project_id), store.list_runs(project_id), can_upload=store.can(identity.subject_id, project_id, "input.manage"), can_scan=store.can(identity.subject_id, project_id, "scan.create"), admin=admin, nav_permissions=nav_permissions))
+                return self._html(200, project_page(project, store.list_inputs(project_id), store.list_runs(project_id), can_upload=store.can(identity.subject_id, project_id, "input.manage"), can_scan=_can_scan_scope(store, identity.subject_id, project_id, "all"), can_delete=store.can(identity.subject_id, project_id, "project.delete"), admin=admin, nav_permissions=nav_permissions))
             if path == "/koda/runs":
                 visible = self._screen_projects(identity, subject, projects, "runs.view")
                 if not admin and not visible:
                     return self._deny_screen(admin, nav_permissions)
-                visible_ids = {p["project_id"]: p["name"] for p in visible}
-                targets = {t["target_id"]: t for t in store.list_schedule_targets() if t["project_id"] in visible_ids}
-                scheduled_rows = [{**row, "project_id": targets[row["target_id"]]["project_id"],
-                                   "project_name": visible_ids[targets[row["target_id"]]["project_id"]],
-                                   "name": targets[row["target_id"]]["name"],
-                                   "scan_scope": targets[row["target_id"]]["scan_scope"],
-                                   "standard": targets[row["target_id"]]["standard"]}
-                                  for row in store.list_schedule_runs(limit=500) if row["target_id"] in targets]
-                return self._html(200, runs_page([(p, store.list_runs(p["project_id"])) for p in visible],
-                                               schedule_runs=scheduled_rows, admin=admin, nav_permissions=nav_permissions))
+                query = parse_qs(parsed.query)
+                filters = {key: query.get(key, [default])[0] for key, default in (
+                    ("source", "manual"), ("project", ""), ("scope", ""), ("status", ""),
+                )}
+                selected = [p["project_id"] for p in visible if not filters["project"] or p["name"] == filters["project"]]
+                try:
+                    if filters["source"] not in {"manual", "scheduled_server"}:
+                        raise ValueError("invalid run source")
+                    parameters = {**_page_parameters(query, 10), "status": filters["status"], "scan_scope": filters["scope"]}
+                    listing = (store.paginate_schedule_runs(selected, **parameters) if filters["source"] == "scheduled_server"
+                               else store.paginate_runs(selected, source="manual", **parameters))
+                except ValueError as exc:
+                    return self._json(422, {"code": "invalid_request", "detail": str(exc)})
+                scheduled_rows = listing["items"] if filters["source"] == "scheduled_server" else []
+                run_rows = [(p, [r for r in listing["items"] if r["project_id"] == p["project_id"]]) if filters["source"] == "manual" else (p, []) for p in visible]
+                run_permissions = {
+                    run["run_id"]: {permission for permission in (
+                        "runs.export", "runs.delete", "runs.tracker.publish",
+                        "runs.gitlab.result.publish", "runs.gitlab.issues.publish",
+                        "scan.library.create", "scan.source.create",
+                    ) if store.can(identity.subject_id, run["project_id"], permission)}
+                    for run in listing["items"] if run.get("run_id")
+                }
+                return self._html(200, runs_page(run_rows, run_permissions=run_permissions,
+                                               schedule_runs=scheduled_rows, pagination=listing, filters=filters, admin=admin, nav_permissions=nav_permissions))
             match = re.fullmatch(r"/koda/runs/([0-9a-f-]+)", path)
             if match:
                 try:
-                    run = store.run(match.group(1))
+                    run = store.run_summary(match.group(1))
                 except KeyError:
                     return self._html(404, page("찾을 수 없음", "<p>분석 회차가 없습니다.</p>", admin=admin, nav_permissions=nav_permissions))
                 project = self._project(identity, run["project_id"], "runs.view")
                 if not project:
                     return self._html(404, page("찾을 수 없음", "<p>분석 회차가 없습니다.</p>", admin=admin, nav_permissions=nav_permissions))
+                query = parse_qs(parsed.query)
+                finding_filters = {key: query.get(key, [""])[0] for key in ("search", "group", "severity")}
+                try:
+                    finding_page = store.run_findings(run["run_id"], **_page_parameters(query), **finding_filters)
+                except ValueError as exc:
+                    return self._json(422, {"code": "invalid_request", "detail": str(exc)})
+                feature_permissions = {permission for permission in (
+                    "runs.export", "runs.delete", "runs.tracker.publish",
+                    "runs.gitlab.result.publish", "runs.gitlab.issues.publish",
+                    "scan.library.create", "scan.source.create",
+                ) if store.can(identity.subject_id, run["project_id"], permission)}
                 return self._html(200, run_page(
                     run, project_name=project["name"], tracker=store.tracker_delivery(run["run_id"]),
                     gitlab_issues=store.gitlab_issue_delivery(run["run_id"]),
                     schedule_run=(store.schedule_run(run["snapshot"]["schedule_run_id"]) if run.get("snapshot", {}).get("source_type") == "scheduled_server" and run.get("snapshot", {}).get("schedule_run_id") else None),
-                    admin=admin, nav_permissions=nav_permissions,
+                    feature_permissions=feature_permissions, finding_page=finding_page, finding_filters=finding_filters,
+                    publication_pending=store.run_status(run["run_id"]).get("publication_pending", False), admin=admin, nav_permissions=nav_permissions,
                 ))
             if path == "/koda/compare":
                 visible = self._screen_projects(identity, subject, projects, "compare.view")
@@ -846,7 +1004,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 try:
                     return self._json(200, gitlab_status(gitlab_settings_dir))
                 except IntegrationError as exc:
-                    return self._json(503, {"code": "gitlab_unavailable", "detail": str(exc)})
+                    return self._json(429 if exc.status == 429 else 503, {"code": "gitlab_rate_limited" if exc.status == 429 else "gitlab_unavailable", "detail": str(exc), "retryable": exc.status == 429})
             if path == "/koda/api/v1/admin/schedule-settings":
                 if not admin:
                     return self._json(403, {"code": "forbidden"})
@@ -876,7 +1034,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 try:
                     return self._json(200, list_gitlab_projects(gitlab_settings_dir))
                 except IntegrationError as exc:
-                    return self._json(502, {"code": "gitlab_unavailable", "detail": str(exc)})
+                    return self._json(429 if exc.status == 429 else 502, {"code": "gitlab_rate_limited" if exc.status == 429 else "gitlab_unavailable", "detail": str(exc), "retryable": exc.status == 429})
             if path == "/koda/api/v1/compare":
                 if "compare.view" not in nav_permissions:
                     return self._deny_screen(admin, nav_permissions, api=True)
@@ -888,13 +1046,21 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 except ValueError as exc:
                     return self._json(422, {"code": "invalid_comparison", "detail": str(exc)})
                 export_format = query.get("format", ["json"])[0]
+                if export_format in {"json", "csv"}:
+                    for run_id in (query.get("left", [""])[0], query.get("right", [""])[0]):
+                        try:
+                            compared_run = store.run(run_id)
+                        except KeyError:
+                            return self._json(404, {"code": "not_found"})
+                        if not store.can(identity.subject_id, compared_run["project_id"], "runs.export"):
+                            return self._json(403, {"code": "forbidden"})
                 if export_format == "json":
                     raw, content_type, extension = (json.dumps(comparison, ensure_ascii=False, indent=2) + "\n").encode(), "application/json; charset=utf-8", "json"
                 elif export_format == "csv":
                     output = io.StringIO(newline="")
-                    writer = csv.DictWriter(output, fieldnames=("status", "severity", "rule_id", "category", "path", "line", "title"), lineterminator="\r\n")
+                    writer = csv.DictWriter(output, fieldnames=("status", "severity", "rule_id", "category", "path", "line", "title"), lineterminator="\r\n", quoting=csv.QUOTE_ALL)
                     writer.writeheader()
-                    writer.writerows(comparison["findings"])
+                    writer.writerows({key: safe_csv_cell(value) for key, value in finding.items()} for finding in comparison["findings"])
                     raw, content_type, extension = b"\xef\xbb\xbf" + output.getvalue().encode("utf-8"), "text/csv; charset=utf-8", "csv"
                 else:
                     return self._json(422, {"code": "unsupported_comparison_format"})
@@ -906,7 +1072,9 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 return self._json(200, visible)
             match = re.fullmatch(r"/koda/api/v1/projects/([0-9a-f-]+)/gitlab/repositories", path)
             if match:
-                project = self._project(identity, match.group(1), "scan.create")
+                project = self._project(identity, match.group(1), "projects.view")
+                if project and not any(_can_scan_scope(store, identity.subject_id, project["project_id"], scope) for scope in ("library", "source")):
+                    project = None
                 if not project:
                     return self._json(404, {"code": "not_found"})
                 rows = store.gitlab_repositories(project["project_id"])
@@ -918,7 +1086,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
             match = re.fullmatch(r"/koda/api/v1/projects/([0-9a-f-]+)/gitlab/repositories/([0-9a-f-]+)/refs", path)
             if match:
                 project_id, mapping_id = match.groups()
-                if not self._project(identity, project_id, "scan.create"):
+                if not self._project(identity, project_id, "projects.view") or not any(_can_scan_scope(store, identity.subject_id, project_id, scope) for scope in ("library", "source")):
                     return self._json(404, {"code": "not_found"})
                 try:
                     mapping = store.gitlab_repository(mapping_id, project_id)
@@ -933,7 +1101,50 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 return self._json(200, store.list_inputs(match.group(1))) if self._project(identity, match.group(1), "projects.view") else self._json(404, {"code": "not_found"})
             match = re.fullmatch(r"/koda/api/v1/projects/([0-9a-f-]+)/runs", path)
             if match:
+                if parsed.query:
+                    if not self._project(identity, match.group(1), "runs.view"):
+                        return self._json(404, {"code": "not_found"})
+                    query = parse_qs(parsed.query)
+                    try:
+                        return self._json(200, store.paginate_runs([match.group(1)], **_page_parameters(query),
+                            search=query.get("search", [""])[0], status=query.get("status", [""])[0],
+                            scan_scope=query.get("scope", [""])[0], source=query.get("source", [""])[0]))
+                    except ValueError as exc:
+                        return self._json(422, {"code": "invalid_request", "detail": str(exc)})
                 return self._json(200, store.list_runs(match.group(1))) if self._project(identity, match.group(1), "runs.view") else self._json(404, {"code": "not_found"})
+            if path == "/koda/api/v1/runs":
+                visible = self._screen_projects(identity, subject, projects, "runs.view")
+                if not admin and not visible:
+                    return self._deny_screen(admin, nav_permissions, api=True)
+                query = parse_qs(parsed.query)
+                try:
+                    return self._json(200, store.paginate_runs([p["project_id"] for p in visible], **_page_parameters(query),
+                        search=query.get("search", [""])[0], status=query.get("status", [""])[0],
+                        scan_scope=query.get("scope", [""])[0], source=query.get("source", [""])[0]))
+                except ValueError as exc:
+                    return self._json(422, {"code": "invalid_request", "detail": str(exc)})
+            match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/(status|findings)(?:/(\d+))?", path)
+            if match:
+                try:
+                    status = store.run_status(match.group(1))
+                    if not self._project(identity, status["project_id"], "runs.view"):
+                        return self._json(404, {"code": "not_found"})
+                    if match.group(2) == "status":
+                        if match.group(3) is not None:
+                            return self._json(404, {"code": "not_found"})
+                        return self._json(200, status)
+                    if match.group(3) is not None:
+                        index = int(match.group(3))
+                        if index > 9_223_372_036_854_775_807:
+                            return self._json(404, {"code": "not_found"})
+                        return self._json(200, store.run_finding(match.group(1), index))
+                    query = parse_qs(parsed.query)
+                    return self._json(200, store.run_findings(match.group(1), **_page_parameters(query),
+                        search=query.get("search", [""])[0], group=query.get("group", [""])[0], severity=query.get("severity", [""])[0]))
+                except KeyError:
+                    return self._json(404, {"code": "not_found"})
+                except ValueError as exc:
+                    return self._json(422, {"code": "invalid_request", "detail": str(exc)})
             match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)", path)
             if match:
                 try:
@@ -955,6 +1166,9 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 return self._json(200, {
                     **delivery,
                     "trackerRunUrl": delivery.get("tracker_run_url"),
+                    "gitlabRepository": delivery.get("gitlab_repository"),
+                    "gitlabMergeRequestIid": delivery.get("gitlab_merge_request_iid"),
+                    "gitlabResultRound": delivery.get("gitlab_result_round"),
                     "gitlabResultStatus": delivery.get("gitlab_result_status", "pending"),
                     "gitlabResultAttempts": delivery.get("gitlab_result_attempts", 0),
                     "gitlabResultLastError": delivery.get("gitlab_result_last_error"),
@@ -976,6 +1190,8 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     return self._json(404, {"code": "not_found"})
                 if not self._project(identity, run["project_id"], "runs.view"):
                     return self._json(404, {"code": "not_found"})
+                if not store.can(identity.subject_id, run["project_id"], "runs.export"):
+                    return self._json(403, {"code": "forbidden"})
                 if run["status"] != "completed":
                     return self._json(409, {"code": "run_not_completed"})
                 sbom_format = parse_qs(parsed.query).get("format", ["nis-sbom"])[0]
@@ -1012,54 +1228,26 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
             match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/(report|report(?:-detail|-vulnerabilities)?\.html)", path)
             if match:
                 try:
-                    run = store.run(match.group(1))
+                    run = store.run_status(match.group(1))
                 except KeyError:
                     return self._json(404, {"code": "not_found"})
                 if not self._project(identity, run["project_id"], "runs.view"):
                     return self._json(404, {"code": "not_found"})
+                if not store.can(identity.subject_id, run["project_id"], "runs.export"):
+                    return self._json(403, {"code": "forbidden"})
                 if run["status"] != "completed":
                     return self._json(409, {"code": "run_not_completed"})
-                from .reporting import (
-                    PdfExportError,
-                    render_html_pair_zip_from_payload,
-                    render_hwpx,
-                    render_markdown_from_payload,
-                    render_pdf,
-                    render_xlsx,
-                )
-
-                report_format = parse_qs(parsed.query).get("format", ["html"])[0]
-                result = dict(run.get("result") or {})
-                scan = dict(result.get("scan") or {})
-                snapshot = run.get("snapshot") or {}
-                scan.setdefault("scope", snapshot.get("scan_scope") or "all")
-                scan.setdefault("standard", run.get("standard") or snapshot.get("standard"))
-                scan.setdefault("standard_category", run.get("standard_category") or snapshot.get("standard_category"))
-                result["scan"] = scan
-                filename = f"koda-round-{run['round_number']}-report"
-                if match.group(2) in {"report.html", "report-detail.html", "report-vulnerabilities.html"}:
-                    archive = render_html_pair_zip_from_payload(result, language)
-                    with zipfile.ZipFile(io.BytesIO(archive)) as reports:
-                        return self._send(200, reports.read(match.group(2)), "text/html; charset=utf-8")
-                if report_format == "html":
-                    raw, content_type, extension = render_html_pair_zip_from_payload(result, language), "application/zip", "zip"
-                elif report_format in {"md", "markdown"}:
-                    raw, content_type, extension = render_markdown_from_payload(result, language).encode("utf-8"), "text/markdown; charset=utf-8", "md"
-                elif report_format == "xlsx":
-                    raw, content_type, extension = render_xlsx(result, language), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"
-                elif report_format == "hwpx":
-                    raw, content_type, extension = render_hwpx(result, language), "application/hwp+zip", "hwpx"
-                elif report_format == "pdf":
-                    try:
-                        raw = render_pdf(result, language)
-                    except PdfExportError as exc:
-                        return self._json(503, {"code": "pdf_unavailable", "detail": str(exc)})
-                    content_type, extension = "application/pdf", "pdf"
-                elif report_format == "json":
-                    raw, content_type, extension = (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), "application/json; charset=utf-8", "json"
-                else:
+                from .portal_reports import REPORT_FORMATS, ReportExportError, render_portal_report
+                inline = match.group(2) != "report"
+                report_format = match.group(2) if inline else parse_qs(parsed.query).get("format", ["html"])[0]
+                if report_format not in REPORT_FORMATS:
                     return self._json(422, {"code": "unsupported_report_format"})
-                return self._send(200, raw, content_type, {"Content-Disposition": f'attachment; filename="{filename}.{extension}"'})
+                try:
+                    raw, content_type, extension = render_portal_report(store.path, run["run_id"], report_format, language)
+                except ReportExportError as exc:
+                    return self._json(503, {"code": exc.code, "detail": str(exc)})
+                headers = None if inline else {"Content-Disposition": f'attachment; filename="koda-round-{run["round_number"]}-report.{extension}"'}
+                return self._send(200, raw, content_type, headers)
             if path == "/koda/api/v1/admin/server-connections":
                 if not admin:
                     return self._json(403, {"code": "forbidden"})
@@ -1165,16 +1353,35 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                             f"<td class='permission-check'><input type='checkbox' name='{esc(role)}' value='{esc(permission)}' {'checked' if permission in values else ''} aria-label='{esc(ROLE_LABELS.get(role, role))} · {esc(screen)} · {esc(feature)}'></td>"
                             for role, values in policy["roles"].items()
                         )
-                        rows.append(f"<tr><th><details class='permission-screen'><summary><strong>{esc(screen)}</strong></summary><small>{esc(feature)}</small><br><code>{esc(permission)}</code></details></th><td class='wrap'>{esc(description)}</td>{cells}</tr>")
+                        rows.append(f"<tr><th><strong>{esc(screen)}</strong></th><td class='wrap'>{esc(description)}</td>{cells}</tr>")
                     table = f"<div class='table-wrap'><table><thead><tr><th>화면·기능</th><th>설명</th>{role_headers}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
                     return f"<details open class='permission-accordion'><summary>{esc(title)}</summary>{table}</details>" if title == "기능 실행 권한" else f"<h3 class='panel-body'>{esc(title)}</h3>{table}"
                 screen_table = permission_table("화면 접근 권한", (
                     "dashboard.view", "scan.library.view", "scan.source.view", "runs.view", "compare.view", "projects.view",
                 ))
-                # Project creation is a global system-admin operation; only
-                # project-scoped actions are exposed as role-level features.
-                feature_table = permission_table("기능 실행 권한", ("input.manage", "scan.create"))
-                body = f"<section class='panel'><div class='panel-head'><div><h2>KODA 전역 역할 정책</h2><p class='muted'>역할 정의는 모든 프로젝트에 공통 적용됩니다. 사용자별 프로젝트 접근은 KODA 접근 탭에서 배정합니다.</p></div></div><form id='roles'><input type='hidden' name='expected_version' value='{policy['version']}'>{screen_table}{feature_table}<div class='panel-body'><button class='primary'>역할 정책 저장</button></div></form></section><script>document.querySelector('#roles')?.addEventListener('submit',async e=>{{e.preventDefault();const f=new FormData(e.currentTarget),roles={script_json({role: [] for role in policy['roles']})};for(const [k,v] of f)if(k in roles)roles[k].push(v);try{{await json('/koda/api/v1/admin/roles',{{method:'POST',body:JSON.stringify({{expected_version:Number(f.get('expected_version')),roles}})}});location.reload()}}catch(x){{alert(x.message)}}}})</script>"
+                def feature_accordion(title, permissions, note):
+                    rows = []
+                    for permission in permissions:
+                        screen, feature, description = PERMISSION_METADATA[permission]
+                        cells = "".join(
+                            f"<td class='permission-check'><input type='checkbox' name='{esc(role)}' value='{esc(permission)}' data-permission-shared='{esc(permission)}' {'checked' if permission in values else ''} aria-label='{esc(ROLE_LABELS.get(role, role))} · {esc(title)} · {esc(feature)}'></td>"
+                            for role, values in policy["roles"].items()
+                        )
+                        rows.append(f"<tr><th>{esc(feature)}</th><td class='wrap'>{esc(description)}</td>{cells}</tr>")
+                    table = f"<div class='table-wrap'><table><thead><tr><th>화면 기능</th><th>설명</th>{role_headers}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+                    return f"<details open class='permission-accordion permission-feature-screen' data-permission-screen='{esc(title)}'><summary>{esc(title)}</summary><p class='muted'>{esc(note)}</p>{table}</details>"
+
+                # Input registration is shared between the two scan screens;
+                # execution is scoped so roles can authorize each independently.
+                feature_table = "".join((
+                    feature_accordion("라이브러리 취약점", ("input.manage", "scan.library.create"), "라이브러리 취약점 점검 실행 권한입니다. 파일 등록 권한은 프로젝트 전체에서 공유됩니다."),
+                    feature_accordion("소스코드 취약점", ("input.manage", "scan.source.create"), "소스코드 취약점 점검 실행 권한입니다. 파일 등록 권한은 프로젝트 전체에서 공유됩니다."),
+                    feature_accordion("점검 결과", ("runs.export", "runs.delete", "runs.tracker.publish", "runs.gitlab.result.publish", "runs.gitlab.issues.publish"), "보고서 내보내기, 결과 삭제와 연동 전송 재시도를 각각 설정합니다. 배정된 프로젝트에만 적용됩니다."),
+                    feature_accordion("프로젝트", ("project.create", "project.delete", "input.manage"), "프로젝트 생성, 배정된 프로젝트 삭제 및 입력 등록 권한을 설정합니다. 시스템 관리자는 모든 기능을 사용할 수 있습니다."),
+                ))
+                role_json = script_json({role: [] for role in policy["roles"]})
+                role_script = """<script>document.querySelector('#roles')?.addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.currentTarget),roles=""" + role_json + """;for(const [k,v] of f)if(k in roles&&!roles[k].includes(v))roles[k].push(v);try{await json('/koda/api/v1/admin/roles',{method:'POST',body:JSON.stringify({expected_version:Number(f.get('expected_version')),roles})});location.reload()}catch(x){alert(x.message)}});document.querySelectorAll('[data-permission-shared]').forEach(box=>box.addEventListener('change',()=>document.querySelectorAll('[data-permission-shared=\"'+box.dataset.permissionShared+'\"][name=\"'+box.name+'\"]').forEach(peer=>{if(peer!==box)peer.checked=box.checked})));</script>"""
+                body = f"<section class='panel'><div class='panel-head'><div><h2>KODA 전역 역할 정책</h2><p class='muted'>역할 정의는 모든 프로젝트에 공통 적용됩니다. 사용자별 프로젝트 접근은 KODA 접근 탭에서 배정합니다.</p></div></div><form id='roles'><input type='hidden' name='expected_version' value='{policy['version']}'>{screen_table}<h3 class='panel-body'>기능 실행 권한</h3>{feature_table}<div class='panel-body'><button class='primary'>역할 정책 저장</button></div></form></section>{role_script}"
                 return self._html(200, admin_page("역할 정책", body, active="roles", nav_permissions=nav_permissions))
             if path == "/koda/admin/rules":
                 policy = store.rule_policy(project_id) if project_id else {"version": 0, "disabled_rules": []}
@@ -1210,9 +1417,10 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                             f"<div class='choice' data-rule-card><label><input type='checkbox' name='rule' value='{esc(rule['id'])}' data-rule-id='{esc(rule['id'])}' {'' if rule['id'] in disabled else 'checked'}> {esc(rule['title'])} <small class='muted'>{esc(rule['id'])}</small></label>"
                             f"<details><summary>상세 매핑</summary><ul>{''.join(rows)}</ul></details></div>"
                         )
-                    rule_groups.append(f"<details data-rule-group><summary>{esc(group['label'])} ({len(group.get('rules', []))})</summary>{''.join(choices)}</details>")
+                    rule_groups.append(f"<details data-rule-group><summary><span>{esc(group['label'])} ({len(group.get('rules', []))})</span><span class='toolbar'><button type='button' class='button' data-rule-group-action='enable'>전체 선택</button><button type='button' class='button' data-rule-group-action='disable'>전체 해제</button></span></summary>{''.join(choices)}</details>")
                 rule_groups = "".join(rule_groups)
-                body = f"<form method='get' class='toolbar toolbar-spaced'><label>프로젝트<select name='project'>{options}</select></label><button>열기</button></form><section class='panel'><div class='panel-head'><div><h2>점검 규칙</h2><p class='muted'>보안 기준별 카드에서 공식 매핑을 확인합니다. 같은 규칙은 모든 카드에서 함께 켜지고 꺼집니다.</p></div><input id='rule-search' type='search' placeholder='규칙 검색'></div><form id='rules' class='panel-body'><input type='hidden' name='project_id' value='{esc(project_id)}'><input type='hidden' name='expected_version' value='{policy['version']}'>{rule_groups}<button class='primary toolbar-submit'>저장</button></form></section><script>const knownRules={script_json(known_rules)},preservedDisabled={script_json(preserved_disabled)};document.querySelectorAll('[data-rule-id]').forEach(box=>box.addEventListener('change',()=>document.querySelectorAll('[data-rule-id]').forEach(peer=>{{if(peer.dataset.ruleId===box.dataset.ruleId)peer.checked=box.checked}})));document.querySelector('#rule-search').addEventListener('input',e=>{{const q=e.target.value.toLowerCase();document.querySelectorAll('[data-rule-card]').forEach(card=>card.hidden=!card.textContent.toLowerCase().includes(q));document.querySelectorAll('[data-rule-group]').forEach(group=>group.hidden=![...group.querySelectorAll('[data-rule-card]')].some(card=>!card.hidden))}});document.querySelector('#rules')?.addEventListener('submit',async e=>{{e.preventDefault();const f=new FormData(e.currentTarget),enabled=new Set([...document.querySelectorAll('[data-rule-id]:checked')].map(x=>x.value)),disabled=[...new Set([...preservedDisabled,...knownRules.filter(id=>!enabled.has(id))])];try{{await json('/koda/api/v1/admin/rules',{{method:'POST',body:JSON.stringify({{project_id:f.get('project_id'),expected_version:Number(f.get('expected_version')),disabled_rules:disabled}})}});location.reload()}}catch(x){{alert(x.message)}}}})</script>"
+                rules_script = """<script>const knownRules=""" + script_json(known_rules) + """,preservedDisabled=""" + script_json(preserved_disabled) + """;function visibleRuleCards(){return [...document.querySelectorAll('[data-rule-card]')].filter(card=>!card.hidden)}function applyRuleSelection(mode,cards){(cards||visibleRuleCards()).forEach(card=>{const box=card.querySelector('[data-rule-id]');if(box){box.checked=mode==='enable';document.querySelectorAll('[data-rule-id=\"'+box.dataset.ruleId+'\"]').forEach(peer=>peer.checked=box.checked)}})}document.querySelectorAll('[data-rule-id]').forEach(box=>box.addEventListener('change',()=>document.querySelectorAll('[data-rule-id=\"'+box.dataset.ruleId+'\"]').forEach(peer=>{if(peer.dataset.ruleId===box.dataset.ruleId&&peer!==box)peer.checked=box.checked})));document.querySelectorAll('[data-rule-action]').forEach(button=>button.addEventListener('click',()=>applyRuleSelection(button.dataset.ruleAction)));document.querySelectorAll('[data-rule-group-action]').forEach(button=>button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();applyRuleSelection(button.dataset.ruleGroupAction,[...button.closest('[data-rule-group]').querySelectorAll('[data-rule-card]')])}));document.querySelector('#rule-search').addEventListener('input',e=>{const q=e.target.value.toLowerCase();document.querySelectorAll('[data-rule-card]').forEach(card=>card.hidden=!card.textContent.toLowerCase().includes(q));document.querySelectorAll('[data-rule-group]').forEach(group=>group.hidden=![...group.querySelectorAll('[data-rule-card]')].some(card=>!card.hidden))});document.querySelector('#rules')?.addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.currentTarget),enabled=new Set([...document.querySelectorAll('[data-rule-id]:checked')].map(x=>x.value)),disabled=[...new Set([...preservedDisabled,...knownRules.filter(id=>!enabled.has(id))])];try{await json('/koda/api/v1/admin/rules',{method:'POST',body:JSON.stringify({project_id:f.get('project_id'),expected_version:Number(f.get('expected_version')),disabled_rules:disabled})});location.reload()}catch(x){alert(x.message)}})</script>"""
+                body = f"<form method='get' class='toolbar toolbar-spaced'><label>프로젝트<select name='project'>{options}</select></label><button>열기</button></form><section class='panel'><div class='panel-head'><div><h2>점검 규칙</h2><p class='muted'>보안 기준별 카드에서 공식 매핑을 확인합니다. 같은 규칙은 모든 카드에서 함께 켜지고 꺼집니다.</p></div><div class='toolbar'><input id='rule-search' type='search' placeholder='규칙 검색'><button type='button' class='button' data-rule-action='enable'>전체 선택</button><button type='button' class='button' data-rule-action='disable'>전체 해제</button></div></div><form id='rules' class='panel-body'><input type='hidden' name='project_id' value='{esc(project_id)}'><input type='hidden' name='expected_version' value='{policy['version']}'>{rule_groups}<button class='primary toolbar-submit'>저장</button></form></section>" + rules_script
                 return self._html(200, admin_page("보안·품질 점검 설정", body, active="rules", nav_permissions=nav_permissions))
             return self._html(404, admin_page("찾을 수 없음", "<p>관리 화면이 없습니다.</p>", nav_permissions=nav_permissions))
 
@@ -1222,17 +1430,24 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
             if path.startswith(API_PREFIX + "/"):
                 if not authorize_schedule_api(dict(self.headers.items())):
                     return self._json(401, {"code": "unauthorized"})
-                payload = self._payload()
-                if payload is None:
-                    return
+                slot = (self.server.internal_archive_slot if path == API_PREFIX + "/gitlab-archive"
+                        else self.server.internal_json_slot)
+                if not slot.acquire(blocking=False):
+                    return self._json(429, {"code": "schedule_api_busy"})
                 try:
-                    if path == API_PREFIX + "/gitlab-archive":
-                        from .schedule_gitlab_proxy import serve_archive
-                        return serve_archive(self, store, payload, gitlab_settings_dir)
-                    status, value = dispatch_schedule_api(path, "POST", payload, store=store)
-                except (KeyError, ValueError, TypeError) as exc:
-                    return self._json(422, {"code": "invalid_request", "detail": str(exc)[:500]})
-                return self._json(status, value)
+                    payload = self._payload(internal=True)
+                    if payload is None:
+                        return
+                    try:
+                        if path == API_PREFIX + "/gitlab-archive":
+                            from .schedule_gitlab_proxy import serve_archive
+                            return serve_archive(self, store, payload, gitlab_settings_dir)
+                        status, value = dispatch_schedule_api(path, "POST", payload, store=store)
+                    except (KeyError, ValueError, TypeError) as exc:
+                        return self._json(422, {"code": "invalid_request", "detail": str(exc)[:500]})
+                    return self._json(status, value)
+                finally:
+                    slot.release()
             if path == "/koda/login":
                 return self._html(405, login_page())
             authenticated = self._enabled(True)
@@ -1243,6 +1458,8 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
             if input_match and self.headers.get_content_type() == "application/octet-stream":
                 try:
                     return self._stream_input(identity, input_match.group(1), parsed)
+                except UploadQuotaExceeded:
+                    return self._json(413, {"code": "upload_quota_exceeded", "max_bytes": upload_quota_bytes})
                 except PermissionError:
                     return self._json(403, {"code": "forbidden"})
                 except KeyError:
@@ -1255,7 +1472,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
             admin = self._admin(subject)
             try:
                 if path == "/koda/api/v1/projects":
-                    if not admin:
+                    if not store.can_global(identity.subject_id, "project.create"):
                         return self._json(403, {"code": "forbidden"})
                     if not self._exact(payload, {"name"}):
                         return
@@ -1280,7 +1497,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     if not screen_permissions or any(
                         not self._project(identity, payload["project_id"], permission)
                         for permission in screen_permissions
-                    ) or not self._project(identity, payload["project_id"], "scan.create"):
+                    ) or not _can_scan_scope(store, identity.subject_id, payload["project_id"], payload["scan_scope"]):
                         return self._json(404, {"code": "not_found"})
                     if not self.server.portal_worker.available:
                         return self._json(503, {"code": "worker_unavailable"})
@@ -1290,19 +1507,25 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                         commit_sha = resolve_gitlab_ref(mapping["gitlab_project_id"], ref_type, ref_name, gitlab_settings_dir)
                         target = uploads / f"{os.urandom(16).hex()}.tar.gz"
                         input_id = ""
+                        temporary = target.with_name("." + target.name + ".part")
+                        reservation_id, allowance = store.reserve_upload(
+                            uploads, temporary, target, MAX_INPUT_BYTES, upload_quota_bytes, exact=False,
+                        )
                         try:
                             digest, _ = download_gitlab_archive(
-                                mapping["gitlab_project_id"], commit_sha, target, max_bytes=MAX_INPUT_BYTES,
+                                mapping["gitlab_project_id"], commit_sha, target, max_bytes=allowance,
                                 settings_dir=gitlab_settings_dir,
                             )
                             archive_root = gitlab_archive_root(target)
                             input_id = store.add_input(
                                 payload["project_id"], f"{mapping['name']}-{commit_sha[:12]}.tar.gz",
-                                target, identity.subject_id, digest,
+                                target, identity.subject_id, digest, reservation_id=reservation_id,
                             )
                         except Exception:
                             target.unlink(missing_ok=True)
                             raise
+                        finally:
+                            store.release_upload(reservation_id)
                         payload["input_id"] = input_id
                         payload["source_snapshot"] = {
                             "gitlab_mapping_id": mapping["mapping_id"],
@@ -1331,25 +1554,28 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     if not self._exact(payload, set()):
                         return
                     run = store.run(match.group(1))
-                    if not self._project(identity, run["project_id"], "runs.view") or not self._project(identity, run["project_id"], "scan.create"):
+                    if not self._project(identity, run["project_id"], "runs.view") or not store.can(identity.subject_id, run["project_id"], "runs.tracker.publish"):
                         return self._json(404, {"code": "not_found"})
-                    return self._json(200, _run_delivery(store, "tracker", run["run_id"], retry=True))
+                    from .portal_worker import enqueue_delivery
+                    return self._json(202, enqueue_delivery(store, "tracker", run["run_id"], retry=True))
                 match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/gitlab/result/retry", path)
                 if match:
-                    if not admin:
+                    run = store.run(match.group(1))
+                    if not store.can(identity.subject_id, run["project_id"], "runs.gitlab.result.publish"):
                         return self._json(403, {"code": "forbidden"})
                     if not self._exact(payload, set()):
                         return
-                    run = store.run(match.group(1))
-                    return self._json(200, _run_delivery(store, "gitlab_result", run["run_id"], retry=True))
+                    from .portal_worker import enqueue_delivery
+                    return self._json(202, enqueue_delivery(store, "gitlab_result", run["run_id"], retry=True))
                 match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/gitlab/issues/retry", path)
                 if match:
-                    if not admin:
+                    run = store.run(match.group(1))
+                    if not store.can(identity.subject_id, run["project_id"], "runs.gitlab.issues.publish"):
                         return self._json(403, {"code": "forbidden"})
                     if not self._exact(payload, set()):
                         return
-                    run = store.run(match.group(1))
-                    return self._json(200, _run_delivery(store, "issues", run["run_id"], retry=True))
+                    from .portal_worker import enqueue_delivery
+                    return self._json(202, enqueue_delivery(store, "issues", run["run_id"], retry=True))
                 if path == "/koda/api/v1/admin/gitlab/mappings":
                     if not admin:
                         return self._json(403, {"code": "forbidden"})
@@ -1491,7 +1717,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     if not self._exact(payload, set()):
                         return
                     run = store.run(match.group(1))
-                    if not self._project(identity, run["project_id"], "runs.view") or not self._project(identity, run["project_id"], "scan.create"):
+                    if not self._project(identity, run["project_id"], "runs.view") or not _can_scan_scope(store, identity.subject_id, run["project_id"], run.get("snapshot", {}).get("scan_scope", "all")):
                         return self._json(404, {"code": "not_found"})
                     return self._json(200, store.request_cancel(run["run_id"], identity.subject_id))
                 if path == "/koda/api/v1/admin/subjects":
@@ -1524,11 +1750,15 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     return self._json(200, store.set_rule_policy(project_id, payload["disabled_rules"], payload["expected_version"], identity.subject_id))
             except VersionConflict as exc:
                 return self._json(409, {"code": "version_conflict", "detail": str(exc)})
+            except UploadQuotaExceeded:
+                return self._json(413, {"code": "upload_quota_exceeded", "max_bytes": upload_quota_bytes})
             except PermissionError:
                 return self._json(403, {"code": "forbidden"})
             except KeyError:
                 return self._json(404, {"code": "not_found"})
             except IntegrationError as exc:
+                if exc.status == 429:
+                    return self._json(429, {"code": "gitlab_rate_limited", "detail": str(exc), "retryable": True})
                 return self._json(502, {"code": "integration_unavailable", "detail": str(exc)})
             except (ValueError, TypeError) as exc:
                 return self._json(422, {"code": "invalid_request", "detail": str(exc)})
@@ -1551,9 +1781,25 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     return self._json(404, {"code": "not_found"})
                 except ValueError as exc:
                     return self._json(409, {"code": "server_in_use", "detail": str(exc)})
+            project_match = re.fullmatch(r"/koda/api/v1/projects/([0-9a-f-]+)", path)
+            if project_match:
+                if not store.can(identity.subject_id, project_match.group(1), "project.delete"):
+                    return self._json(403, {"code": "forbidden"})
+                try:
+                    return self._json(200, store.delete_project(project_match.group(1), identity.subject_id))
+                except KeyError:
+                    return self._json(404, {"code": "not_found"})
+                except PermissionError:
+                    return self._json(403, {"code": "forbidden"})
+                except ValueError as exc:
+                    return self._json(409, {"code": "project_not_deletable", "detail": str(exc)})
             match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)", path)
             if match:
-                if not self._admin(subject):
+                try:
+                    run = store.run(match.group(1))
+                except KeyError:
+                    return self._json(404, {"code": "not_found"})
+                if not store.can(identity.subject_id, run["project_id"], "runs.delete"):
                     return self._json(403, {"code": "forbidden"})
                 try:
                     store.delete_run(match.group(1), identity.subject_id)
@@ -1606,8 +1852,13 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
 
     server = _PortalServer((host, port), Handler)
     server.daemon_threads = True
+    server.internal_json_slot = threading.BoundedSemaphore(1)
+    server.internal_archive_slot = threading.BoundedSemaphore(1)
+    server.public_json_slot = threading.BoundedSemaphore(8)
     server.portal_store = store
-    server.portal_worker = _PortalWorker(store)
+    from .portal_worker import ExternalWorkerProxy
+    server.portal_worker = (ExternalWorkerProxy(store) if os.environ.get("KODA_PORTAL_EXTERNAL_WORKER") == "1"
+                            else _PortalWorker(store))
     tracker_url = (os.environ.get("KODA_TRACKER_URL") or os.environ.get("KODA_SSBOM_TRACKER_URL") or "").strip()
     tracker_token_file = os.environ.get("KODA_TRACKER_PROVISIONING_TOKEN_FILE", "").strip()
     server.tracker_identity_worker = (
@@ -1661,7 +1912,13 @@ def _compare_page(store: PortalStore, subject_id: str, left: str, right: str, ad
         for item in comparison["findings"]
     ) or "<tr><td colspan='6' class='empty'>변경된 항목이 없습니다.</td></tr>"
     query = f"left={left}&right={right}"
-    body = f"""{form}<div class='compare-layout'><section class='panel summary-strip compare-wide'><div><small>신규</small><strong>{counts['new']}</strong></div><div><small>해결</small><strong>{counts['resolved']}</strong></div><div><small>유지</small><strong>{counts['persistent']}</strong></div></section><section class='panel compare-wide'><div class='panel-head'><h2>{esc(comparison['project_name'])} 항목별 비교</h2><div class='toolbar'><input id='comparison-search' type='search' placeholder='규칙, 파일, 제목 검색'><select id='comparison-status'><option value=''>모든 상태</option><option value='new'>신규</option><option value='resolved'>해결</option><option value='persistent'>유지</option></select><a class='button' href='/koda/api/v1/compare?{query}&format=csv'>CSV</a><a class='button' href='/koda/api/v1/compare?{query}&format=json'>JSON</a></div></div><div class='table-wrap' data-pager data-page-size='10'><table id='comparison-table'><thead><tr><th>상태</th><th>심각도</th><th>규칙</th><th>파일</th><th>위치</th><th>제목</th></tr></thead><tbody>{rows}</tbody></table></div></section></div><script>function filterComparison(){{const q=document.querySelector('#comparison-search').value.toLowerCase(),s=document.querySelector('#comparison-status').value;document.querySelectorAll('#comparison-table tbody tr').forEach(r=>r.dataset.filtered=String((q&&!r.textContent.toLowerCase().includes(q))||(s&&!r.querySelector('.status')?.classList.contains('status-'+s))));document.querySelector('#comparison-table').closest('[data-pager]')?._paginate()}}document.querySelector('#comparison-search').addEventListener('input',filterComparison);document.querySelector('#comparison-status').addEventListener('change',filterComparison)</script>"""
+    export_allowed = all(store.can(subject_id, store.run(run_id)["project_id"], "runs.export") for run_id in (left, right))
+    export_links = (
+        f"<a class='button' href='/koda/api/v1/compare?{query}&format=csv'>CSV</a>"
+        f"<a class='button' href='/koda/api/v1/compare?{query}&format=json'>JSON</a>"
+        if export_allowed else ""
+    )
+    body = f"""{form}<div class='compare-layout'><section class='panel summary-strip compare-wide'><div><small>신규</small><strong>{counts['new']}</strong></div><div><small>해결</small><strong>{counts['resolved']}</strong></div><div><small>유지</small><strong>{counts['persistent']}</strong></div></section><section class='panel compare-wide'><div class='panel-head'><h2>{esc(comparison['project_name'])} 항목별 비교</h2><div class='toolbar'><input id='comparison-search' type='search' placeholder='규칙, 파일, 제목 검색'><select id='comparison-status'><option value=''>모든 상태</option><option value='new'>신규</option><option value='resolved'>해결</option><option value='persistent'>유지</option></select>{export_links}</div></div><div class='table-wrap' data-pager data-page-size='10'><table id='comparison-table'><thead><tr><th>상태</th><th>심각도</th><th>규칙</th><th>파일</th><th>위치</th><th>제목</th></tr></thead><tbody>{rows}</tbody></table></div></section></div><script>function filterComparison(){{const q=document.querySelector('#comparison-search').value.toLowerCase(),s=document.querySelector('#comparison-status').value;document.querySelectorAll('#comparison-table tbody tr').forEach(r=>r.dataset.filtered=String((q&&!r.textContent.toLowerCase().includes(q))||(s&&!r.querySelector('.status')?.classList.contains('status-'+s))));document.querySelector('#comparison-table').closest('[data-pager]')?._paginate()}}document.querySelector('#comparison-search').addEventListener('input',filterComparison);document.querySelector('#comparison-status').addEventListener('change',filterComparison)</script>"""
     return page("회차 비교", body, admin=admin, nav_permissions=nav_permissions)
 
 
@@ -1675,9 +1932,19 @@ def _comparison_data(store: PortalStore, subject_id: str, left: str, right: str)
         raise ValueError("two different runs are required")
     if before["project_id"] != after["project_id"]:
         raise ValueError("runs must belong to the same project")
-    before_repository = (before.get("snapshot") or {}).get("gitlab_project_id")
-    after_repository = (after.get("snapshot") or {}).get("gitlab_project_id")
-    if (before_repository or after_repository) and before_repository != after_repository:
+    def gitlab_source_identity(run):
+        snapshot = run.get("snapshot") or {}
+        # Scheduled GitLab scans have a source repository and may publish to
+        # a different GitLab repository.  Comparison must follow the source.
+        project_id = snapshot.get("source_gitlab_project_id") or snapshot.get("gitlab_project_id")
+        if project_id is not None:
+            return ("id", str(project_id))
+        path = snapshot.get("source_gitlab_path") or snapshot.get("gitlab_path_with_namespace")
+        return ("path", str(path)) if path else (None, None)
+
+    before_repository = gitlab_source_identity(before)
+    after_repository = gitlab_source_identity(after)
+    if (before_repository != (None, None) or after_repository != (None, None)) and before_repository != after_repository:
         raise ValueError("GitLab runs must belong to the same repository")
     if before["status"] != "completed" or after["status"] != "completed":
         raise ValueError("completed runs are required")
@@ -1695,11 +1962,26 @@ def _comparison_data(store: PortalStore, subject_id: str, left: str, right: str)
                 input_name = ""
             if input_name:
                 roots.update({input_name, input_name + ".extracted"})
-        for root in sorted((root for root in roots if root), key=len, reverse=True):
-            if path == root:
-                return ""
-            if path.startswith(root + "/"):
-                return path[len(root) + 1:]
+        # GitLab inputs can have both the uploaded archive extraction
+        # directory and GitLab's branch/commit archive root.  Remove only
+        # roots recorded in the snapshot, repeatedly, so branch names and
+        # archive filenames never become part of the comparison key.
+        known_roots = sorted((root for root in roots if root), key=len, reverse=True)
+        changed = True
+        while changed and path:
+            changed = False
+            for root in known_roots:
+                if path == root:
+                    return ""
+                if path.startswith(root + "/"):
+                    path = path[len(root) + 1:]
+                    changed = True
+                    break
+        snapshot = run.get("snapshot") or {}
+        if snapshot.get("scheduled_source_kind") == "gitlab":
+            source_directory = str(snapshot.get("source_gitlab_directory") or "").strip("/")
+            if source_directory and path != source_directory and not path.startswith(source_directory + "/"):
+                path = f"{source_directory}/{path}"
         return path
 
     def mapped(run):

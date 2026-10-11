@@ -1,6 +1,6 @@
 # KODA Linux Offline Distribution
 
-> Reviewed **2026-10-11**, including unpublished local development source. Validation covers the x86_64 source installer and actual amd64 container execution; it does not establish a newly packaged/imported complete delivery archive or production deployment. See [validation](../../docs/verification-2026-10-11.md).
+> Reviewed **2026-10-11**, including the development source in this GitHub publication. Validation covers the x86_64 source installer and actual amd64 container execution; it does not establish a newly packaged/imported complete delivery archive or production deployment. See [validation](../../docs/verification-2026-10-11.md).
 
 This folder is the Linux distribution layer for KODA. It does not fork scanner
 logic. Source installs and packages copy the shared Python engine from

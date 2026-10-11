@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -17,7 +18,7 @@ SHARED_PYTHON = ROOT / "platforms" / "shared" / "python"
 if str(SHARED_PYTHON) not in sys.path:
     sys.path.insert(0, str(SHARED_PYTHON))
 
-from security_scanner.grype_adapter import run_grype, run_grype_purls
+from security_scanner.grype_adapter import GrypeResult, run_grype, run_grype_purls
 from security_scanner.java_archives import scan_archives
 from security_scanner.java_vulnerability_scan import JavaScanOptions, run_java_scan
 from security_scanner.syft_adapter import run_syft
@@ -30,6 +31,36 @@ def _write_jar(path: Path, files: dict[str, str | bytes]) -> None:
 
 
 class JavaScanRuntimeTests(unittest.TestCase):
+    def test_vulnerability_gates_fail_when_grype_comparison_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jar = root / "demo.jar"
+            _write_jar(jar, {"META-INF/maven/org.example/demo/pom.properties": "groupId=org.example\nartifactId=demo\nversion=1.2.3\n"})
+            kev = root / "kev.json"
+            kev.write_text(json.dumps({"vulnerabilities": []}), encoding="utf-8")
+            for gate in ({"fail_on": "high"}, {"fail_on_kev": True}):
+                for disabled in (False, True):
+                    with self.subTest(gate=gate, disabled=disabled), patch.dict(os.environ, {"KODA_GRYPE_BIN": ""}):
+                        result = run_java_scan(JavaScanOptions(
+                            target=jar, output_dir=root / "reports", builtin_only=True,
+                            cisa_kev=kev, no_grype=disabled, **gate,
+                        ))
+                        self.assertEqual(result.exit_code, 2)
+                        self.assertTrue(any("requires Grype" in warning for warning in result.warnings))
+                        self.assertTrue((root / "reports/server-sbom.cdx.json").is_file())
+
+    def test_completed_clean_grype_comparison_passes_severity_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jar = root / "demo.jar"
+            _write_jar(jar, {"META-INF/MANIFEST.MF": "Manifest-Version: 1.0\n"})
+            with patch("security_scanner.java_vulnerability_scan.run_grype", return_value=GrypeResult((), "test", {}, "", False)):
+                result = run_java_scan(JavaScanOptions(
+                    target=jar, output_dir=root / "reports", builtin_only=True,
+                    grype_bin=root / "grype", fail_on="high",
+                ))
+            self.assertEqual(result.exit_code, 0)
+
     def test_java_scan_combines_repeated_target_roots_into_one_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -108,7 +139,7 @@ class JavaScanRuntimeTests(unittest.TestCase):
             self.assertEqual(rows[0]["Component Supplier Name"], "org.example")
             self.assertRegex(rows[0]["Component Hash"], r"^alg : SHA-256\ncontent : [0-9a-f]{64}$")
 
-    def test_default_scan_reads_all_archive_entries(self) -> None:
+    def test_default_scan_limits_entries_but_explicit_budget_allows_large_archive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             nested = root / "nested.jar"
@@ -119,9 +150,12 @@ class JavaScanRuntimeTests(unittest.TestCase):
                 archive.writestr("WEB-INF/lib/nested.jar", nested.read_bytes())
 
             result = scan_archives(root)
+            self.assertEqual(len(result.artifacts), 2)
+            self.assertTrue(any("limit exceeded" in warning for warning in result.warnings))
 
-            self.assertEqual(len(result.artifacts), 3)
-            self.assertFalse(any("limit exceeded" in warning for warning in result.warnings))
+            expanded_budget = scan_archives(root, max_entries=10_004)
+            self.assertEqual(len(expanded_budget.artifacts), 3)
+            self.assertFalse(any("limit exceeded" in warning for warning in expanded_budget.warnings))
 
     def test_external_tool_runners_request_utf8_decoding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -129,7 +163,7 @@ class JavaScanRuntimeTests(unittest.TestCase):
             binary = root / "tool"
             binary.write_text("placeholder", encoding="utf-8")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
-            with patch("security_scanner.syft_adapter.subprocess.run") as syft_run:
+            with patch("security_scanner.syft_adapter._run") as syft_run:
                 syft_run.side_effect = [
                     subprocess.CompletedProcess([str(binary)], 0, "syft 1.0.0", ""),
                     subprocess.CompletedProcess([str(binary)], 0, json.dumps({"bomFormat": "CycloneDX", "components": []}), ""),
@@ -143,10 +177,10 @@ class JavaScanRuntimeTests(unittest.TestCase):
                 ]
                 run_grype(root / "sbom.json", binary, 1)
 
-            for runner in (syft_run, grype_run):
-                for invocation in runner.call_args_list:
-                    self.assertEqual(invocation.kwargs["encoding"], "utf-8")
-                    self.assertEqual(invocation.kwargs["errors"], "replace")
+            self.assertEqual(len(syft_run.call_args_list), 2)
+            for invocation in grype_run.call_args_list:
+                self.assertEqual(invocation.kwargs["encoding"], "utf-8")
+                self.assertEqual(invocation.kwargs["errors"], "replace")
 
     def test_syft_uses_a_file_source_for_a_single_archive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -156,7 +190,7 @@ class JavaScanRuntimeTests(unittest.TestCase):
             binary.write_text("placeholder", encoding="utf-8")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             _write_jar(jar, {"META-INF/MANIFEST.MF": "Manifest-Version: 1.0\n"})
-            with patch("security_scanner.syft_adapter.subprocess.run") as syft_run:
+            with patch("security_scanner.syft_adapter._run") as syft_run:
                 syft_run.side_effect = [
                     subprocess.CompletedProcess([str(binary)], 0, "syft 1.0.0", ""),
                     subprocess.CompletedProcess([str(binary)], 0, json.dumps({"bomFormat": "CycloneDX", "components": []}), ""),
@@ -164,7 +198,7 @@ class JavaScanRuntimeTests(unittest.TestCase):
 
                 run_syft(jar, binary, 1)
 
-            self.assertEqual(syft_run.call_args_list[1].args[0][1], f"file:{jar}")
+            self.assertEqual(syft_run.call_args_list[1].args[1][0], f"file:{jar}")
 
     def test_grype_candidate_scan_uses_purl_file_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

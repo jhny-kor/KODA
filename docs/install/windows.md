@@ -1,7 +1,7 @@
 # KODA Windows Install
 
-> As of **2026-10-11**, this guide describes the local working tree, including
-> uncommitted development changes. Windows-specific packaging/process regression
+> As of **2026-10-11**, this guide describes source included in this GitHub publication;
+> it was uncommitted at validation. Windows-specific packaging/process regression
 > tests and PowerShell syntax checks passed on the Mac host; actual Windows EXE,
 > installer, WebView2, and native Syft execution were excluded at the user's request.
 > See the [verification summary](../verification-2026-10-11.md).

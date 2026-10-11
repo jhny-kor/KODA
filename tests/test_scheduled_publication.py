@@ -74,6 +74,17 @@ class ScheduledPublicationTests(unittest.TestCase):
         self.assertEqual(commit["branch"], "koda/scheduled/target-1/run-1")
         self.assertEqual(commit["actions"][0]["file_path"], ".koda/scheduled-results/target-1/run-1.json")
 
+    def test_scheduled_publication_uses_persisted_human_result_branch(self):
+        run = self.run_data()
+        run["snapshot"]["gitlab_result_branch"] = "koda/results/scheduled-demo/20260921/round-3"
+        calls = []
+        with patch("security_scanner.portal_integrations._gitlab_optional_json", return_value=None), patch(
+            "security_scanner.portal_integrations._gitlab_write_json", side_effect=lambda *args, **kwargs: self.write(calls, *args, **kwargs),
+        ):
+            publish_tracker_result({"default_branch": "main"}, run, "tracker-1", self.tracker(), settings_dir=Path(self.tmp.name))
+        commit = next(payload for path, _, method, payload in calls if path.endswith("/repository/commits") and method == "POST")
+        self.assertEqual(commit["branch"], "koda/results/scheduled-demo/20260921/round-3")
+
     def test_tracker_completion_refreshes_koda_json(self):
         run = self.run_data()
         pending_report = {

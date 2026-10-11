@@ -82,6 +82,13 @@ allowed_suite_keys = {
     "KODA_GITLAB_TOKEN_FILE", "KODA_GITLAB_WRITE_TOKEN_FILE", "KODA_GITLAB_CA_FILE", "KODA_GITLAB_NETWORK",
     "KODA_TRACKER_URL", "KODA_TRACKER_TOKEN_DIR", "KODA_TRACKER_CA_FILE", "KODA_CPUS",
     "KODA_MEMORY", "KODA_PIDS_LIMIT", "KODA_TMPFS_SIZE",
+    "KODA_SCAN_CPUS", "KODA_SCAN_MEMORY", "KODA_DELIVERY_CPUS", "KODA_DELIVERY_MEMORY",
+    "KODA_SCAN_TIMEOUT_SECONDS", "KODA_SCAN_TERMINATE_GRACE_SECONDS",
+    "KODA_WORKER_STOP_TIMEOUT_SECONDS", "KODA_JSON_MAX_BYTES", "KODA_PORTAL_UPLOAD_QUOTA_BYTES",
+    "KODA_PORTAL_REPORT_TIMEOUT_SECONDS", "KODA_PORTAL_REPORT_MEMORY_BYTES",
+    "KODA_SCHEDULE_ENABLED", "KODA_SCHEDULE_SSH_DIR", "KODA_SCHEDULE_STATE_DIR",
+    "KODA_SCHEDULE_CPUS", "KODA_SCHEDULE_MEMORY", "KODA_SCHEDULE_RATE_BYTES",
+    "KODA_SCHEDULE_GAP_SECONDS", "KODA_SCHEDULE_DISK_RESERVE_BYTES", "KODA_SCHEDULE_MIN_FREE_BYTES",
 }
 
 def read_env(path):
@@ -171,22 +178,31 @@ for service in "${compose_services[@]}"; do
   owner="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$container")"
   [[ "$owner" == "$project" ]] || fail "refusing to delete foreign container: $container"
 done
-if docker container inspect koda-dashboard >/dev/null 2>&1; then
-  koda_label="$(docker inspect -f '{{index .Config.Labels "io.koda.offline"}}' koda-dashboard)"
-  [[ "$koda_label" == true ]] || fail "refusing to delete foreign container named koda-dashboard"
-fi
+koda_containers=(koda-scan-worker koda-delivery-worker koda-schedule-worker koda-dashboard)
+for container in "${koda_containers[@]}"; do
+  docker container inspect "$container" >/dev/null 2>&1 || continue
+  koda_label="$(docker inspect -f '{{index .Config.Labels "io.koda.offline"}}' "$container")"
+  [[ "$koda_label" == true ]] || fail "refusing to delete foreign container named $container"
+done
 for network in "${project}-edge" "${project}-app"; do
   docker network inspect "$network" >/dev/null 2>&1 || continue
   owner="$(docker network inspect -f '{{index .Labels "com.docker.compose.project"}}' "$network")"
   [[ "$owner" == "$project" ]] || fail "refusing to delete foreign network: $network"
 done
-if docker network inspect koda-dashboard >/dev/null 2>&1; then
-  attached="$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' koda-dashboard)"
+for network in koda-dashboard koda-dashboard-schedule; do
+  docker network inspect "$network" >/dev/null 2>&1 || continue
+  attached="$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "$network")"
   for container in $attached; do
-    [[ "$container" == koda-dashboard || "$container" == "${project}-gateway" ]] \
-      || fail "refusing to delete koda-dashboard network; foreign container attached: $container"
+    if [[ "$network" == koda-dashboard-schedule ]]; then
+      [[ "$container" == koda-schedule-worker ]] \
+        || fail "refusing to delete $network network; foreign container attached: $container"
+    else
+      [[ "$container" == koda-dashboard || "$container" == koda-delivery-worker \
+          || "$container" == koda-schedule-worker || "$container" == "${project}-gateway" ]] \
+        || fail "refusing to delete koda-dashboard network; foreign container attached: $container"
+    fi
   done
-fi
+done
 for volume in "${volumes[@]}"; do
   docker volume inspect "$volume" >/dev/null 2>&1 || continue
   owner="$(docker volume inspect -f '{{index .Labels "com.docker.compose.project"}}' "$volume")"
@@ -210,11 +226,13 @@ for service in "${compose_services[@]}"; do
   docker rm -f "$container" >/dev/null
 done
 
-if docker container inspect koda-dashboard >/dev/null 2>&1; then
-  koda_label="$(docker inspect -f '{{index .Config.Labels "io.koda.offline"}}' koda-dashboard)"
-  [[ "$koda_label" == true ]] || fail "refusing to delete foreign container named koda-dashboard"
-  docker rm -f koda-dashboard >/dev/null
-fi
+for container in "${koda_containers[@]}"; do
+  docker container inspect "$container" >/dev/null 2>&1 || continue
+  koda_label="$(docker inspect -f '{{index .Config.Labels "io.koda.offline"}}' "$container")"
+  [[ "$koda_label" == true ]] || fail "refusing to delete foreign container named $container"
+  docker stop --time "$(env_value "$old_env" KODA_WORKER_STOP_TIMEOUT_SECONDS 20)" "$container" >/dev/null
+  docker rm "$container" >/dev/null
+done
 
 for network in "${project}-edge" "${project}-app"; do
   docker network inspect "$network" >/dev/null 2>&1 || continue
@@ -222,12 +240,13 @@ for network in "${project}-edge" "${project}-app"; do
   [[ "$owner" == "$project" ]] || fail "refusing to delete foreign network: $network"
   docker network rm "$network" >/dev/null
 done
-if docker network inspect koda-dashboard >/dev/null 2>&1; then
-  attached="$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' koda-dashboard)"
+for network in koda-dashboard koda-dashboard-schedule; do
+  docker network inspect "$network" >/dev/null 2>&1 || continue
+  attached="$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "$network")"
   [[ -z "${attached//[[:space:]]/}" ]] \
-    || fail "refusing to delete koda-dashboard network; attached containers: $attached"
-  docker network rm koda-dashboard >/dev/null
-fi
+    || fail "refusing to delete $network network; attached containers: $attached"
+  docker network rm "$network" >/dev/null
+done
 
 for volume in "${volumes[@]}"; do
   docker volume inspect "$volume" >/dev/null 2>&1 || continue

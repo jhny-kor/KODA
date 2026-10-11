@@ -44,6 +44,8 @@ $SecurityToolLicensesDir = Join-Path $SecurityToolsCacheDir "licenses"
 
 # The source-only installer keeps the dashboard and SW49 source scan, but does
 # not ship Java/library or live-web scanner modules, Playwright, or Grype data.
+# Keep the lightweight Grype adapter: the dashboard imports its Python API
+# even when no Grype executable or database is bundled.
 $SourceOnlyExcludedModules = @(
     "security_scanner.web",
     "security_scanner.api_spec",
@@ -52,7 +54,6 @@ $SourceOnlyExcludedModules = @(
     "security_scanner.java_vulnerability_reporting",
     "security_scanner.java_archives",
     "security_scanner.java_inventory",
-    "security_scanner.grype_adapter",
     "security_scanner.syft_adapter",
     "security_scanner.offline_vuln_data",
     "security_scanner.sbom_verification"
@@ -748,6 +749,20 @@ if (-not (Test-Path -LiteralPath $GuiExecutable -PathType Leaf)) {
 $guiSw49Contracts = Join-Path $AppDistDir "_internal\security_scanner\resources\sw49\contracts.json"
 if (-not (Test-Path -LiteralPath $guiSw49Contracts -PathType Leaf)) {
     throw "KODA.exe bundle is missing SW49 contracts: $guiSw49Contracts"
+}
+
+# Exercise the packaged GUI imports and an actual dashboard HTTP response.
+# Wait on the returned process because this is a windowed executable.
+$guiSmokeProcess = Start-Process `
+    -FilePath $GuiExecutable `
+    -ArgumentList "--smoke-test" `
+    -PassThru
+if (-not $guiSmokeProcess.WaitForExit(30000)) {
+    Stop-Process -Id $guiSmokeProcess.Id -Force -ErrorAction SilentlyContinue
+    throw "KODA.exe dashboard startup smoke test timed out."
+}
+if ($guiSmokeProcess.ExitCode -ne 0) {
+    throw "KODA.exe dashboard startup smoke test failed with exit code $($guiSmokeProcess.ExitCode)."
 }
 
 # ---------------------------------------------------------------------------

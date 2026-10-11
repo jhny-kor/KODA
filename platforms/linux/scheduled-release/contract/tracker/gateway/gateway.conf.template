@@ -37,6 +37,7 @@ server {
         auth_request /_tracker_health;
         error_page 500 502 503 504 = @koda_auth_unavailable;
         proxy_pass http://${KODA_PORTAL_UPSTREAM};
+        proxy_set_header X-KODA-Gateway-Proof ${KODA_GATEWAY_PROOF};
     }
 
     # auth_request forwards only the browser cookie to Tracker.  The KODA
@@ -59,6 +60,7 @@ server {
         proxy_set_header X-KODA-Identity-ID "";
         proxy_set_header X-KODA-Identity-Expires "";
         proxy_set_header X-KODA-Identity-Display "";
+        proxy_set_header X-KODA-Gateway-Proof "";
         proxy_set_header X-KODA-Logout "";
     }
 
@@ -93,6 +95,7 @@ server {
         proxy_set_header X-KODA-Identity-ID $koda_identity_id;
         proxy_set_header X-KODA-Identity-Expires $koda_identity_expires;
         proxy_set_header X-KODA-Identity-Display $koda_identity_display;
+        proxy_set_header X-KODA-Gateway-Proof ${KODA_GATEWAY_PROOF};
         proxy_set_header X-KODA-Logout "";
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Prefix /koda;
@@ -119,6 +122,7 @@ server {
         proxy_set_header X-KODA-Identity-ID $koda_identity_id;
         proxy_set_header X-KODA-Identity-Expires $koda_identity_expires;
         proxy_set_header X-KODA-Identity-Display $koda_identity_display;
+        proxy_set_header X-KODA-Gateway-Proof ${KODA_GATEWAY_PROOF};
         proxy_set_header X-KODA-Logout "";
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Prefix /koda;

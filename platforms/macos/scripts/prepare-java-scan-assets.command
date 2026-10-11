@@ -15,8 +15,8 @@ nvd_start_year="${KODA_NVD_START_YEAR:-2002}"
 nvd_end_year="${KODA_NVD_END_YEAR:-$(date +%Y)}"
 
 case "$architecture" in
-  arm64) archive_arch=arm64 ;;
-  x86_64|amd64) architecture=amd64; archive_arch=amd64 ;;
+  arm64) archive_arch=arm64; target_arch=arm64 ;;
+  x86_64|amd64) architecture=amd64; archive_arch=amd64; target_arch=x86_64 ;;
   *) echo "Unsupported macOS architecture: $architecture" >&2; exit 2 ;;
 esac
 
@@ -106,7 +106,7 @@ fi
 stage_tool syft "$syft_version"
 stage_tool grype "$grype_version"
 
-builder_venv="$cache_dir/pyinstaller-venv"
+builder_venv="$cache_dir/pyinstaller-venv-$architecture"
 if [[ ! -x "$builder_venv/bin/python" ]]; then
   "$python_bin" -m venv "$builder_venv"
 fi
@@ -116,22 +116,26 @@ fi
   --clean \
   --onedir \
   --windowed \
+  --target-architecture "$target_arch" \
   --name koda-java-scan \
   --distpath "$asset_dir/helpers/$architecture" \
   --workpath "$cache_dir/pyinstaller-work-$architecture" \
   --specpath "$cache_dir/pyinstaller-spec-$architecture" \
   --paths "$repo_root/platforms/shared/python" \
   --collect-submodules security_scanner \
+  --add-data "$repo_root/platforms/shared/python/security_scanner/resources:security_scanner/resources" \
+  --add-data "$repo_root/platforms/shared/python/security_scanner/assets:security_scanner/assets" \
   --exclude-module security_scanner.server \
   --exclude-module security_scanner.app \
   --exclude-module tkinter \
   --exclude-module _tkinter \
   "$repo_root/platforms/macos/packaging/java-scan-entry.py"
 
-find "$asset_dir/resources" "$asset_dir/tools/$architecture" -type f -print0 \
-  | sort -z \
-  | xargs -0 shasum -a 256 \
-  | sed "s#  $asset_dir/##" > "$asset_dir/manifest.sha256"
+lipo -verify_arch "$target_arch" "$asset_dir/helpers/$architecture/koda-java-scan.app/Contents/MacOS/koda-java-scan"
+(
+  cd "$asset_dir"
+  find resources tools helpers -type f -print0 | sort -z | xargs -0 shasum -a 256
+) > "$asset_dir/manifest.sha256"
 cat > "$asset_dir/asset-manifest.json" <<EOF
 {
   "architecture": "$architecture",

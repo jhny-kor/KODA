@@ -266,8 +266,7 @@ class SecurityScanner:
             self.warnings.append(f"Refused symlink scan target: {target.path}")
             return [], []
         if not target.path.exists():
-            self.warnings.append(f"Target does not exist: {target.path}")
-            return [], []
+            raise ValueError(f"Target does not exist: {target.path}")
         if target.path.is_file():
             source_profile = self.config.standard == "sw-dev-security-49"
             if source_profile and not (is_source_file(target.path) or is_text_candidate(target.path)):

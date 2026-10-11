@@ -6,6 +6,10 @@ preserves the original **2026-06-14** benchmarking, decisions, gap analysis, and
 unchecked plans. Those checkboxes are historical, not today's unimplemented list.
 Publishing documentation does not establish a feature release or Store update.
 
+Publication update, 2026-10-11: product source, tests, and build scripts for the
+development implementation below are included on GitHub. Java assets, binaries,
+images, raw logs, and production/App Store deployment are excluded.
+
 ## Current implementation and remaining boundaries
 
 | Area | Present in inspected source | Not established by this status |
@@ -14,7 +18,7 @@ Publishing documentation does not establish a feature release or Store update.
 | Deterministic fixes | Default dry-run diff for `fix --target ...`; explicit `--apply`; default `.bak` backup and Python syntax checks | Interactive approval, required clean Git state, arbitrary LLM patches, automatic PR creation/merge |
 | Reachability | Python AST and JS/TS import searches label dependency CVEs `reachable`, `unreachable`, or `unknown` | Runtime reachability or a complete call graph; default deletion or severity downgrading |
 | Changed-file CI | `--changed-only --base`; repository composite action and SARIF upload step; full-scan fallback when diff cannot be determined | Changed-line filtering, inline PR comments, Marketplace publication or verified live uploads |
-| Native macOS local AI | Loopback OpenAI-compatible connections, explanation, risk review, candidate preview, up to three attempts, regression plans, Python impact search, separate AI reports | Currently unpublished development files; Store inclusion, functional equivalence, executed regression drafts |
+| Native macOS local AI | Loopback OpenAI-compatible connections, explanation, risk review, candidate preview, up to three attempts, regression plans, Python impact search, separate AI reports | Store inclusion, functional equivalence, executed regression drafts unverified |
 
 KODA keeps the default scan offline-first and read-only. Optional network and
 write paths require explicit selection. The shared Python Ollama provider defaults

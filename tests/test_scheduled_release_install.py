@@ -32,6 +32,10 @@ class ScheduledReleaseInstallTests(unittest.TestCase):
             (self.prefix / name).mkdir(parents=True)
         self.env_file = self.prefix / 'tracker/.env'
         self.env_file.write_text('PRESERVE_EXISTING_SECRET=test-only\n')
+        for name in ('compose.yaml', 'compose.airgap.yaml', 'compose.integration.yaml'):
+            (self.prefix / 'tracker' / name).write_text('services: {}\n')
+        (self.prefix / 'tracker/gateway').mkdir()
+        (self.prefix / 'tracker/gateway/gateway.conf.template').write_text('# preserved gateway\n')
         (self.prefix / 'koda/image-ref.txt').write_text('old/koda:current\n')
         self.connection = sqlite3.connect(self.prefix / 'data/koda-portal/portal.sqlite3')
         self.connection.execute('PRAGMA journal_mode=WAL')
@@ -62,7 +66,8 @@ import json,os,pathlib,sys
 a=sys.argv[1:]; state=pathlib.Path(os.environ['STATE']); values=json.loads(state.read_text())
 with open(os.environ['EVENTS'],'a') as f: f.write('docker '+repr(a)+'\\n')
 if a[0]=='inspect':
- print(json.dumps({'NanoCpus':3000000000,'Memory':2147483648,'PidsLimit':128}))
+ if any('.Mounts' in value for value in a): print('test-vuln-data')
+ else: print(json.dumps({'NanoCpus':3000000000,'Memory':2147483648,'PidsLimit':128}))
 elif a[:2]==['image','inspect']:
  if a[2] not in values: sys.exit(1)
  print('amd64' if '{{.Architecture}}' in a else values[a[2]] if '{{.Id}}' in a else '{}')
@@ -72,10 +77,20 @@ elif a[0]=='tag':
  if os.environ.get('FAIL_TAG') and a[1]=='local/koda-tracker-web-scheduled:20260910-ui1': sys.exit(1)
  values[a[2]]=values[a[1]]; state.write_text(json.dumps(values))
 elif a[0]=='compose':
- if 'config' in a: print(json.dumps({'services':{'portal-web':{'image':'old/web:current'},'portal-api':{'image':'old/api:current'},'portal-worker':{'image':'old/api:current'}}}))
+ if 'config' in a:
+  if '--services' in a: print('portal-web\\nportal-api\\nportal-worker')
+  else: print(json.dumps({'services':{'portal-web':{'image':'old/web:current'},'portal-api':{'image':'old/api:current'},'portal-worker':{'image':'old/api:current'}}}))
+ elif 'ps' in a: print('test-portal-api')
  elif 'exec' in a:
   if os.environ.get('FAIL_BACKUP'): sys.exit(1)
   print('-- private database backup')
+elif a[0]=='run':
+ if 'tar' in a:
+  import io,tarfile
+  stream=io.BytesIO()
+  with tarfile.open(fileobj=stream,mode='w:gz'): pass
+  sys.stdout.buffer.write(stream.getvalue())
+ elif 'python' not in a: sys.exit(2)
 elif a[0] not in ('ps','stop'): sys.exit(2)
 ''')
         docker.chmod(0o755)
@@ -98,6 +113,7 @@ elif a[0] not in ('ps','stop'): sys.exit(2)
         with sqlite3.connect(next((backup / 'sqlite').iterdir())) as db:
             self.assertEqual(db.execute('SELECT value FROM preserve').fetchone()[0], 'committed-in-WAL')
         self.assertEqual((backup / 'tracker.pg_dump.sql').stat().st_mode & 0o777, 0o600)
+        self.assertEqual((backup / 'tracker-vuln-data-volume.tar.gz').stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.env_file.read_text(), 'PRESERVE_EXISTING_SECRET=test-only\n')
         events = (self.root / 'events').read_text()
         self.assertIn('CPU=3.0 MEMORY=2147483648b', events)
@@ -108,6 +124,8 @@ elif a[0] not in ('ps','stop'): sys.exit(2)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         current = json.loads(self.state.read_text())
         self.assertEqual({ref: current[ref] for ref in self.old}, self.old)
+        self.assertEqual((self.prefix / 'tracker/compose.yaml').read_text(), 'services: {}\n')
+        self.assertEqual((self.prefix / 'tracker/gateway/gateway.conf.template').read_text(), '# preserved gateway\n')
 
     def test_backup_failure_never_changes_images(self):
         result = self.run_script('apply.sh', FAIL_BACKUP='1')

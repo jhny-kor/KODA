@@ -86,12 +86,16 @@ KNOWN_LAUNCHER_HASHES = {
         "3f66d2b530cf08391fd8421c0baac2a97340cb7d95f491584bb5ec20c4df4f18",
         # Launcher shipped in the reviewed 20260910-ui1 offline patch.
         "3243e6a1a7f29b5f8a8197ec8d2d2107cde6496716ad1dfd900262bee553a3b6",
+        # Reviewed launcher immediately preceding isolated portal workers.
+        "4e3b028376e49a5ecb6f6fab2da4432ec50d3454fcb04b1472d5b3bc5779c93b",
     },
     "koda-docker": {
         "5d48e5b6a7ec1d287a7681c35469bd728c674e05d83cbce1097871d66dc25826",
         "008fa4cdd4a53646ddcfa208611c193e92169e47f13d58cbfd7f45b5cd47017d",
         # Launcher shipped in the reviewed 20260910-ui1 offline patch.
         "6790dc49414110a086ba30c4a4058db5acc1000bfb3551b5c63e4ab195a9739c",
+        # Reviewed launcher immediately preceding isolated portal workers.
+        "b546221c2d8193802edcab9bc18cd264b284c07c730c18ccfd8ee4a2a06e4520",
     },
 }
 
@@ -141,6 +145,35 @@ def inspect_image(reference: str) -> dict:
         return json.loads(command(["docker", "image", "inspect", reference]).strip())[0]
     except (IndexError, json.JSONDecodeError) as exc:
         raise PreflightError("docker image inspect returned invalid data") from exc
+
+
+def check_portal_workers(prefix: Path, dashboard: dict) -> None:
+    if "KODA_PORTAL_EXTERNAL_WORKER=1" not in dashboard.get("Config", {}).get("Env", []):
+        return  # Legacy releases execute manual scans inside the web process.
+    for role in ("scan", "delivery"):
+        name = f"koda-{role}-worker"
+        worker = inspect_json(name)
+        labels = worker.get("Config", {}).get("Labels", {})
+        if labels.get("io.koda.offline") != "true" or labels.get("io.koda.portal-role") != role:
+            raise PreflightError(f"unexpected portal worker ownership: {name}")
+        if worker.get("Image") != dashboard.get("Image"):
+            raise PreflightError(f"portal worker image differs: {name}")
+        if worker.get("State", {}).get("Status") != "running":
+            raise PreflightError(f"portal worker is not running: {name}")
+        host = worker.get("HostConfig", {})
+        if host.get("PortBindings"):
+            raise PreflightError(f"portal worker publishes a host port: {name}")
+        if role == "scan" and host.get("NetworkMode") != "none":
+            raise PreflightError("portal scan worker must be offline")
+        mounts = worker.get("Mounts", [])
+        if not any(m.get("Source") == str(prefix / "data/koda-portal")
+                   and m.get("Destination") == "/var/lib/koda"
+                   and m.get("Type") == "bind" and m.get("RW") is True for m in mounts):
+            raise PreflightError(f"portal worker persistent data mount differs: {name}")
+        for mount in mounts:
+            check_dashboard_mount(mount, prefix)
+            if role == "scan" and mount.get("Destination") not in {"/var/lib/koda", "/var/lib/koda-vuln-data"}:
+                raise PreflightError("portal scan worker has unexpected integration credentials")
 
 
 def normalize_digest_map(payload: object) -> dict[str, str]:
@@ -271,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         raise PreflightError("KODA portal data directory is missing")
     for mount in mounts:
         check_dashboard_mount(mount, prefix)
+    check_portal_workers(prefix, dashboard)
     check_backend_hashes(contract, containers, Path(__file__).resolve().parent)
     print(f"prefix={prefix}")
     print(f"project={project}")

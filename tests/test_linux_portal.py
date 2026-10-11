@@ -1,12 +1,16 @@
 import datetime as dt
 import base64
+from email.message import Message
 from collections import Counter
 import csv
 import hashlib
 import http.client
 import io
 import json
+import multiprocessing
 import os
+import re
+import sqlite3
 import tempfile
 import tarfile
 import threading
@@ -38,11 +42,28 @@ from security_scanner.portal_integrations import (
 )
 from security_scanner.linux_portal import MAX_INPUT_BYTES, _deliver_gitlab_issues, _deliver_gitlab_result, _deliver_tracker, _run_delivery, create_portal_server
 from security_scanner.grype_adapter import GrypeMatch, GrypeResult
-from security_scanner.portal_store import GLOBAL_ROLE_POLICY_ID, SCREEN_PERMISSIONS, PortalStore
+from security_scanner.portal_store import GLOBAL_ROLE_POLICY_ID, MAX_UPLOAD_FILES, SCREEN_PERMISSIONS, PortalStore, UploadQuotaExceeded
 from security_scanner.portal_views import format_portal_time
 from security_scanner.reporting import render_html_pair_zip_from_payload
 from security_scanner.server import scan_directory_payload
 from security_scanner.schedule_worker import RemoteFile
+
+TEST_GATEWAY_PROOF = "test-gateway-proof-0123456789abcdef0123456789abcdef"
+
+
+def _reserve_in_child(db_path, root_path, mode, connection=None):
+    root = Path(root_path)
+    store = PortalStore(db_path)
+    token, _ = store.reserve_upload(root, root / ".partial-child", root / "child.bin", 5, 8)
+    (root / ".partial-child").write_bytes(b"123")
+    if mode == "crash-target":
+        (root / ".partial-child").replace(root / "child.bin")
+    if mode in ("crash", "crash-target"):
+        os._exit(0)
+    connection.send(token)
+    connection.recv()
+    (root / ".partial-child").unlink()
+    store.release_upload(token)
 
 
 class LinuxPortalStoreTests(unittest.TestCase):
@@ -83,14 +104,132 @@ class LinuxPortalStoreTests(unittest.TestCase):
 
     def test_header_identity_and_expiry(self):
         headers = {
+            "X-KODA-Gateway-Proof": TEST_GATEWAY_PROOF,
             "X-KODA-Identity-ID": self.admin,
             "X-KODA-Identity-Expires": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=1)).isoformat(),
             "X-KODA-Identity-Display": "YWRtaW4",
         }
-        self.assertEqual(identity_from_headers(headers).display, "admin")
-        headers["X-KODA-Identity-Expires"] = "2000-01-01T00:00:00+00:00"
+        self.assertEqual(identity_from_headers(headers, TEST_GATEWAY_PROOF).display, "admin")
         with self.assertRaises(IdentityError):
             identity_from_headers(headers)
+        with self.assertRaises(IdentityError):
+            identity_from_headers({key: value for key, value in headers.items() if key != "X-KODA-Gateway-Proof"}, TEST_GATEWAY_PROOF)
+        duplicated = Message()
+        for key, value in headers.items():
+            duplicated.add_header(key, value)
+        duplicated.add_header("x-koda-gateway-proof", TEST_GATEWAY_PROOF)
+        with self.assertRaises(IdentityError):
+            identity_from_headers(duplicated, TEST_GATEWAY_PROOF)
+        headers["X-KODA-Identity-Expires"] = "2000-01-01T00:00:00+00:00"
+        with self.assertRaises(IdentityError):
+            identity_from_headers(headers, TEST_GATEWAY_PROOF)
+
+    def test_upload_quota_reservations_serialize_across_store_instances(self):
+        root = Path(self.tmp.name) / "inputs"
+        root.mkdir()
+        stores = (self.store, PortalStore(self.store.path))
+        barrier = threading.Barrier(2)
+        results = []
+
+        def reserve(index):
+            barrier.wait()
+            try:
+                token, _ = stores[index].reserve_upload(root, root / f".pending-{index}", root / f"done-{index}", 5, 8)
+                results.append(("reserved", token))
+            except UploadQuotaExceeded:
+                results.append(("rejected", ""))
+
+        threads = [threading.Thread(target=reserve, args=(index,)) for index in range(2)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(timeout=5)
+        self.assertCountEqual([kind for kind, _ in results], ["reserved", "rejected"])
+        self.store.release_upload(next(token for kind, token in results if kind == "reserved"))
+
+    def test_crashed_upload_reservation_is_reclaimed_on_next_reservation(self):
+        root = Path(self.tmp.name) / "inputs"
+        root.mkdir()
+        for mode, abandoned in (("crash", ".partial-child"), ("crash-target", "child.bin")):
+            with self.subTest(mode=mode):
+                child = multiprocessing.get_context("spawn").Process(
+                    target=_reserve_in_child, args=(self.store.path, str(root), mode)
+                )
+                child.start()
+                child.join(timeout=10)
+                self.assertEqual(child.exitcode, 0)
+                self.assertTrue((root / abandoned).exists())
+                with self.assertRaises(UploadQuotaExceeded):
+                    self.store.reserve_upload(root, root / ".too-large", root / "too-large.bin", 9, 8)
+                token, allowance = self.store.reserve_upload(root, root / ".next", root / "next.bin", 8, 8)
+                self.assertEqual(allowance, 8)
+                self.assertFalse((root / abandoned).exists())
+                with self.store._db() as db:
+                    self.assertEqual(db.execute("SELECT count(*) FROM upload_reservations").fetchone()[0], 1)
+                self.store.release_upload(token)
+
+    def test_active_upload_reservation_is_not_reclaimed_across_processes(self):
+        root = Path(self.tmp.name) / "inputs"
+        root.mkdir()
+        parent_connection, child_connection = multiprocessing.get_context("spawn").Pipe()
+        child = multiprocessing.get_context("spawn").Process(
+            target=_reserve_in_child, args=(self.store.path, str(root), "hold", child_connection)
+        )
+        child.start()
+        try:
+            self.assertTrue(parent_connection.poll(10))
+            parent_connection.recv()
+            with self.assertRaises(UploadQuotaExceeded):
+                self.store.reserve_upload(root, root / ".next", root / "next.bin", 4, 8)
+            self.assertEqual((root / ".partial-child").read_bytes(), b"123")
+            parent_connection.send("release")
+            child.join(timeout=10)
+            self.assertEqual(child.exitcode, 0)
+            token, _ = self.store.reserve_upload(root, root / ".next", root / "next.bin", 8, 8)
+            self.store.release_upload(token)
+        finally:
+            if child.is_alive():
+                child.terminate()
+                child.join(timeout=5)
+            parent_connection.close()
+            child_connection.close()
+
+    def test_upload_file_count_quota_counts_inputs_and_reservations_not_lockfiles(self):
+        self.assertEqual(MAX_UPLOAD_FILES, 10_000)
+        root = Path(self.tmp.name) / "inputs"
+        root.mkdir()
+        (root / "existing.bin").write_bytes(b"1")
+        orphan_lock = root / f".upload-reservation-{uuid.uuid4()}.lock"
+        orphan_lock.touch()
+        with patch("security_scanner.portal_store.MAX_UPLOAD_FILES", 2):
+            first, _ = self.store.reserve_upload(root, root / ".first", root / "first.bin", 1, 8)
+            self.assertFalse(orphan_lock.exists())
+            with self.assertRaises(UploadQuotaExceeded):
+                self.store.reserve_upload(root, root / ".second", root / "second.bin", 1, 8)
+            self.store.release_upload(first)
+            (root / "existing.bin").unlink()
+            first, _ = self.store.reserve_upload(root, root / ".first", root / "first.bin", 1, 8)
+            second, _ = self.store.reserve_upload(root, root / ".second", root / "second.bin", 1, 8)
+            self.store.release_upload(first)
+            self.store.release_upload(second)
+
+    def test_legacy_reservation_migration_keeps_unknown_owner_charged(self):
+        root = (Path(self.tmp.name) / "legacy-inputs").resolve()
+        root.mkdir()
+        database = Path(self.tmp.name) / "legacy.sqlite3"
+        with sqlite3.connect(database) as db:
+            db.execute(
+                "CREATE TABLE upload_reservations(reservation_id TEXT PRIMARY KEY,root TEXT NOT NULL,"
+                "temporary_path TEXT NOT NULL,target_path TEXT NOT NULL,reserved_bytes INTEGER NOT NULL,"
+                "created_at TEXT NOT NULL)"
+            )
+            db.execute(
+                "INSERT INTO upload_reservations VALUES(?,?,?,?,?,?)",
+                (str(uuid.uuid4()), str(root), str(root / ".old"), str(root / "old.bin"), 5, "2020-01-01"),
+            )
+        legacy_store = PortalStore(database)
+        with legacy_store._db() as db:
+            self.assertEqual(db.execute("SELECT owner_lock FROM upload_reservations").fetchone()[0], 0)
+        with self.assertRaises(UploadQuotaExceeded):
+            legacy_store.reserve_upload(root, root / ".next", root / "next.bin", 4, 8)
 
     def test_gitlab_ref_pagination_rejects_repeated_page(self):
         with patch("security_scanner.portal_integrations._gitlab_json", return_value=([], {"X-Next-Page": "1"})):
@@ -396,6 +535,47 @@ class LinuxPortalStoreTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=4) as pool:
             runs = list(pool.map(create, range(4)))
         self.assertEqual(sorted(run["snapshot"]["gitlab_result_version"] for run in runs), [2, 3, 4, 5])
+
+    def test_scheduled_result_branches_are_source_scoped_and_human_readable(self):
+        mappings = self.store.set_gitlab_repositories(self.project, [
+            {"gitlab_project_id": 101, "path_with_namespace": "group/payments", "name": "payments",
+             "default_branch": "main", "tracker_service_id": "svc-1", "tracker_environment_id": "env-1", "tracker_token_ref": "payments.token"},
+            {"gitlab_project_id": 102, "path_with_namespace": "group/orders", "name": "orders",
+             "default_branch": "main", "tracker_service_id": "svc-2", "tracker_environment_id": "env-2", "tracker_token_ref": "orders.token"},
+            {"gitlab_project_id": 199, "path_with_namespace": "group/koda-results", "name": "koda-results",
+             "default_branch": "main", "tracker_service_id": "svc-r", "tracker_environment_id": "env-r", "tracker_token_ref": "results.token"},
+        ], self.admin)
+        targets = []
+        for index, source in enumerate(mappings[:2], 1):
+            targets.append(self.store.save_schedule_target({
+                "project_id": self.project, "name": f"gitlab-{index}", "source_kind": "gitlab",
+                "source_gitlab_mapping_id": source["mapping_id"], "source_gitlab_ref": "main",
+                "source_gitlab_directory": "services/api", "gitlab_mapping_id": mappings[2]["mapping_id"],
+                "scan_scope": "source", "standard": "local", "standard_category": "all", "enabled": True,
+            }, self.admin))
+
+        def create(target, source, run_day, filename):
+            scheduled = self.store.begin_schedule_run(target["target_id"], run_day, "full", target["config_version"])
+            source_file = Path(self.tmp.name) / filename
+            source_file.write_text("print(1)\n", encoding="utf-8")
+            input_id = self.store.add_input(self.project, filename, source_file)
+            return self.store.create_scheduled_scan(self.project, input_id, "local", "all", "source", {
+                "source_type": "scheduled_server", "scheduled_source_kind": "gitlab",
+                "schedule_target_id": target["target_id"], "schedule_run_id": scheduled["schedule_run_id"],
+                "scheduled_for": run_day, "gitlab_mapping_id": mappings[2]["mapping_id"],
+                "source_gitlab_project_id": source["gitlab_project_id"], "source_gitlab_path": source["path_with_namespace"],
+                "remote_server": "GitLab:" + source["path_with_namespace"], "remote_directory": "services/api",
+            })
+
+        first_payments = create(targets[0], mappings[0], "2026-09-21", "payments-1.tar.gz")
+        first_orders = create(targets[1], mappings[1], "2026-09-21", "orders-1.tar.gz")
+        second_payments = create(targets[0], mappings[0], "2026-09-21", "payments-2.tar.gz")
+        self.assertEqual(first_payments["snapshot"]["gitlab_result_version"], 1)
+        self.assertEqual(first_orders["snapshot"]["gitlab_result_version"], 1)
+        self.assertEqual(second_payments["snapshot"]["gitlab_result_version"], 2)
+        self.assertIn("group-payments", first_payments["snapshot"]["gitlab_result_branch"])
+        self.assertIn("group-orders", first_orders["snapshot"]["gitlab_result_branch"])
+        self.assertNotEqual(first_payments["snapshot"]["gitlab_result_branch"], first_orders["snapshot"]["gitlab_result_branch"])
 
     def test_detailed_gitlab_report_and_mr_retry_preserve_human_content(self):
         finding = {"category": "code", "severity": "high", "rule_id": "SQL-1", "title": "SQL injection",
@@ -857,6 +1037,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.server = create_portal_server(
             "127.0.0.1", 0, db_path=Path(self.tmp.name) / "portal.sqlite3",
             input_dir=Path(self.tmp.name) / "inputs",
+            gateway_proof=TEST_GATEWAY_PROOF,
         )
         self.server.portal_store.bootstrap(self.admin)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -888,10 +1069,101 @@ class LinuxPortalHttpTests(unittest.TestCase):
 
     def headers(self, subject=None, display="admin"):
         return {
+            "X-KODA-Gateway-Proof": TEST_GATEWAY_PROOF,
             "X-KODA-Identity-ID": subject or self.admin,
             "X-KODA-Identity-Expires": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat(),
             "X-KODA-Identity-Display": base64.urlsafe_b64encode(display.encode()).rstrip(b"=").decode(),
         }
+
+    def test_direct_backend_identity_headers_require_gateway_proof(self):
+        forged = self.headers()
+        forged.pop("X-KODA-Gateway-Proof")
+        self.assertEqual(self.request("/koda/api/v1/me", headers=forged)[0], 401)
+        forged["X-KODA-Gateway-Proof"] = "wrong" * 10
+        self.assertEqual(self.request("/koda/api/v1/me", headers=forged)[0], 401)
+        self.assertEqual(self.request("/koda/api/v1/me", headers=self.headers())[0], 200)
+
+    def test_readiness_checks_gateway_proof(self):
+        self.assertEqual(self.request("/koda/ready")[0], 503)
+        self.assertEqual(self.request("/koda/ready", headers={"X-KODA-Gateway-Proof": "wrong"})[0], 503)
+        self.assertEqual(self.request("/koda/ready", headers={"X-KODA-Gateway-Proof": TEST_GATEWAY_PROOF})[0], 200)
+
+    def test_public_json_slot_rejects_excess_concurrent_parsers(self):
+        slots = [self.server.public_json_slot.acquire(blocking=False) for _ in range(8)]
+        self.assertTrue(all(slots))
+        try:
+            status, payload = self.request("/koda/api/v1/projects", method="POST", payload={"name": "busy"}, headers=self.headers())
+            self.assertEqual((status, payload["code"]), (429, "json_capacity_exceeded"))
+        finally:
+            for _ in slots:
+                self.server.public_json_slot.release()
+
+    def test_public_json_limit_rejects_before_reading_large_body(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=10)
+        connection.putrequest("POST", "/koda/api/v1/projects")
+        for name, value in self.headers().items():
+            connection.putheader(name, value)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", str(1024 * 1024 + 1))
+        connection.endheaders()
+        response = connection.getresponse()
+        self.assertEqual(response.status, 413)
+        self.assertEqual(json.loads(response.read())["code"], "payload_too_large")
+        connection.close()
+        self.assertEqual(self.request("/koda/api/v1/projects", method="POST", payload={"name": "ordinary"}, headers=self.headers())[0], 201)
+
+    def test_upload_quota_counts_pending_files_and_releases_after_discard(self):
+        with tempfile.TemporaryDirectory() as root:
+            server = create_portal_server("127.0.0.1", 0, db_path=Path(root) / "portal.sqlite3",
+                                          input_dir=Path(root) / "inputs", gateway_proof=TEST_GATEWAY_PROOF,
+                                          upload_quota_bytes=8)
+            server.portal_store.bootstrap(self.admin)
+            project = server.portal_store.create_project("quota", self.admin)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                def upload(body):
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/koda/api/v1/projects/{project}/inputs?name=input.bin",
+                        data=body, method="POST", headers={**self.headers(), "Content-Type": "application/octet-stream"},
+                    )
+                    try:
+                        with urllib.request.urlopen(request, timeout=10) as response:
+                            return response.status, json.loads(response.read())
+                    except urllib.error.HTTPError as exc:
+                        try:
+                            return exc.code, json.loads(exc.read())
+                        finally:
+                            exc.close()
+
+                status, first = upload(b"12345")
+                self.assertEqual(status, 201)
+                mapping = server.portal_store.set_gitlab_repositories(project, [{
+                    "gitlab_project_id": 42, "path_with_namespace": "group/demo", "name": "demo",
+                    "default_branch": "main", "tracker_service_id": "service", "tracker_environment_id": "env",
+                    "tracker_token_ref": "token",
+                }], self.admin)[0]
+                gitlab_payload = {"project_id": project, "gitlab_repository_id": mapping["mapping_id"],
+                                  "ref_type": "branch", "ref_name": "main", "standard": "local",
+                                  "standard_category": "all"}
+                gitlab_request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/koda/api/v1/scans",
+                    data=json.dumps(gitlab_payload).encode(), method="POST",
+                    headers={**self.headers(), "Content-Type": "application/json"},
+                )
+                with patch("security_scanner.linux_portal.resolve_gitlab_ref", return_value="a" * 40), patch(
+                    "security_scanner.linux_portal.download_gitlab_archive", side_effect=IntegrationError("too large")
+                ) as download:
+                    with self.assertRaises(urllib.error.HTTPError) as caught:
+                        urllib.request.urlopen(gitlab_request, timeout=10)
+                    self.assertEqual(caught.exception.code, 502)
+                    caught.exception.close()
+                    self.assertEqual(download.call_args.kwargs["max_bytes"], 3)
+                self.assertEqual(upload(b"6789")[1]["code"], "upload_quota_exceeded")
+                server.portal_store.discard_input(first["input_id"])
+                self.assertEqual(upload(b"6789")[0], 201)
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=2)
 
     def request(self, path, *, method="GET", payload=None, headers=None):
         body = json.dumps(payload).encode() if payload is not None else None
@@ -1233,6 +1505,9 @@ class LinuxPortalHttpTests(unittest.TestCase):
         )[0], 403)
 
     def test_gitlab_issue_status_api_hides_project_and_retry_is_admin_only(self):
+        # Keep publication failures stable while testing queue admission; the
+        # dedicated worker is exercised explicitly below after the HTTP checks.
+        self.server.portal_worker.close()
         store = self.server.portal_store
         project = store.create_project("Issue API", self.admin)
         store.set_membership(project, self.admin, "admin", self.admin)
@@ -1284,8 +1559,12 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual((status, payload["status"], payload["items"][0]["status"]), (200, "failed", "failed"))
         self.assertEqual(self.request(endpoint + "/retry", method="POST", headers=self.headers(viewer), payload={})[0], 403)
         with patch("security_scanner.linux_portal._deliver_gitlab_issues", return_value={"status": "completed"}) as retry:
-            self.assertEqual(self.request(endpoint + "/retry", method="POST", headers=self.headers(), payload={})[0], 200)
-        retry.assert_called_once_with(store, run["run_id"], retry=True)
+            status, queued = self.request(endpoint + "/retry", method="POST", headers=self.headers(), payload={})
+            self.assertEqual((status, queued["status"], queued["kind"]), (202, "queued", "issues"))
+        retry.assert_not_called()
+        with store._db() as db:
+            job = db.execute("SELECT status,retry FROM portal_delivery_jobs WHERE job_id=?", (queued["job_id"],)).fetchone()
+        self.assertEqual((job["status"], job["retry"]), ("queued", 1))
         status, page = self.request(f"/koda/runs/{run['run_id']}", headers=self.headers())
         self.assertEqual(status, 200)
         self.assertIn("GitLab 취약점 이슈 등록", page)
@@ -1297,6 +1576,13 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertIn("요약 이슈에 포함", page)
         self.assertIn("https://gitlab.example/group/issues/-/issues/10", page)
         self.assertIn("json(`/koda/api/v1/runs/${runId}/gitlab/result/retry`", page)
+        self.assertIn("publicationPending=true", page)
+        from security_scanner.portal_worker import next_publication, process_publication
+        with patch("security_scanner.linux_portal._run_delivery", return_value={"status": "completed"}) as delivery:
+            process_publication(store, next_publication(store))
+        delivery.assert_called_once_with(store, "issues", run["run_id"], retry=True)
+        with store._db() as db:
+            self.assertEqual(db.execute("SELECT status FROM portal_delivery_jobs WHERE job_id=?", (queued["job_id"],)).fetchone()[0], "completed")
 
     def test_scope_menus_render_independent_scan_pages(self):
         project = self.server.portal_store.create_project("scope pages", self.admin)
@@ -1532,13 +1818,19 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.server.portal_store.complete_run(first["run_id"], result={"findings": [{"rule_id": "rule.old", "title": "old", "severity": "low", "category": "code", "path": "a.py", "line": 1}]})
         second = self.server.portal_store.create_scan(self.admin, project, input_ids[1], "local", "all")
         status, cancelled = self.request(f"/koda/api/v1/runs/{second['run_id']}/cancel", method="POST", payload={}, headers=self.headers())
-        self.assertEqual((status, cancelled["status"]), (200, "cancelled"))
+        self.assertEqual(status, 200)
+        self.assertIn(cancelled["status"], {"cancelled", "cancelling"})
+        for _ in range(100):
+            if self.server.portal_store.run_status(second["run_id"])["status"] == "cancelled":
+                break
+            time.sleep(.02)
+        self.assertEqual(self.server.portal_store.run_status(second["run_id"])["status"], "cancelled")
         cancelled_comparison = f"left={first['run_id']}&right={second['run_id']}"
         self.assertEqual(self.request(f"/koda/api/v1/compare?{cancelled_comparison}", headers=self.headers())[0], 422)
         self.assertEqual(self.request(f"/koda/api/v1/runs/{second['run_id']}/retry", method="POST", payload={}, headers=self.headers())[0], 404)
 
         comparison_run = self.server.portal_store.create_scan(self.admin, project, input_ids[2], "local", "all")
-        self.server.portal_store.complete_run(comparison_run["run_id"], result={"findings": [{"rule_id": "rule.new", "title": "new", "severity": "high", "category": "code", "path": "b.py", "line": 2}]})
+        self.server.portal_store.complete_run(comparison_run["run_id"], result={"findings": [{"rule_id": "rule.new", "title": "=1+1", "severity": "high", "category": "code", "path": "@SUM(1,2)", "line": 2}]})
         query = f"left={first['run_id']}&right={comparison_run['run_id']}"
         status, page = self.request(f"/koda/compare?{query}", headers=self.headers())
         self.assertEqual(status, 200)
@@ -1549,7 +1841,11 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual((status, comparison["counts"]), (200, {"new": 1, "resolved": 1, "persistent": 0}))
         request = urllib.request.Request(self.base + f"/koda/api/v1/compare?{query}&format=csv", headers=self.headers())
         with urllib.request.urlopen(request, timeout=10) as response:
-            self.assertTrue(response.read().startswith(b"\xef\xbb\xbf"))
+            raw = response.read()
+            self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+            rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))))
+            self.assertEqual(rows[0]["title"], "\t=1+1")
+            self.assertEqual(rows[0]["path"], "\t@SUM(1,2)")
 
     def test_cross_project_run_is_hidden_and_policy_versions_conflict(self):
         project = self.server.portal_store.create_project("private", self.admin)
@@ -1663,17 +1959,21 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual(response_headers["Content-Disposition"], 'attachment; filename="koda-round-1-report.zip"')
 
         expected = render_html_pair_zip_from_payload(result, "ko")
+        def stable_report(raw):
+            # Both renderers generate export time at invocation; child startup
+            # and sequential inline requests can cross a second boundary.
+            return re.sub(rb"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2})?", b"GENERATED_TIME", raw)
         with zipfile.ZipFile(io.BytesIO(actual)) as actual_zip, zipfile.ZipFile(io.BytesIO(expected)) as expected_zip:
             self.assertEqual(actual_zip.namelist(), ["report.html", "report-detail.html"])
             for name in actual_zip.namelist():
-                self.assertEqual(actual_zip.read(name), expected_zip.read(name))
+                self.assertEqual(stable_report(actual_zip.read(name)), stable_report(expected_zip.read(name)))
                 request = urllib.request.Request(
                     self.base + f"/koda/api/v1/runs/{run['run_id']}/{name}",
                     headers=self.headers(),
                 )
                 with urllib.request.urlopen(request, timeout=10) as response:
                     self.assertEqual(response.headers.get_content_type(), "text/html")
-                    self.assertEqual(response.read(), expected_zip.read(name))
+                    self.assertEqual(stable_report(response.read()), stable_report(expected_zip.read(name)))
 
         status, markdown = self.request(f"/koda/api/v1/runs/{run['run_id']}/report?format=markdown", headers=self.headers())
         self.assertEqual(status, 200)

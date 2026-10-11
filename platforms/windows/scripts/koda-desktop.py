@@ -18,6 +18,7 @@ import os
 import platform
 import sys
 import threading
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -26,7 +27,7 @@ if shared_engine.exists():
     sys.path.insert(0, str(shared_engine))
 
 from security_scanner.app import _create_available_server
-from security_scanner.server import DEFAULT_HOST, DEFAULT_PORT, dashboard_url
+from security_scanner.server import DEFAULT_HOST, DEFAULT_PORT, create_dashboard_server, dashboard_url
 
 WINDOW_MIN_WIDTH = 980
 WINDOW_MIN_HEIGHT = 720
@@ -113,6 +114,21 @@ def _run_browser_mode(url: str) -> int:
     return 0
 
 
+def _smoke_test_dashboard(language: str) -> int:
+    """Verify packaged imports and HTTP startup without opening a user window."""
+    with create_dashboard_server(DEFAULT_HOST, 0, language) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = dashboard_url(DEFAULT_HOST, server.server_address[1])
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(url, timeout=10) as response:
+                return 0 if response.status == 200 and b"KODA" in response.read() else 1
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run KODA desktop dashboard.")
     parser.add_argument(
@@ -120,11 +136,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Skip the native WebView window and open KODA in the default browser.",
     )
+    parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
 def main() -> int:
     args = _parse_args(sys.argv[1:])
+    if args.smoke_test:
+        return _smoke_test_dashboard(os.environ.get("KODA_LANGUAGE", "ko"))
     display_name = os.environ.setdefault("KODA_DISPLAY_NAME", "KODA")
     _set_safe_working_directory()
 
