@@ -4,9 +4,12 @@ import http.server
 import socket
 import socketserver
 import sys
+import tempfile
 import threading
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED_PYTHON = ROOT / "platforms" / "shared" / "python"
@@ -14,6 +17,70 @@ if str(SHARED_PYTHON) not in sys.path:
     sys.path.insert(0, str(SHARED_PYTHON))
 
 from security_scanner import netprobe
+
+
+class HttpProbeBoundaryTests(unittest.TestCase):
+    def test_non_http_targets_are_rejected_before_io(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory) / "private.txt"
+            private.write_text("private probe data", encoding="utf-8")
+            targets = (private.as_uri(), "ftp://127.0.0.1/private.txt",
+                       "data:text/plain,private", "http://127.0.0.1:invalid/",
+                       "http:///missing-host", "http://127.0.0.1/\nprivate")
+            for url in targets:
+                with self.subTest(url=url), \
+                        patch("builtins.open", side_effect=AssertionError("local file I/O")) as file_io, \
+                        patch("socket.create_connection", side_effect=AssertionError("network I/O")) as network_io:
+                    with self.assertRaises(urllib.error.URLError):
+                        netprobe._http_open(url, timeout=1.0)
+                    self.assertEqual(netprobe.default_credential_check(url, authorize=True), [])
+                    file_io.assert_not_called()
+                    network_io.assert_not_called()
+
+    def test_http_redirects_work_but_cannot_read_files_or_use_ftp(self):
+        destinations = {}
+        user_agents = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                user_agents.append(self.headers.get("User-Agent", ""))
+                if self.path in destinations:
+                    self.send_response(302)
+                    self.send_header("Location", destinations[self.path])
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"HTTP probe response")
+
+            def log_message(self, *args):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory) / "private.txt"
+            private.write_text("private probe data", encoding="utf-8")
+            destinations.update({"/file": private.as_uri(), "/ftp": "ftp://127.0.0.1/private.txt",
+                                 "/http": "/probe"})
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                base = f"http://127.0.0.1:{server.server_port}"
+                with netprobe._http_open(base + "/http", timeout=2.0) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), b"HTTP probe response")
+                for path in ("/file", "/ftp"):
+                    with self.subTest(path=path), \
+                            patch("urllib.request.FileHandler.file_open", side_effect=AssertionError("local file read")) as file_io, \
+                            patch("urllib.request.FTPHandler.ftp_open", side_effect=AssertionError("FTP request")) as ftp_io:
+                        with self.assertRaises(urllib.error.URLError):
+                            netprobe._http_open(base + path, timeout=2.0)
+                        file_io.assert_not_called()
+                        ftp_io.assert_not_called()
+                self.assertTrue(user_agents)
+                self.assertTrue(all(agent.startswith("Python-urllib/") for agent in user_agents))
+            finally:
+                server.shutdown()
+                server.server_close()
 
 
 class PortScanTests(unittest.TestCase):

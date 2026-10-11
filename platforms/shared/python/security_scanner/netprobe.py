@@ -21,6 +21,7 @@ import socket
 import ssl
 import struct
 import urllib.error
+import urllib.parse
 import urllib.request
 import warnings
 from collections.abc import Mapping
@@ -44,6 +45,54 @@ _DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
     ("admin", "admin"), ("admin", "password"), ("admin", ""),
     ("root", "root"), ("tomcat", "tomcat"),
 )
+
+
+def _validate_http_url(url: str) -> None:
+    """Reject non-network HTTP targets before a handler can perform I/O."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        valid = parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+        parsed.port  # Validate the port even though handlers also parse it.
+    except ValueError as exc:
+        raise urllib.error.URLError("Invalid HTTP probe URL") from exc
+    if not valid or any(ord(char) <= 32 or ord(char) == 127 for char in url):
+        raise urllib.error.URLError("HTTP probes require an HTTP or HTTPS URL")
+
+
+class _HttpOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            _validate_http_url(newurl)
+        except urllib.error.URLError:
+            fp.close()
+            raise
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _http_open(request: str | urllib.request.Request, *, timeout: float):
+    """Open an HTTP probe without installing local-file, FTP or data handlers.
+
+    Building an OpenerDirector explicitly is deliberate: build_opener/urlopen
+    install generic protocol handlers, even if the initial URL is HTTP-only.
+    Redirects must pass the same scheme check as the original request.
+    """
+    _validate_http_url(request.full_url if isinstance(request, urllib.request.Request) else request)
+    opener = urllib.request.OpenerDirector()
+    proxies = {scheme: proxy for scheme, proxy in urllib.request.getproxies().items()
+               if scheme in {"http", "https"}}
+    for handler in (
+        urllib.request.ProxyHandler(proxies), urllib.request.UnknownHandler(),
+        urllib.request.HTTPHandler(), urllib.request.HTTPSHandler(),
+        urllib.request.HTTPDefaultErrorHandler(), _HttpOnlyRedirect(),
+        urllib.request.HTTPErrorProcessor(),
+    ):
+        opener.add_handler(handler)
+    try:
+        return opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        # Callers inspect status/headers only; release an error response body.
+        exc.close()
+        raise
 
 
 def _finding(rule_id: str, severity: str, title: str, target: str, *,
@@ -165,7 +214,7 @@ def default_credential_check(url: str, *, timeout: float = 5.0, authorize: bool 
         token = base64.b64encode(f"{username}:{password}".encode()).decode()
         request = urllib.request.Request(url, headers={"Authorization": f"Basic {token}"})
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with _http_open(request, timeout=timeout) as response:
                 status = response.status
         except urllib.error.HTTPError as exc:
             status = exc.code
@@ -263,7 +312,7 @@ def _redis_unauth(host: str, timeout: float, port: int = 6379) -> list[Finding]:
 def _http_unauth(host: str, port: int, path: str, service: str, signature: str, timeout: float) -> list[Finding]:
     url = f"http://{host}:{port}{path}"
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with _http_open(url, timeout=timeout) as response:
             if response.status != 200:
                 return []
             body = response.read(4096).decode("latin-1", "replace")
@@ -281,7 +330,7 @@ def _http_unauth(host: str, port: int, path: str, service: str, signature: str, 
 def _basic_auth_challenge(url: str, timeout: float) -> bool:
     """True when the URL responds 401 with a Basic-auth challenge."""
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with _http_open(url, timeout=timeout) as response:
             header = response.headers.get("WWW-Authenticate", "")
             return "basic" in header.lower()
     except urllib.error.HTTPError as exc:
