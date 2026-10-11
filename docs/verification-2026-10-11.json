@@ -1,0 +1,203 @@
+{
+  "verification_date": "2026-10-11",
+  "timezone": "Asia/Seoul",
+  "publication_scope": "documentation only; implementation, tests, assets, binaries and raw logs remain local",
+  "source_snapshot": {
+    "base_revision": "4efb0bce1e0f5a00a078c77d9f91608d5127a757",
+    "contains_unpublished_worktree_changes": true,
+    "changed_file_sha256": {
+      "platforms/macos/scripts/prepare-java-scan-assets.command": "fe8864ba9f41f57449bf394779279ecd5ed01d995883a49f64bc59379249e307",
+      "platforms/macos/scripts/stage-java-scan-app-bundle.command": "6dabe69a12145c23b18d1a5c34a6b291336864814eef82156ba8c60d6f3f4260",
+      "platforms/macos/app/KODA/KODA/BundledJavaArchiveScanner.swift": "cd5b20389197eecc29f318020b3af73120a0e67a850e47c8063361ea18a7541f",
+      "platforms/macos/tests/test_java_asset_packaging.py": "08504bdedfcd52c9a787477b423959a32ec9494334798a7128c6702eeff4070c",
+      "tests/test_scheduled_release_install.py": "ce58104818aa9a2b559be07f0831f810c2458d80669e51518d9e8a8323c3e723"
+    }
+  },
+  "linux": {
+    "platform": "linux/amd64",
+    "execution": "amd64 user space emulated in Docker LinuxKit on Apple Silicon",
+    "os": "Debian 12",
+    "python": "3.12.15",
+    "full_unittest": {
+      "total": 768,
+      "passed": 767,
+      "failed": 0,
+      "skipped": 1,
+      "seconds": 198.051
+    },
+    "skipped": "local LLM integration",
+    "image": {
+      "Id": "sha256:54f1cb995e0ba04ac2ae55fef62243820eaff69ac1fbc50c0f44e65ae619c965",
+      "Architecture": "amd64",
+      "Os": "linux",
+      "Size": 1095194186
+    },
+    "source_installer": "platforms/linux/install.sh --no-link",
+    "installed_source_resource_hash_matches": 106,
+    "actual_portal": {
+      "containers": [
+        "web",
+        "scan",
+        "delivery"
+      ],
+      "run_completed": true,
+      "worker_health": "healthy",
+      "pdf_bytes": 29020,
+      "pdf_sha256": "4bb60928f3a818314c434e7dfbb14ecca0b7336503fadf589808a61d9ea551d7",
+      "remaining_workspaces": 0
+    },
+    "java_runtime": {
+      "system": "Linux-6.12.54-linuxkit-x86_64-with-glibc2.36",
+      "machine": "x86_64",
+      "network": "none",
+      "memory_limit": "4g",
+      "db-import": {
+        "exit": 0,
+        "seconds": 71.76
+      },
+      "scan": {
+        "exit": 1,
+        "seconds": 25.72
+      },
+      "summary": {
+        "archive_count": 1,
+        "component_count": 1,
+        "unresolved_component_count": 0,
+        "duplicate_file_count": 0,
+        "file_unavailable_count": 0,
+        "severity_counts": {
+          "critical": 2,
+          "high": 1,
+          "medium": 4,
+          "low": 0,
+          "info": 0
+        },
+        "kev_count": 1,
+        "raw_match_count": 7,
+        "unique_vulnerability_count": 7,
+        "affected_library_version_count": 1
+      },
+      "warnings": [],
+      "success": true
+    },
+    "test_containers_remaining": 0,
+    "live_suite_upgrade_rollback": "unverified; release unit tests use Docker double"
+  },
+  "macos": {
+    "configuration": "Release",
+    "java_assets_included": true,
+    "developer_signed_notarized": false,
+    "build": "passed",
+    "analyze": "passed",
+    "architectures": {
+      "Contents/MacOS/KODA": "x86_64 arm64",
+      "Contents/Helpers/koda-java-scan-arm64.app/Contents/MacOS/koda-java-scan": "arm64",
+      "Contents/Helpers/koda-java-scan-amd64.app/Contents/MacOS/koda-java-scan": "x86_64",
+      "Contents/Helpers/java-scan-tools/arm64/syft": "arm64",
+      "Contents/Helpers/java-scan-tools/arm64/grype": "arm64",
+      "Contents/Helpers/java-scan-tools/amd64/syft": "x86_64",
+      "Contents/Helpers/java-scan-tools/amd64/grype": "x86_64"
+    },
+    "actual_runtime": "arm64",
+    "intel_execution": "unverified; Bad CPU type in executable",
+    "harness_scripts": {
+      "total": 10,
+      "passed": 10
+    },
+    "java_cases": {
+      "java-en": {
+        "exit": 0,
+        "network_denied": false,
+        "report_language": "ko",
+        "summary": {
+          "archive_count": 1,
+          "component_count": 1,
+          "unresolved_component_count": 0,
+          "duplicate_file_count": 0,
+          "file_unavailable_count": 0,
+          "severity_counts": {
+            "critical": 2,
+            "high": 1,
+            "medium": 4,
+            "low": 0,
+            "info": 0
+          },
+          "kev_count": 1,
+          "raw_match_count": 7,
+          "unique_vulnerability_count": 7,
+          "affected_library_version_count": 1
+        },
+        "warnings": []
+      },
+      "java-offline-ko": {
+        "exit": 0,
+        "network_denied": true,
+        "report_language": "ko",
+        "summary": {
+          "archive_count": 1,
+          "component_count": 1,
+          "unresolved_component_count": 0,
+          "duplicate_file_count": 0,
+          "file_unavailable_count": 0,
+          "severity_counts": {
+            "critical": 2,
+            "high": 1,
+            "medium": 4,
+            "low": 0,
+            "info": 0
+          },
+          "kev_count": 1,
+          "raw_match_count": 7,
+          "unique_vulnerability_count": 7,
+          "affected_library_version_count": 1
+        },
+        "warnings": []
+      }
+    },
+    "gui": "main window launch verified; Java checks used app headless entry point"
+  },
+  "windows": {
+    "native_execution": "excluded at user request",
+    "new_contract_regressions_passed": 8,
+    "powershell_files_parsed": 2,
+    "parse_errors": 0
+  },
+  "earlier_fix_phase": {
+    "macos_python314": {
+      "total": 768,
+      "passed": 760,
+      "failed": 0,
+      "skipped": 8,
+      "seconds": 142.73
+    },
+    "python312_focused": {
+      "total": 214,
+      "passed": 214,
+      "failed": 0
+    }
+  },
+  "java_assets": {
+    "syft": "1.46.0",
+    "grype": "0.115.0",
+    "grype_db_schema": "v6.1.10",
+    "grype_db_built": "2026-10-10T06:30:01Z",
+    "grype_db_archive_sha256": "9c7673c1d8526a5696e6af4cd26f48c3d4ab34c30e40ffe212a811c44ab5f0c1",
+    "nvd_feeds": 27,
+    "nvd_years": "2002-2026 plus recent/modified",
+    "cisa_kev_included": true
+  },
+  "static_checks": {
+    "ruff_F_E9": "passed",
+    "shell_syntax": "passed",
+    "git_diff_check": "passed"
+  },
+  "unverified": [
+    "physical x86_64/native x86_64 kernel",
+    "production Nginx gateway login",
+    "real Tracker/GitLab external delivery",
+    "real OOM/failure recovery",
+    "real external-web efficacy",
+    "local-model generation quality and AI functional equivalence",
+    "developer signing/notarization/App Store submission"
+  ]
+}

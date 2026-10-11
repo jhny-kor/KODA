@@ -1,14 +1,30 @@
 # KODA Windows 설치
 
+> 기준일 **2026-10-11**. 미커밋 개발 변경을 포함한 로컬 소스 기준입니다.
+> Mac 호스트에서 Windows 패키징·프로세스 회귀 및 PowerShell 문법 검사를
+> 통과했습니다. Windows EXE·설치본·WebView2·네이티브 Syft 실기 실행은
+> 사용자 지시로 제외했습니다. [검증 요약](../verification-2026-10-11.ko.md)을 확인하세요.
+
 Windows 설치본은 공통 Python 엔진과 Inno Setup 패키지를 사용합니다. 실제
-설치본과 취약점 데이터 zip은 Windows 빌드 환경에서 생성해야 합니다.
+설치본은 Windows 빌드 환경에서 생성해야 합니다. 취약점 데이터 zip은 Windows
+스크립트 또는 macOS/Linux의 오프라인 패키지 스크립트로 생성할 수 있습니다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\platforms\windows\scripts\build-koda-windows-installer.ps1
+```
+
+Full 설치본은 Syft·Grype·Grype DB와 Chromium을 포함합니다. `-SourceOnly`는
+소스 점검용 시험 설치본으로 Java·실시간 웹 점검 도구를 제외합니다. 두 프로파일의
+완성 `KODA.exe`는 빌드 중 `--smoke-test`로 대시보드 시작을 확인합니다.
+이 사전 검사가 통과해도 Windows 실기·WebView2 검증 완료를 뜻하지 않습니다.
 
 설치 후 `koda-vuln-data-<date>.zip`을 별도로 반입해 NVD·CISA KEV 자료를
 현행화할 수 있습니다. 애플리케이션을 다시 빌드하지 않고 데이터 패키지만
 교체할 수 있습니다.
 
 ```powershell
-python -m security_scanner jar-scan `
+koda jar-scan `
   --target C:\deploy\apps `
   --target C:\deploy\worker-apps `
   --output-dir reports\java-scan `
@@ -62,3 +78,12 @@ koda scan --target C:\src\project --standard sw-dev-security-49 ^
 
 - [한국어 문서 인덱스](../README.md)
 - [English Windows install](windows.md)
+
+## 검사 종료 코드
+
+없는 소스 `--target`은 정상 보고서를 만들지 않고 `2`로 종료합니다. Java의
+`--fail-on`·`--fail-on-kev`는 실제 사용 가능한 Grype 비교가 필요합니다.
+Grype가 없거나 `--no-grype`로 꺼진 상태에서 게이트를 요청하면 `2`로 종료합니다.
+정상 평가한 게이트는 기준에 해당하는 취약점이 있으면 `1`, 없으면 `0`입니다.
+게이트 없는 명시적 `--no-grype` SBOM 생성은 지원하지만 이때의 `0`은 취약점이
+없다는 판정이 아닙니다. KEV 게이트는 CISA 자료가 없어 평가할 수 없을 때도 `2`입니다.

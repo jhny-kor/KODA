@@ -1,6 +1,6 @@
 # macOS Local AI Development Guide
 
-> As of **2026-10-02**, this guide describes the implementation inspected in the
+> As of **2026-10-11**, this guide describes the implementation inspected in the
 > local working tree. Its AI source, development script, and tests are unpublished
 > working files. Publishing these docs alone does not make the commands available
 > in a GitHub checkout or establish availability in the Mac App Store app.
@@ -121,9 +121,13 @@ preserved behavior.
 
 ## Verification commands and historical records
 
-These tests also require the unpublished development files. **The 2026-10-02 refresh
-reviewed source and reran the fixture tests below successfully.** Real-model
-inference, GUI behavior, app builds, and Store distribution were not freshly verified.
+These tests require the unpublished development files. **On 2026-10-11, all ten
+macOS validation scripts passed, including the seven local AI fixtures below.**
+The Java-enabled arm64/x86_64 Release build and static analysis succeeded. Actual
+ARM execution checked the app window and the headless Java scan. This does not
+establish complete local AI UI interaction or freshly validated real-model
+inference. Intel execution, Store distribution, and notarization remain unverified.
+See the [current validation record](verification-2026-10-11.md).
 
 ```bash
 python3 platforms/macos/tests/test_local_ai_client.py
@@ -135,9 +139,15 @@ python3 platforms/macos/tests/test_native_local_ai_impact.py
 python3 platforms/macos/tests/test_native_ai_report.py
 ```
 
-Fresh validation used `python3 -m unittest discover -s platforms/macos/tests -q`,
-with seven successful local AI Swift fixture outputs and five passing native
-archive-limit tests. Fixture responses do not establish real-model analysis accuracy.
+The current ten-script set adds native archive, Java process, and Java asset
+packaging checks to those seven fixtures. It covers valid empty ZIP/GZIP files,
+invalid compressed data, concurrent process output/timeout behavior, and rejection
+of a helper with the wrong architecture. Fixture responses do not establish
+real-model analysis accuracy.
+
+The 2026-10-02 `python3 -m unittest discover -s platforms/macos/tests -q` result
+(seven local AI fixtures and five archive tests at the time) is a historical
+regression record for the earlier implementation.
 
 Earlier development records from 2026-09-28–29 describe the following. They are not
 current-environment passing evidence.

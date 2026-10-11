@@ -2,7 +2,7 @@
 
 Effective date: May 17, 2026
 
-Documentation reviewed: 2026-10-02
+Documentation reviewed: 2026-10-11
 
 KODA's native macOS app analyzes files and folders selected by the user on the
 user's Mac. The shared Python engine also supports Windows, Linux, CI, and an
@@ -47,9 +47,11 @@ impact drafts send bounded declaration names and counts.
 These features are user-triggered. Candidate fixes are generated separately
 from the original file; passing syntax and scanner checks does not establish
 functional equivalence. Saved connection profiles contain the URL and model,
-not the API key.
+not the API key. Native local-server keys are stored separately in the macOS
+Keychain by server URL. AI supplemental reports send bounded finding metadata,
+without source, paths, evidence, or warning text.
 
-This describes unpublished local development work as of 2026-10-02 and does not
+This describes unpublished local development work as of 2026-10-11 and does not
 establish availability in the Mac App Store app.
 
 ## Server and external integrations

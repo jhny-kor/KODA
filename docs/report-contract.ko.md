@@ -1,7 +1,8 @@
 # KODA 리포트 계약
 
 Linux·Windows·CI·서버는 공통 Python 엔진을 사용하고, macOS 앱은 네이티브
-Swift 스캐너를 사용합니다. 소비자는 읽는 산출물의 계약을 선택해야 하며, 아래
+Swift 스캐너를 사용하며 Java 점검에는 공통 엔진을 포함한 번들 helper를 사용합니다.
+소비자는 읽는 산출물의 계약을 선택해야 하며, 아래
 필드는 공통 엔진의 `scan --format json` 결과를 기준으로 합니다.
 
 ## Finding 필드
@@ -50,9 +51,13 @@ JSON·HTML·Markdown·SARIF·CycloneDX 변환은 원본 finding의 식별자와 
 보존해야 합니다. 빈 결과는 대상에 위험이 없다는 보장이 아닙니다.
 
 Java 리포트는 라이브러리·설치 버전별로 취약점을 통합하고, `Fixed`와 동일한
-Grype DB로 검증한 `Final` 후보를 별도 필드로 제공합니다.
+Grype DB로 검증한 `Final` 후보를 별도 필드로 제공합니다. Java HTML·Markdown은
+한국어 전용이며 macOS helper도 UI 언어와 무관하게 같은 언어 계약을 사용합니다.
+Java의 `--fail-on`/`--fail-on-kev`는 Grype가 없거나 비교가 비활성화되면
+종료 코드 `2`입니다. 소스 `scan`의 없는 대상도 `2`이므로, 정상 종료 코드와
+보고서의 경고·coverage를 함께 확인해야 합니다.
 
-## 개발 CSV 내보내기 동작 — 2026-10-02
+## CSV 내보내기 동작 — 2026-10-11
 
 미게시 보안 경계 체크아웃의 NIS-SBOM CSV는 셀을 따옴표로 감싸고, 앞쪽
 공백·BOM·NUL 뒤에 `=`, `+`, `-`, `@` 또는 전각 기호로 시작하는 값에는
@@ -62,6 +67,10 @@ CSV를 열 때 보호 탭을 제거하지 마세요. 원래 finding의 심각도
 변경하지 않습니다. 코드 게시 상태는 [현재 상태](current-status.ko.md)를 따릅니다.
 
 ## 검증
+
+[2026-10-11 검증 기록](verification-2026-10-11.ko.md)은 Java 포함 macOS
+빌드·ARM 실행과 Linux x86_64 포털·PDF·Java 실행을 설명합니다. Windows
+실기 실행은 사용자 지시로 제외됐으며 구현 여부와 실행 검증을 구분해야 합니다.
 
 공통 Python 직렬화 함수는 `security_scanner.reporting._finding_payload`입니다.
 finding 직렬화나 리포트 내보내기를 변경한 뒤 `tests.test_source_analysis`,

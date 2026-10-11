@@ -1,16 +1,20 @@
 # KODA Documentation
 
 This is the English documentation index. The [Korean index](README.md) contains
-the Korean guides and Korean-language links. Within this index, navigation stays
-on English documents; use the language link above only when intentionally
-switching languages.
+the Korean guides. English counterparts are linked where available; Korean-only
+documents are labeled explicitly.
 
-## Documentation baseline — 2026-10-02
+## Documentation baseline — 2026-10-11
 
 The [current implementation and verification snapshot](current-status.en.md)
 distinguishes committed source, unpublished local development work, and released
 binaries. Development-only commands and old validation records are not evidence
 that a downloaded installer or the Mac App Store app includes those changes.
+
+This GitHub publication contains documentation only. Product code, new tests,
+Java assets, app binaries, and Docker images remain local. The
+[latest validation record](verification-2026-10-11.md) describes Java-enabled
+universal macOS builds/ARM execution and actual Linux amd64 container checks.
 
 ## Quick starts
 
@@ -62,5 +66,8 @@ that a downloaded installer or the Mac App Store app includes those changes.
 - [Security dashboard research](security-dashboard-research.md)
 - [SW development security 49 profile](standards/sw-development-security-49.en.md)
 - [Authoritative standard mapping audit](standards/authoritative-mapping-audit.en.md)
+- [126-feature OS implementation matrix (Korean)](platform-feature-matrix.ko.md)
+- [Build and runtime validation — 2026-10-11](verification-2026-10-11.md)
+- [Linux server stability implementation and follow-up plan (Korean)](linux-server-stability-plan.ko.md)
 
 Planning material is maintained in Korean in the [Korean documentation index](README.md).

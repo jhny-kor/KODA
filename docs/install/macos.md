@@ -1,8 +1,8 @@
 # KODA macOS Install
 
-> As of **2026-10-02**, source behavior below is based on the local working tree,
+> As of **2026-10-11**, source behavior below is based on the local working tree,
 > including uncommitted development changes. This docs refresh does not establish
-> an App Store update, notarization, or release validation. Check the installed
+> an App Store update, notarization, or production release validation. Check the installed
 > release before assuming feature availability.
 
 macOS has two lanes:
@@ -10,7 +10,7 @@ macOS has two lanes:
 - `platforms/macos/app/KODA/`: native Swift app with `NativeSecurityScanner.swift`.
 - `platforms/macos/scripts/`: Python dashboard helper scripts for local source-tree use.
 
-The native Swift app does not call the shared Python engine. It should keep the same rule id, severity, category, and report-shape contract as the shared engine.
+The native Swift scanner handles the standard source/archive scan. The separate Java archive menu calls the bundled shared Python helper. The native scanner should keep the same rule id, severity, category, and report-shape contract as the shared engine.
 
 ## Build Native App
 
@@ -32,6 +32,16 @@ Apple Development identity. Copying over a root-owned Mac App Store install in
 `/Applications` requires administrator authentication; back up the installed app
 first. An Apple Development signature is suitable for local verification but does
 not represent App Store distribution or notarization.
+
+## Verification as of 2026-10-11
+
+The local source passed a Java-inclusive universal arm64+x86_64 Release build
+and Xcode analysis. The completed ARM app launched and ran its bundled Java
+scanner through the app's headless entry point, including a network-denied run.
+Both English UI and Korean UI settings completed; Java HTML/Markdown reports
+remain Korean. Starting Java scans with the GUI button was not separately tested. Intel binaries were built and checked, but Intel execution was
+not verified on this host. This was an unsigned local validation build, not a
+Store release. See the [verification summary](../verification-2026-10-11.md).
 
 ## Settings and host posture
 

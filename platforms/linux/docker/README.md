@@ -1,6 +1,6 @@
 # KODA 폐쇄망 Docker 전달물
 
-> 현행화 기준: 2026-10-02 로컬 소스 checkout(개발 중 변경 포함). 이 문서의
+> 현행화 기준: 2026-10-11 로컬 소스 checkout(개발 중 변경 포함). 이 문서의
 > 게시가 해당 소스 변경의 게시나 GitHub main·기존 배포 이미지 반영을 뜻하지
 > 않습니다. 아래 checkout 동작을 운영에 적용하기 전에 설치 버전과 대응 번들의
 > 재빌드·검증 여부를 확인해야 합니다.
@@ -11,7 +11,7 @@ Linux x86_64 폐쇄망 서버에서 KODA JAR/WAR/EAR SBOM·취약점 점검을 D
 
 ## Checkout의 추가 운영 경계
 
-다음은 2026-10-02 checkout의 개발 중 변경입니다. 기존 이미지나 설치된 wrapper의
+다음은 2026-10-11 checkout의 개발 중 변경입니다. 기존 이미지나 설치된 wrapper의
 동작을 보장하지 않으므로 대응 번들을 다시 빌드·검증하고 적용해야 합니다.
 
 - 통합 Suite가 `.env`에 `KODA_GATEWAY_PROOF`를 생성합니다. 기존 값이
@@ -35,6 +35,31 @@ Linux x86_64 폐쇄망 서버에서 KODA JAR/WAR/EAR SBOM·취약점 점검을 D
 SSH 터널만으로 Tracker identity·gateway proof를 포함한 보호 포털 인증이 구성되지는
 않으므로 사용자 로그인·운영 점검은 통합 Suite를 사용합니다. Docker/nginx 실제
 연동, 기존 설치본의 upgrade, Chromium 실행 검증은 소스 확인과 별개의 검증입니다.
+
+## 2026-10-11 실행 검증 범위
+
+현재 소스로 만든 `linux/amd64` 시험 이미지에서 설치·실행을 확인했습니다.
+Debian 12·Python 3.12.15 환경이며 Apple Silicon의 Docker LinuxKit VM에서
+amd64 사용자 공간을 에뮬레이션했습니다. 물리 x86_64 서버나 네이티브 x86_64
+커널의 성능·호환성을 검증한 결과는 아닙니다. Linux ARM64는 검증 대상이 아닙니다.
+
+- `platforms/linux/install.sh --no-link`로 소스 설치본을 실제 설치하고 CLI·미인증
+  API 거부를 확인했습니다. Docker 전달물의 `docker/install.sh` 전체 반입 절차를
+  실행한 결과는 아닙니다.
+- 실제 Docker 런처가 웹·분석·전송 컨테이너를 만들고 ZIP 업로드→점검→JSON/PDF
+  다운로드를 완료했습니다. PDF는 29,020바이트, 두 워커는 healthy, 잔여 작업 폴더는
+  0개였습니다. 시험 컨테이너는 종료·제거했습니다.
+- Syft 1.46.0·Grype 0.115.0을 네트워크 차단·4 GiB 제한에서 실행했습니다.
+  합성 `log4j-core 2.14.1` JAR에서 취약점 7건·경고 0건을 확인했으며
+  `--fail-on high`가 종료 코드 `1`로 차단했습니다.
+- 전체 회귀는 **768개 중 767개 통과·실패 0개·로컬 LLM 연동 1개 건너뜀**입니다.
+- 실제 Nginx gateway 로그인, 외부 Tracker/GitLab 전송, 강제 OOM 복구와 운영 Suite
+  업그레이드·롤백은 미검증입니다. 설치·롤백 unittest는 Docker test double을
+  사용하는 계약 검사이며 실제 운영 업그레이드를 뜻하지 않습니다.
+
+이번 GitHub 문서 게시는 실행 소스 게시나 운영 이미지 배포를 포함하지 않습니다.
+[검증 요약](../../../docs/verification-2026-10-11.ko.md)을 확인하고 설치된 버전과
+대응 번들을 따로 확인하세요.
 
 ## 구성
 
@@ -154,7 +179,8 @@ KODA_PORT=9876 "$KODA_CLI" dashboard start
 
 ```bash
 ssh -L 9876:127.0.0.1:9876 user0@<server-ip>
-# http://127.0.0.1:9876/koda/login
+# 상태 확인: http://127.0.0.1:9876/live
+# 보호 포털 로그인은 통합 Suite의 /koda/ 경로를 사용
 ```
 
 직접 접속이 승인된 경우에만 `KODA_DASHBOARD_BIND=0.0.0.0`을 명시적으로
@@ -170,7 +196,8 @@ URL·조회용 PAT·결과 저장용 PAT·선택적 CA를 저장합니다. 운�
 `read_api` 조회 토큰과 같은 계정의 `api` 쓰기 토큰 파일, CA 파일을 읽기 전용으로
 마운트합니다. KODA는 Tracker가 발급한
 저장소별 전송 토큰을 전용 읽기·쓰기 디렉터리에 저장합니다. 허용 목적지만 도달하는 별도 Docker 네트워크는
-`KODA_GITLAB_NETWORK`로 연결합니다.
+`KODA_GITLAB_NETWORK`로 웹과 전송 워커에 연결합니다. 분석 워커는 `none`
+네트워크를 사용합니다.
 
 ### KODA SBOM Tracker 통합
 

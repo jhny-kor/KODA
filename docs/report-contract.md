@@ -1,7 +1,8 @@
 # KODA Report Contract
 
 Linux, Windows, CI, and server flows use the shared Python engine. The macOS app
-uses the native Swift scanner. Consumers must select the contract for the
+uses the native Swift scanner and a bundled shared-engine helper for Java scans.
+Consumers must select the contract for the
 artifact they read; the fields below describe findings from shared-engine
 `scan --format json` output.
 
@@ -75,7 +76,7 @@ Current production categories:
 - CI gates must use `severity`, not localized labels or UI text.
 - Report additions should be additive. Do not rename or remove existing keys without a migration.
 
-## Development CSV export behavior — 2026-10-02
+## CSV export behavior — 2026-10-11
 
 In the unpublished security-boundary checkout, NIS-SBOM CSV cells are quoted and
 values beginning with formula characters (`=`, `+`, `-`, `@`, including fullwidth
@@ -86,6 +87,14 @@ changes presentation, not original finding severity or identity. See the
 [status snapshot](current-status.en.md) for implementation publication status.
 
 ## Verification
+
+The [2026-10-11 validation record](verification-2026-10-11.md) describes the
+Java-enabled macOS build and ARM execution, and Linux x86_64 portal/PDF/Java
+execution. Windows runtime validation was excluded at the user's request.
+Java HTML/Markdown reports use Korean, including in the macOS helper regardless
+of UI language. A requested Java vulnerability gate without Grype comparison
+exits `2`; a missing source scan target also exits `2`. Review warnings and
+coverage alongside exit status.
 
 The shared Python serializer is `security_scanner.reporting._finding_payload`.
 Run `tests.test_source_analysis`, `tests.test_sw49_standards`, and

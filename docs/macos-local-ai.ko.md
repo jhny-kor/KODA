@@ -1,6 +1,6 @@
 # macOS 로컬 AI 개발 가이드
 
-> 기준일: **2026-10-02**. 이 문서는 로컬 작업 트리의 개발 구현을 소스로 확인한
+> 기준일: **2026-10-11**. 이 문서는 로컬 작업 트리의 개발 구현을 소스로 확인한
 > 가이드입니다. 현재 AI 소스·개발 스크립트·테스트는 미게시 작업 파일이므로, 문서
 > 게시만으로 GitHub 체크아웃에서 아래 명령이 실행되거나 Mac App Store 앱에
 > 기능이 제공된다는 뜻은 아닙니다. App Store 배포·공증·릴리스 포함 여부는 별도입니다.
@@ -110,8 +110,12 @@ App Sandbox에서 접근하지 못할 수 있습니다. 일반 `/usr/bin/python3
 ## 검증 명령과 이전 기록
 
 아래 테스트도 미게시 개발 파일이 있는 체크아웃에서만 실행할 수 있습니다.
-**2026-10-02 현행화에서 소스를 대조하고 아래 fixture 테스트를 다시 통과했습니다.**
-실제 모델 추론·GUI·앱 빌드·스토어 배포는 이번에 새로 검증하지 않았습니다.
+**2026-10-11에는 아래 로컬 AI fixture 7종을 포함한 macOS 검증 스크립트
+10종을 모두 통과했습니다.** Java 자산을 포함한 arm64·x86_64 Release 전체
+빌드·정적 분석, ARM에서 실제 앱 창과 headless Java 검사를 확인했습니다.
+이는 로컬 AI 화면의 전체 상호작용이나 실제 모델의 새 추론 결과를 검증한 것은
+아닙니다. Intel 실행·스토어 배포·공증도 미검증입니다.
+[현재 검증 기록](verification-2026-10-11.ko.md)을 참고하세요.
 
 ```bash
 python3 platforms/macos/tests/test_local_ai_client.py
@@ -123,9 +127,13 @@ python3 platforms/macos/tests/test_native_local_ai_impact.py
 python3 platforms/macos/tests/test_native_ai_report.py
 ```
 
-이번 검증 명령 `python3 -m unittest discover -s platforms/macos/tests -q`는
-7개 로컬 AI Swift fixture 성공 출력과 네이티브 아카이브 한도 5개 테스트 통과를
-확인했습니다. fixture 응답은 실제 모델의 분석 정확도를 입증하지 않습니다.
+위 7종에 네이티브 아카이브·Java 프로세스·Java 자산 패키징 검증 3종을 추가한
+10종이 현재 검증 범위입니다. 정상 빈 ZIP/GZIP과 손상된 압축 데이터, 양쪽
+프로세스 출력의 동시 읽기·시간 초과, 잘못된 helper 아키텍처 거부를 확인했습니다.
+fixture 응답은 실제 모델의 분석 정확도를 입증하지 않습니다.
+
+2026-10-02 기록의 `python3 -m unittest discover -s platforms/macos/tests -q`
+결과(로컬 AI 7종과 당시 아카이브 5개)는 이전 구현의 회귀 기록입니다.
 
 기존 2026-09-28~29 개발 기록은 다음과 같습니다. 현재 환경의 통과 증거로 사용하지 않습니다.
 

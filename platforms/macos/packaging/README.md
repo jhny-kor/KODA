@@ -1,6 +1,12 @@
 # KODA macOS App Store Packaging
 
-This folder contains the first App Store packaging lane for the macOS app named `KODA`.
+This folder contains the App Store packaging lane for the macOS app named `KODA`.
+
+As of **2026-10-11**, this guide describes the local working tree, including
+uncommitted development changes. Java-inclusive universal Release build and
+analysis passed; ARM app startup and offline Java scanning passed. Intel
+execution, distribution signing, notarization, and Store submission remain
+unverified. See the [verification summary](../../../docs/verification-2026-10-11.md).
 
 ## What is included
 
@@ -15,8 +21,9 @@ This folder contains the first App Store packaging lane for the macOS app named 
 
 ## Requirements
 
-- macOS with Xcode Command Line Tools.
-- Apple Developer Program membership.
+- macOS with full Xcode for the native app project.
+- Python with the requested architecture for Java helper packaging.
+- Apple Developer Program membership for Store distribution (not unsigned local builds).
 - A Mac App Store bundle identifier, for example `com.yourcompany.koda`.
 - Mac App Distribution and Mac Installer Distribution signing certificates.
 
@@ -36,7 +43,7 @@ For local command-line verification without signing:
 platforms/macos/scripts/build-koda-xcode-app.command
 ```
 
-The Xcode app uses the native Swift scanner for its standard scan. Its Java archive scan menu uses an embedded Python helper plus bundled Syft, Grype, Grype DB, NVD, and CISA KEV data; the shipped app does not download or execute any scanner code at runtime. The local build output is:
+The Xcode app uses the native Swift scanner for its standard scan. Its Java archive scan menu uses an embedded Python helper plus bundled Syft, Grype, Grype DB, NVD, and CISA KEV data; the shipped app executes only its bundled scanner helper and tools, with no runtime scanner download. The local build output is:
 
 ```text
 dist/macos/KODA.app
@@ -47,16 +54,28 @@ server and Tk folder-picker modules are explicitly excluded from this helper so
 Tcl/Tk is not shipped in the App Store bundle. This exclusion does not apply to
 the shared Python, Windows, Linux, or legacy macOS application lanes.
 
-The release scripts default to `arm64`, matching the bundled scanner helper.
-Build an Intel asset pack on an Intel macOS build host and set
-`KODA_MACOS_ARCHS=x86_64` before producing an Intel release. The staging phase
-fails instead of shipping a universal app when a matching helper, Syft, or
-Grype binary is absent.
+The release scripts default to `arm64`. Asset preparation builds one architecture
+per invocation: `KODA_MACOS_ARCH=arm64` or `KODA_MACOS_ARCH=x86_64`; Intel helper
+packaging requires an x86_64-capable Python runtime, either on Intel macOS or a
+cross-build environment. Architecture-specific build venvs and PyInstaller
+`--target-architecture` prevent mixing helper runtimes. Both rule resources and
+report assets are included explicitly. Prepare both asset sets before a universal
+build with `KODA_MACOS_ARCHS="arm64 x86_64"`; use `KODA_MACOS_ARCHS=x86_64` for an
+Intel-only app. The staging phase verifies actual Mach-O architectures for the
+helper, Syft, and Grype, and fails if any required architecture is absent.
+`manifest.sha256` applies to the prepared asset-pack root, not the relocated app
+bundle paths.
 
 `prepare-java-scan-assets.command` obtains NVD feeds from 2002 through the
-current year by default. The Java scan has no default archive-count, archive
-size, entry-count, or nesting-depth limit; any optional traversal limit must
-be supplied explicitly through the CLI.
+current year by default and needs an existing offline data cache (created with
+`platforms/linux/package-offline.sh`). Java archive traversal has default safety
+limits: nesting depth 8, 10,000 outer archives and 10,000 ZIP entries across
+selected roots, 256 MiB per outer archive, 256 MiB nested expanded data, 512 MiB
+retained data, 4 MiB central-directory data per archive, and compression ratio
+1,000. The CLI can override nesting depth with `--max-depth`; it does not expose
+all of these limits as options. Limit warnings represent incomplete coverage.
+The macOS wrapper also applies a 1,800-second deadline per helper/tool process;
+the shared Java CLI defaults to 300 seconds per Syft/Grype invocation.
 
 ### PyInstaller package lane
 
@@ -82,18 +101,20 @@ platforms/macos/scripts/archive-koda-app-store.command
 The archive script passes the `KODA_APP_STORE` Swift condition. In that build,
 the native web scanner is restricted to GET/HEAD read-only requests; login POSTs,
 active probes, ZAP, and state-changing scenarios are disabled. Run the complete
-21-control profile-driven audit through the shared Python CLI or the direct
-distribution, and keep App Store capability gaps as `UNSUPPORTED`/review rather
+21-control profile-driven audit through the separate shared Python CLI. The
+native direct-distribution app does not provide this profile CLI. Keep App Store
+capability gaps as `UNSUPPORTED`/review rather
 than treating them as PASS.
 
 The distribution boundary is:
 
 | Distribution | 21-control web audit | Execution boundary |
 | --- | --- | --- |
-| Direct macOS/shared Python | Supported | Profile, approval, and one-time nonce gates apply. |
+| Shared Python CLI on macOS | Supported | Separate from the native app; profile, approval, and one-time nonce gates apply. |
+| Native direct macOS app | Partial | Native website scanner; no shared CLI profile/oracle engine. |
 | Mac App Store | Partial | Native GET/HEAD read-only checks only; POST, active probes, ZAP, and state-changing scenarios are disabled. |
 
-For the direct lane, set `PYTHONPATH` from the repository root and run
+For the shared Python CLI lane, set `PYTHONPATH` from the repository root and run
 `web-audit run --dry-run` before any target traffic. ZAP, Playwright, and BOAST
 are never downloaded by the app; missing preinstalled capability, image digest, or
 add-on manifest must remain a capability status rather than PASS. App Store

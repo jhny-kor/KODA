@@ -16,15 +16,16 @@
 
 KODA keeps scans local by default. The native macOS app has its own Swift scanner; Linux, Windows, CI, and server deployments use the shared Python engine in [`platforms/shared/python/`](platforms/shared/python/).
 
-## Documentation status — 2026-10-02
+## Documentation status — 2026-10-11
 
 The [current implementation and verification snapshot](docs/current-status.en.md)
 separates committed source, local development changes, and released binaries.
-The documentation update includes local macOS AI, security-boundary, and sequential
-Linux scan work that has not yet been published as implementation code. Check that
-snapshot before
-following development-only commands; it does not certify the Mac App Store app
-or an existing offline package.
+This GitHub update publishes documentation only. Local macOS AI, scanner fixes,
+packaging changes, worker code, tests, assets, and validation binaries remain
+unpublished. The [latest validation record](docs/verification-2026-10-11.md)
+includes a Java-enabled universal macOS build with ARM execution and actual Linux
+amd64 container checks. It does not certify the Mac App Store app or an existing
+offline package. Check the snapshot before using development-only commands.
 
 ## Choose your path
 
@@ -42,6 +43,8 @@ or an existing offline package.
 | Review local macOS AI development and proposal validation | [Local AI development guide](docs/macos-local-ai.md) |
 | Run the approval-gated 21-control web audit | [Web audit runbook](docs/security/WEB_AUDIT.md) |
 | Integrate with security tooling | [Security integration docs](docs/README.en.md#security-integrations) |
+| Compare every user-facing feature across the three operating systems | [126-feature O/X matrix (Korean)](docs/platform-feature-matrix.ko.md) |
+| Review current build and execution evidence | [2026-10-11 validation](docs/verification-2026-10-11.md) |
 
 ## Platform support
 
@@ -57,6 +60,9 @@ or an existing offline package.
 | NIS-SBOM 1.0 CSV export | No | Shared dashboard and CLI | Authenticated portal and CLI | Authenticated portal and CLI |
 
 The Python engine can run from source on any OS. The macOS column above refers only to the native app.
+The [detailed OS matrix (Korean)](docs/platform-feature-matrix.ko.md) separates
+native-app features, Windows Full/SourceOnly, and Linux host/Docker conditions.
+Implementation support and verified execution are different claims.
 
 ## Quick start
 

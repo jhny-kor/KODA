@@ -1,5 +1,8 @@
 # KODA Suite 폐쇄망 설치 장애 대응서
 
+현행화 기준: 2026-10-11 로컬 소스. [실행 검증 범위](../../../docs/verification-2026-10-11.ko.md)를
+확인하세요. 운영 Suite 업그레이드·롤백과 강제 OOM 복구는 실제 검증하지 않았습니다.
+
 대상은 KODA, KODA SBOM Tracker, Dependency-Track을 한 서버에서 운영하는
 `koda-suite-offline-x86_64-<버전>.tar.gz` 통합본입니다. 기본 설치 경로는
 `/home/user0/koda-suite`, 반입 파일을 푸는 경로는 `/home/user0/koda`로 가정합니다.
@@ -424,6 +427,32 @@ Dependency-Track 전송만 실패한 부분 성공 상태입니다. 원인을 �
 `DTrack 재시도`를 사용합니다.
 
 ## 8. 이미지·데이터 삭제와 재설치
+
+### KODA 워커가 멈추거나 대기 작업이 실행되지 않을 때
+
+```bash
+PREFIX="${KODA_SUITE_PREFIX:-$HOME/koda-suite}"
+"$PREFIX/koda-suite" status --prefix "$PREFIX"
+docker logs --tail 100 koda-scan-worker
+docker logs --tail 100 koda-delivery-worker
+docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}} OOM={{.State.OOMKilled}}' koda-scan-worker
+```
+
+분석 워커와 전송 워커는 같은 이미지로 웹과 함께 업데이트해야 합니다. 대기 작업은
+`$PREFIX/data/koda-portal/portal.sqlite3`에 저장되므로 작업 폴더나 DB를 삭제해
+복구하지 않습니다. OOM이면 서버 여유 메모리와 `KODA_SCAN_MEMORY`를 함께 확인하고,
+전송 오류는 Tracker/GitLab URL·토큰·CA와 전송 워커의 통신망을 확인합니다.
+분석 프로세스 종료에 실패하면 `scan.termination_failed` 감사 기록을 남기고 실행 상태와
+작업 공간을 보존하며 다음 분석을 시작하지 않습니다. 단순 PermissionError만으로
+해당 프로세스 그룹이 종료됐다고 판단하지 않습니다. 실행 중인 자식과 소유권을 먼저
+확인하고 원인을 수정한 뒤 `koda-suite stop`과 `koda-suite start`로 전체를 재기동합니다.
+워커의 종료된 프로세스는 Docker가 재시작하지만 `unhealthy`인 살아 있는 프로세스는
+자동 재시작되지 않습니다. 상태 점검 실패를 별도 운영 모니터링에 연결하세요.
+
+일반 재설치·업데이트·중지는 세 컨테이너의 데이터 연결을 보존합니다. 이전 설치본으로
+롤백할 때는 새 설치본의 `dashboard stop`이 두 워커를 제거한 뒤 이전 실행 스크립트를
+복원하므로 새 워커가 구버전 웹과 함께 남지 않습니다. 의도적인 전체 초기화만
+`reset-install.sh --delete-all-koda-data`를 사용합니다.
 
 문제 해결을 위해 `docker system prune -a --volumes`를 실행하지 않습니다. 다른
 서비스가 사용하는 PostgreSQL, Nginx, Alpine 이미지와 volume까지 삭제할 수

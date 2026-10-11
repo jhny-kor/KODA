@@ -6,13 +6,21 @@ KODA를 처음 쓰는 사람은 이 페이지에서 목적에 맞는 경로를 �
 제품 개요와 플랫폼 선택은 [영문 루트 README](../README.md), 실제 명령 전체는
 [CLI 및 로컬 사용법](usage.ko.md)에 있습니다.
 
-## 현행화 기준 — 2026-10-02
+## 현행화 기준 — 2026-10-11
 
 [현재 구현·검증 상태](current-status.ko.md)는 GitHub 기준 소스와 아직 코드가
 게시되지 않은 로컬 개발 기능, 배포본의 확인 범위를 구분합니다. 설치본·App Store
 기능 및 과거 검증 기록을 현재 개발 체크아웃과 동일하게 보지 마세요.
 
+이번 GitHub 게시에는 문서만 포함합니다. 제품 코드·신규 테스트·Java 자산·앱·
+Docker 이미지는 로컬에 남습니다. [최신 빌드·실행 검증](verification-2026-10-11.ko.md)은
+Java 포함 macOS universal 빌드/ARM 실행과 Linux amd64 컨테이너 검증의 조건·한계를 설명합니다.
+
 ## 기능과 구현 구조
+
+[OS별 전체 기능 구현표](platform-feature-matrix.ko.md)는 macOS·Windows·Linux x86_64를
+상단 열에, 기능을 좌측 행에 두고 구현 여부를 O/X로 표시합니다. 네이티브 앱,
+Windows Full/SourceOnly, Linux 호스트/Docker의 차이와 선택 도구 조건도 함께 설명합니다.
 
 [![KODA로 가능한 작업, 구현 구조, 달성 효과](assets/readme/koda-capabilities-architecture-outcomes-ko.png)](assets/readme/koda-capabilities-architecture-outcomes-ko.png)
 
@@ -80,7 +88,7 @@ Linux 포털을 운영할 때는 8765 포트를 직접 공개하지 말고 통�
 | 문서 | 내용 |
 | --- | --- |
 | [sw-development-security-49.md](standards/sw-development-security-49.md) | 소프트웨어 개발보안 49개 항목 매핑 |
-| [authoritative-mapping-audit.md](standards/authoritative-mapping-audit.md) | 행정안전부·KISA·OWASP·CWE의 현행 공식 분류와 KODA 점검 범위 검증 |
+| [authoritative-mapping-audit.md](standards/authoritative-mapping-audit.md) | 문서의 기준일에 확인한 행정안전부·KISA·OWASP·CWE 분류와 점검 범위 기록 |
 
 ## 리포트·설계·로드맵
 
@@ -91,6 +99,9 @@ Linux 포털을 운영할 때는 8765 포트를 직접 공개하지 말고 통�
 | [spec-beyond-static-scanner.md](spec-beyond-static-scanner.md) | 정적 스캐너를 넘어서는 구현 명세 |
 | [roadmap-ai-augmentation.md](roadmap-ai-augmentation.md) | AI 증강·자동 교정·CI/CD 로드맵 |
 | [roadmap-endpoint-security.md](roadmap-endpoint-security.md) | 엔드포인트(호스트) 보안 점검 로드맵 |
+| [platform-feature-matrix.ko.md](platform-feature-matrix.ko.md) | 126개 기능의 macOS·Windows·Linux x86_64 O/X 구현표 |
+| [verification-2026-10-11.ko.md](verification-2026-10-11.ko.md) | 현재 개발 소스의 오류 수정·전체 빌드·실제 실행 검증 결과 |
+| [linux-server-stability-plan.ko.md](linux-server-stability-plan.ko.md) | 포털 경량화·worker 격리·workspace 수명 관리의 구현과 후속 범위 |
 
 `roadmap-*.md`와 `spec-beyond-static-scanner.md`는 구현 이력과 다음 확장을 위한
 기획 문서입니다. 현재 지원 기능과 운영 방법의 기준으로는 사용하지 말고, 위의

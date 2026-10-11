@@ -1,88 +1,85 @@
 # KODA 현재 구현·검증 상태
 
-기준일: **2026-10-02 (Asia/Seoul)** · [English](current-status.en.md)
+기준일: **2026-10-11 (Asia/Seoul)** · [English](current-status.en.md)
 
-이 문서는 문서 현행화 시 확인한 코드·검증의 스냅샷입니다. 버전 번호가 같은
-설치본이라도 빌드 리비전·데이터 패키지를 따로 확인해야 합니다.
+현재 로컬 작업 트리의 소스 점검·오류 수정·빌드·실행 검증 결과다. **이번 GitHub
+게시는 문서만 포함한다. 아래 결과를 만든 미커밋 제품 소스·테스트·Java 자산·앱·
+Docker 이미지는 게시하지 않는다.** GitHub 신규 clone이나 기존 설치본이 이 개발
+작업 트리와 같은 기능·수정·데이터를 포함한다고 해석하면 안 된다.
 
 ## 소스와 게시 범위
 
 | 대상 | 확인한 상태 | 해석 |
 | --- | --- | --- |
-| GitHub `main` 기준 리비전 | 현행화 시작 시 `e322fd6816ea4d37cfc46820b5717794db4cf938` | 아래 개발 변경 전의 게시 소스 기준 |
-| 이번 현행화 | 문서만 게시 | 아래 로컬 개발 코드·테스트·실행 스크립트는 이번 문서 커밋에 포함하지 않음 |
-| Linux 순차 실행 | 수동·예약 점검의 공통 실행권과 다중 사용자 대기열을 로컬에서 구현·검증 | 이번 게시에는 안내 문서만 포함. 이미지 재빌드·Linux 실배포 미검증 |
-| macOS 로컬 AI | 개발 작업 트리에 구현 파일·fixture·개발 앱 스크립트 존재 | GitHub 신규 clone·App Store에서 제공된다는 의미가 아님 |
-| 보안 경계 보강 | 포털·gateway·웹·Java·리포트와 관련 회귀 검증이 로컬에서 변경됨 | 기존 설치본에 반영됐는지 확인하지 않음 |
-| 과거 폐쇄망 전달물·날짜별 문서·검증 로그 | 각 문서에 적힌 시점의 기록 | 현재 배포 성공·전체 테스트 통과의 근거로 재사용하지 않음 |
-
-개발 전용 문단은 필요한 구현 파일이 있는 작업 트리에서만 적용됩니다. 이 문서의
-테스트 결과도 GitHub `main`만의 결과가 아니라 기존 미커밋 변경을 포함한
-로컬 체크아웃의 결과입니다.
+| 문서 갱신 전 GitHub `main` 소스 기준 | `4efb0bce1e0f5a00a078c77d9f91608d5127a757` | 이번 검증은 이 리비전과 로컬 미커밋·신규 소스를 합친 상태 |
+| 이번 게시 | GitHub 문서만 갱신 | 소스·테스트·빌드 산출물·운영 서버의 업데이트와 별개 |
+| macOS | Java 포함 universal Release 앱 빌드·분석, ARM 실제 실행 | 별도 검증 앱. 기존 App Store 설치본을 교체하지 않음 |
+| Linux | 현재 소스를 설치한 amd64 이미지와 web/scan/delivery worker 실행 | Apple Silicon의 Docker LinuxKit VM에서 amd64 사용자 공간 에뮬레이션 |
+| Windows | 소스·패키징 의존성·PowerShell·프로세스 회귀 확인 | 실제 Windows 실행은 사용자 지시로 제외 |
+| 운영 설치본·날짜별 전달물 | 각 버전·문서에 적힌 시점의 기록 | 현재 작업 트리나 이번 검증 결과와 동일하지 않음 |
 
 ## 기능별 현행 안내
 
-| 영역 | 코드에서 확인한 동작 | 상세 문서 |
-| --- | --- | --- |
-| macOS와 공통 엔진 | macOS는 Swift, Linux·Windows·CI·서버는 공통 Python 엔진 | [설치 문서 인덱스](README.md) |
-| 공통 AI 분류 | 기본 OFF, `triage_*`만 추가, 원래 심각도 유지. Ollama 기본 주소는 loopback이나 사용자 지정 API base는 원격도 허용 | [개인정보 정책](../PRIVACY.ko.md), [로드맵](roadmap-ai-augmentation.md) |
-| macOS 별도 로컬 AI 개발 | loopback OpenAI 호환 연결, 설명·오탐 검토·수정 제안·재점검·테스트/영향 초안·AI 보고서. 원본과 후보를 분리 | [로컬 AI 개발 가이드](macos-local-ai.ko.md) |
-| 개발 포털·gateway | gateway proof, 프로젝트/기능별 권한, 요청 origin, 업로드·JSON·아카이브 자원 제한 | [포털](koda-web-portal.ko.md), [통합 suite](../platforms/linux/suite/README.ko.md) |
-| 개발 Linux 점검 대기열 | 점검 엔진과 예약 수집·분석·정리를 한 번에 하나씩 실행. 수동은 사용자·프로젝트 간 FIFO, 다음 작업 선택은 수동 우선 | [순차 실행 안내](linux-scan-queue.ko.md) |
-| 개발 로컬 대시보드 | 작업 POST에 same-origin·세션 토큰 요구. 내장 화면이 자동 전달 | [공통 사용법](usage.ko.md) |
-| 개발 웹 경계 | origin별 자격증명·리디렉션 제한, 렌더링 경계·WebSocket 차단 기능이 없으면 중단 | [웹 점검 런북](security/WEB_AUDIT.ko.md) |
-| 개발 Java 점검 | 아카이브·메타데이터·Syft 출력 제한, 자원 제한으로 불완전한 점검은 정상 성공 대신 종료 코드 2 | [Java 런북](security/java-sbom-vulnerability-scan.md) |
-| 개발 NIS-SBOM CSV | 수식 시작 문자 보호 탭·셀 인용. 원래 문자열이 필요한 기계 처리는 JSON/CycloneDX 사용 | [리포트 계약](report-contract.ko.md) |
+[OS별 전체 기능 구현표](platform-feature-matrix.ko.md)는 126개 기능을
+macOS·Windows·Linux x86_64 열에 O/X로 표시한다. O는 구현 여부이며 실기 검증·
+전체 보안 기준 준수·모든 입력의 탐지 성공을 의미하지 않는다.
 
-보안 경계 보강은 동작에 영향을 줍니다. 인증 헤더·권한·origin이 맞지 않는 요청,
-제한을 초과한 업로드·아카이브, 다른 origin으로 자격증명을 전달하는 요청은
-거부되거나 불완전으로 표시됩니다. 보안·구문 검사를 통과한 AI 수정안도 실제
-기능 보존은 회귀 테스트와 검토로 확인해야 합니다.
+| 영역 | 현재 로컬 소스에서 확인한 동작 | 상세 문서 |
+| --- | --- | --- |
+| 실행 경로 | macOS Swift 네이티브 앱, Windows Full 대시보드/CLI, Linux 호스트/Docker/인증 포털 | [구현표](platform-feature-matrix.ko.md), [설치 인덱스](README.md) |
+| 기본 소스 점검 | 코드·설정·비밀값·의존성·품질·예방 통제, 변경 파일 검사와 기준별 결과 | [공통 사용법](usage.ko.md) |
+| 공통 AI | 기본 OFF, 설명·오탐 검토·조치 제안·요약. 원래 심각도 유지. 사용자 지정 API base는 원격 가능 | [개인정보 정책](../PRIVACY.ko.md), [사용법](usage.ko.md) |
+| macOS 로컬 AI 개발 | localhost 연결·모델 목록·키체인, 수정 후보·재점검·테스트/영향 초안·AI 보고서. 원본과 후보 분리 | [로컬 AI](macos-local-ai.ko.md) |
+| Java | 번들/설정한 Syft·Grype·DB·NVD·CISA, 한국어 SBOM/취약점 보고서 | [Java 런북](security/java-sbom-vulnerability-scan.md) |
+| 검사 실패 | 없는 소스 대상은 오류. Java 판정 gate 요청 시 비교 도구 부재는 종료 코드 2. 명시적 gate 없는 SBOM-only는 허용 | [사용법](usage.ko.md), [Java 런북](security/java-sbom-vulnerability-scan.md) |
+| 프로세스·압축 | 정상 빈 DEFLATE 허용, 손상·자원 제한 거부. Syft 양쪽 출력 수집·전체 timeout, macOS Java helper 실행 중 출력 소비 | [검증 요약](verification-2026-10-11.ko.md) |
+| Linux 포털·worker | gateway proof·기능 권한·입력 quota, 수동/예약 단일 실행권, 외부 scan/delivery worker·취소·복구 | [포털](koda-web-portal.ko.md), [순차 실행](linux-scan-queue.ko.md) |
+| 웹 | origin별 인증·렌더 경계, 선택형 능동/침투/영향 실증, 공통 CLI의 승인 프로필 기반 21개 통제 | [웹 런북](security/WEB_AUDIT.ko.md) |
+| 보고서 | 플랫폼별 형식과 NIS-SBOM CSV 수식 보호. CodeQL은 직접 실행하지 않고 preflight/SARIF import 범위를 구분 | [리포트 계약](report-contract.ko.md), [구현표](platform-feature-matrix.ko.md) |
+
+거부·미지원·불완전 상태는 정상 성공과 구분한다. AI 후보의 구문·보안 재점검은
+실제 기능 동등성을 증명하지 않으며 별도 검토·회귀 테스트가 필요하다.
 
 ## 최신 검증 결과
 
-저장소 루트의 로컬 개발 작업 트리에서 2026-10-02 실행했습니다. 아래 명령의
-신규 테스트 파일·수정 소스는 이번 문서 게시에 포함하지 않으므로 GitHub 신규
-clone에서 동일한 결과를 재현할 수 있다는 뜻은 아닙니다.
+[2026-10-11 검증 요약](verification-2026-10-11.ko.md)과
+[기계 판독 요약](verification-2026-10-11.json)에 실행 조건·소스 식별자를 기록했다.
+아래 검증은 현재 로컬 개발 소스의 결과이며 이번 문서 게시 뒤 GitHub 코드만으로
+같은 결과를 재현할 수 있다는 뜻은 아니다.
 
-```bash
-PYTHONPATH=platforms/shared/python python3 -m unittest discover -s tests -q
-PYTHONPATH=platforms/shared/python:tests python3 -m unittest test_scan_serialization -q
-PYTHONPATH=platforms/shared/python:tests python3 -m unittest test_project_deletion_and_schedule_labels test_scan_serialization test_schedule_gitlab_api -q
-git diff --check
-```
+| 검증 | 관찰한 결과 | 조건 |
+| --- | --- | --- |
+| Linux 전체 Python | 768개: **767 통과, 0 실패, 1 건너뜀**, 198.051초 | Debian 12, Python 3.12.15, 실제 linux/amd64 컨테이너 |
+| macOS 호스트 전체 Python | 768개: **760 통과, 0 실패, 8 건너뜀**, 142.730초 | Python 3.14.6, 앞선 수정 단계 |
+| Python 3.12 집중 회귀 | **214개 통과** | CLI·Java·웹·네트워크·Syft·패키징·worker |
+| macOS 검증 harness | **10개 실행 스크립트 모두 성공** | 로컬 AI 7종, 압축, Java 프로세스, 자산 패키징 |
+| macOS Java 포함 Release | **arm64+x86_64 build/analyze 성공** | 개발자 서명·공증 없는 검증 빌드 |
+| macOS Java 실제 실행 | **영어 UI 설정 및 네트워크 차단 한국어 설정 모두 exit 0** | ARM 실제 앱·번들 helper·Syft·Grype 사용 |
+| Linux 실제 설치·포털 | **설치·CLI·ZIP 업로드·worker 검사·JSON/PDF 생성 성공** | web/scan/delivery 컨테이너 3개, 시험 종료 후 모두 정지·제거 |
+| Linux Java 실제 실행 | **DB import 0, 취약점 gate 1** | network none, 4GiB 제한 |
+| 합성 Java 입력 | 양쪽 **구성요소 1개·취약점 7개·KEV 1개·경고 0개** | Log4j 2.14.1 메타데이터만 포함, Java 코드 실행 없음 |
+| Windows | 신규 회귀 8개·PowerShell 2개 문법 검사 통과 | macOS에서 계약 검증, Windows 실기 실행 아님 |
+| 정적·문서 검사 | Ruff F/E9·shell 문법·diff 검사 통과. 이번 문서 링크·O/X 형식도 게시 전 확인 | 소스 실행·배포와 별개 |
 
-| 검증 | 관찰한 결과 |
-| --- | --- |
-| 공통 Python 전체 | 623개: **616 통과, 0 실패, 7 건너뜀**. 실행 70.018초, 종료 코드 0 |
-| 순차 실행 회귀 | 11개 통과. DB 연결 간 실행권 경쟁, 수동 FIFO, 예약 정리 후 재개, 취소, 중복 워커·소유권 인계 검증 |
-| 삭제 UI·순차 실행·GitLab 예약 API 최종 재실행 | 29개 통과. 실행 4.949초 |
-| 건너뜀 | macOS에서 Linux 전용 6개, Playwright 미설치로 PDF 렌더러 1개 |
-| 이번 문서 검증 | 9개 문서의 상대 파일·이미지 대상 180개, 내부 anchor 5개 확인. `git diff --check` 통과 |
-| macOS fixture·아카이브 | 같은 날 최초 현행화 때 7개 Swift fixture 성공(프로세스 종료 코드 0), 아카이브 unittest 5개 통과. 순차 실행 변경 후 별도 재실행하지 않음 |
+Linux의 skip 1개는 로컬 LLM 연동이다. 앞선 macOS 실행의 skip 8개는 로컬 LLM 1,
+Linux 자원 제한 1, Linux 설치/롤백 5, Chromium PDF 1이다. 마지막 Linux 실행은
+자원 제한·설치/롤백 계약·실제 Chromium PDF 테스트를 포함한다. 설치/롤백 unittest는
+Docker double을 사용하는 계약 테스트로 운영 Suite의 실제 업그레이드·복구 증거가 아니다.
 
-### 최초 실패와 후속 수정
+## 남은 검증 범위
 
-앞선 문서 커밋 `e322fd6`에는 609개 중 600 통과·2 실패·7 건너뜀을 기록했습니다.
-후속 로컬 변경에서 두 원인을 수정했고, 위 전체·개별 재실행에서 통과했습니다.
+- Intel Mac 실제 실행: 바이너리·링크는 확인했지만 이 호스트에서는 `Bad CPU type in executable`로 실행 불가.
+- 물리 x86_64 서버/네이티브 x86_64 커널·운영 부하·실제 OOM/장애 복구.
+- 실제 Windows EXE 생성·설치·WebView2·Syft 실행.
+- 운영 Nginx gateway 로그인·실제 Tracker/GitLab 전송·운영 Suite 업그레이드/롤백.
+- 개발자 서명·공증·App Store 제출 및 기존 배포본 반영.
+- 실제 외부 웹 대상의 탐지 성능, 실제 로컬 모델 생성 품질과 AI 후보 기능 동등성.
 
-- 삭제 UI 테스트는 실제 삭제 버튼 대신 CSS 선택자의 문자열까지 일치시켰습니다.
-  실제 HTML 요소·속성을 검사하도록 테스트를 교정했으며 삭제 권한의 제품 동작은
-  이 교정으로 변경하지 않았습니다.
-- GitLab 예약 수집은 아카이브 다운로드가 작은 제어 요청과 같은 슬롯을 점유해
-  heartbeat가 HTTP 429로 거부됐습니다. 아카이브와 제어 슬롯을 분리했고,
-  느린 전송 중 heartbeat 성공·두 번째 아카이브 거부를 검증했습니다.
+## 이전 기록
 
-최신 통과 결과는 로컬 작업 트리의 결과이며 이미지·설치본·운영 서버의 배포
-준비를 증명하지 않습니다. 실행 정책과 자원 한도는 [순차 실행 안내](linux-scan-queue.ko.md)에 있습니다.
+2026-10-02 문서 갱신의 최종 결과는 623개 중 616 통과·7 건너뜀이었다.
+그보다 앞선 `e322fd6`에는 609개 중 600 통과·2 실패·7 건너뜀이 기록됐다.
+이 수치는 당시 개발 체크아웃의 역사 기록이며 위 2026-10-11 결과로 갱신한
+현재 상태와 구분한다. 날짜별 전달물·로드맵·설계 문서는 원래 시점의 기록을 유지한다.
 
-## 확인하지 않은 범위
-
-- 실제 Docker/Nginx gateway 설치·로그인·운영 및 기존 서버로의 배포
-- 실제 Playwright Chromium의 네트워크·렌더링 동작
-- 현재 App Store 앱·Windows 설치본·폐쇄망 압축파일의 기능 및 데이터 최신성
-- 이번 현행화에서의 Xcode 앱 빌드, 실제 로컬 모델 응답·생성 품질, Java 포함 macOS 빌드
-- AI 수정안의 기능 동등성·모든 사용 사례의 호환성
-
-GitHub 비공개 취약점 신고는 기준일 확인 시 비활성화 상태였습니다. 확인된
-신고 경로와 민감한 내용의 취급은 [보안 정책](../SECURITY.ko.md)을 따릅니다.
+[한국어 문서 인덱스](README.md) · [OS별 구현표](platform-feature-matrix.ko.md)

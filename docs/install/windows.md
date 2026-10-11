@@ -1,5 +1,11 @@
 # KODA Windows Install
 
+> As of **2026-10-11**, this guide describes the local working tree, including
+> uncommitted development changes. Windows-specific packaging/process regression
+> tests and PowerShell syntax checks passed on the Mac host; actual Windows EXE,
+> installer, WebView2, and native Syft execution were excluded at the user's request.
+> See the [verification summary](../verification-2026-10-11.md).
+
 Windows uses the shared Python engine from `platforms/shared/python/` and packages it through the Windows scripts under `platforms/windows/`.
 
 ## Build Installer
@@ -17,9 +23,15 @@ The build creates:
 
 Target users install with `KODASetup.exe`. It installs to `%LOCALAPPDATA%\KODA` and creates Start Menu shortcuts for `KODA` and `KODA (Browser Mode)`.
 
+The builder runs the completed `KODA.exe --smoke-test` and rejects a nonzero exit
+or 30-second timeout after checking dashboard HTTP startup. This does not test
+the WebView2 window. `-SourceOnly` creates a source-scan test installer without
+Java/live-web tool assets; rebuild without that switch for those features. See
+the [installer build guide](../../platforms/windows/README.md) for capabilities.
+
 ## Vulnerability Data Package
 
-The installer bundles Syft, Grype, and the Grype DB, but not the NVD and CISA
+The full installer bundles Syft, Grype, Grype DB, and Chromium, but not the NVD and CISA
 KEV feeds. Those change daily while the application does not, so they ship as a
 separate package that is refreshed without rebuilding or redistributing the
 installer.
@@ -124,3 +136,13 @@ The source-tree launcher sets `PYTHONPATH` to `platforms\shared\python` before r
 - The macOS Swift app is not cross-compiled to Windows.
 - Windows installer metadata lives in `platforms/windows/packaging/KODA.iss`.
 - Windows assets live in `platforms/windows/assets/`.
+
+## Scan exit codes
+
+A missing source `--target` exits `2` instead of producing a clean report.
+For Java scans, `--fail-on` or `--fail-on-kev` requires a configured, usable
+Grype comparison; missing Grype (including `--no-grype`) exits `2` rather than
+passing the gate. A successfully evaluated gate exits `1` for matching findings
+and `0` when none match. Explicit SBOM-only use with `--no-grype` and no gate
+remains supported; exit `0` is not a vulnerability-free determination. A KEV gate
+also exits `2` when missing CISA data prevents evaluation.

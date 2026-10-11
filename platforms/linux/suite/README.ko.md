@@ -1,6 +1,6 @@
 # KODA + KODA SBOM Tracker 폐쇄망 통합본
 
-> 현행화 기준: 2026-10-02 로컬 소스 checkout(개발 중 변경 포함). 이 문서의
+> 현행화 기준: 2026-10-11 로컬 소스 checkout(개발 중 변경 포함). 이 문서의
 > 게시가 해당 소스 변경의 게시나 GitHub main·기존 배포 이미지 반영을 뜻하지
 > 않습니다. 아래 checkout 동작을 운영에 적용하기 전에 설치 버전과 대응 번들의
 > 재빌드·검증 여부를 확인해야 합니다.
@@ -137,12 +137,12 @@ Tracker 장애 시 KODA 보호 화면과 API는 이전 인증 결과를 캐시�
 `503`으로 실패합니다. `/healthz`, `/api/v1/healthz`, `/koda/live` 같은 명시된
 상태 확인 경로만 인증 예외입니다.
 
-2026-10-02 checkout에서는 라이브러리·소스코드 실행 권한을 각각
+2026-10-11 checkout에서는 라이브러리·소스코드 실행 권한을 각각
 `scan.library.create`·`scan.source.create`로 검사하고 전체 점검은 두 권한을
 모두 요구합니다. 입력 등록, 결과 내보내기, 회차·프로젝트 삭제, Tracker/GitLab
 게시도 별도 실행 권한입니다. 화면 접근 권한만으로 기능을 실행할 수 없습니다.
 legacy `scan.create` 정책은 scope별 권한으로 마이그레이션합니다. 이 변경은
-개발 중이며 기존 설치본 반영은 확인되지 않았습니다.
+로컬 소스에 구현되어 있으며 기존 설치본 반영은 확인되지 않았습니다.
 
 Suite의 proof 생성은 `.env`의 `[A-Za-z0-9_-]` 32–128자 값을 유지하고
 부적합한 값은 재생성하며 환경파일을 `0600`으로 기록합니다. 포털은 중복
@@ -150,7 +150,56 @@ identity 헤더·잘못된 proof를 거부하고 미설정 proof에는 실패 �
 proof 관련 shell·Compose·nginx template와 포털 이미지가 같은 버전이어야
 하므로 문서 게시만으로 기존 설치본을 업데이트했다고 판단하지 않습니다.
 
+## 2026-10-11 실행 검증 범위
+
+현재 소스로 만든 `linux/amd64` 시험 이미지에서 설치·실행을 확인했습니다.
+Debian 12·Python 3.12.15 환경이며 Apple Silicon의 Docker LinuxKit VM에서
+amd64 사용자 공간을 에뮬레이션했습니다. 물리 x86_64 서버나 네이티브 x86_64
+커널의 성능·호환성을 검증한 결과는 아닙니다. Linux ARM64는 검증 대상이 아닙니다.
+
+- `platforms/linux/install.sh --no-link`로 소스 설치본을 실제 설치하고 CLI·미인증
+  API 거부를 확인했습니다. Docker 전달물의 `docker/install.sh` 전체 반입 절차를
+  실행한 결과는 아닙니다.
+- 실제 Docker 런처가 웹·분석·전송 컨테이너를 만들고 ZIP 업로드→점검→JSON/PDF
+  다운로드를 완료했습니다. PDF는 29,020바이트, 두 워커는 healthy, 잔여 작업 폴더는
+  0개였습니다. 시험 컨테이너는 종료·제거했습니다.
+- Syft 1.46.0·Grype 0.115.0을 네트워크 차단·4 GiB 제한에서 실행했습니다.
+  합성 `log4j-core 2.14.1` JAR에서 취약점 7건·경고 0건을 확인했으며
+  `--fail-on high`가 종료 코드 `1`로 차단했습니다.
+- 전체 회귀는 **768개 중 767개 통과·실패 0개·로컬 LLM 연동 1개 건너뜀**입니다.
+- 실제 Nginx gateway 로그인, 외부 Tracker/GitLab 전송, 강제 OOM 복구와 운영 Suite
+  업그레이드·롤백은 미검증입니다. 설치·롤백 unittest는 Docker test double을
+  사용하는 계약 검사이며 실제 운영 업그레이드를 뜻하지 않습니다.
+
+이번 GitHub 문서 게시는 실행 소스 게시나 운영 이미지 배포를 포함하지 않습니다.
+[검증 요약](../../../docs/verification-2026-10-11.ko.md)을 확인하고 설치된 버전과
+대응 번들을 따로 확인하세요.
+
 ## 다중 사용자·예약 점검 순차 실행
+
+Linux 설치본은 같은 KODA 이미지에서 웹 서버(`koda-dashboard`), 수동 분석
+(`koda-scan-worker`), Tracker/GitLab 전송(`koda-delivery-worker`)을 별도
+컨테이너로 실행합니다. 세 컨테이너가 `$PREFIX/data/koda-portal`의 DB와 입력을
+공유하며 워커는 호스트 포트를 게시하지 않습니다. 분석 워커의 네트워크는 `none`이고
+웹과 전송 워커가 Tracker 게이트웨이와 지정한 GitLab 통신망을 사용합니다.
+
+보고서 내보내기는 웹 컨테이너에서 별도 자식 프로세스로 한 번에 하나씩 수행하고
+시간 제한을 적용합니다. PDF 등의 렌더링은 웹 컨테이너의 메모리 한도에 포함되므로
+분석·전송 워커의 메모리 한도와 별도로 웹 자원 여유를 확보합니다.
+
+`koda-suite install`, `patch --group koda`, `start`, `stop`은 웹과 두 워커를 함께
+관리합니다. 이미지 버전이 다르거나 기존 웹 서버가 내부 분석 스레드를 사용하는
+버전이면 교체해 중복 실행을 방지합니다. 분석 워커를 먼저 중지해 분석 프로세스를
+종료하고, 영구 저장된 대기 작업은 재기동 후 복구합니다. `status`는 워커의 heartbeat와
+웹·워커 이미지 일치를 확인합니다. Docker의 `unhealthy` 표시는 자동 재시작을 의미하지
+않으므로 원인을 확인한 뒤 Suite를 재기동합니다.
+
+자원 제한은 `KODA_SCAN_CPUS=1`, `KODA_SCAN_MEMORY=4g`,
+`KODA_DELIVERY_CPUS=0.5`, `KODA_DELIVERY_MEMORY=512m`이 기본값입니다.
+분석 시간 제한은 `KODA_SCAN_TIMEOUT_SECONDS=21600`(6시간)입니다. 설정은 설치된
+`tracker/.env`에 적용하고 Suite를 재기동합니다. 컨테이너 메모리 한도는 합산되므로
+기본 웹·분석·전송 한도만 약 8.5GiB이며 Tracker·Dependency-Track·OS의 여유 공간은
+별도로 필요합니다. 서버 사양에 맞게 각 한도를 조정하세요.
 
 로컬 개발 소스는 수동·예약 점검의 실행권을 공유해 점검 엔진 동시 실행을 하나로
 제한합니다. 시작한 예약은 수집·분석·정리까지 완료하고, 수동 요청은 접수 순서대로
@@ -507,7 +556,7 @@ Tracker DB와 KODA 포털 디렉터리 중 해당 저장소를 먼저 백업합�
 
 ## GitLab 폐쇄망 연결
 
-GitLab에 접근하는 구성요소는 KODA dashboard 하나뿐입니다. Tracker와
+GitLab에 접근하는 구성요소는 KODA dashboard와 전송 워커입니다. Tracker와
 Dependency-Track 컨테이너를 GitLab egress 네트워크에 연결하지 않습니다. 운영
 방화벽에서 해당 네트워크의 목적지를 GitLab HTTPS 주소로 제한합니다.
 
@@ -557,10 +606,13 @@ GitLab URL·조회 토큰·쓰기 토큰·사설 CA는 압축파일이나 `.env`
 
 ```bash
 docker inspect koda-dashboard --format '{{json .NetworkSettings.Networks}}'
+docker inspect koda-delivery-worker --format '{{json .NetworkSettings.Networks}}'
+docker inspect koda-scan-worker --format '{{json .NetworkSettings.Networks}}'
 docker inspect koda-sbom-portal-api --format '{{json .NetworkSettings.Networks}}'
 ```
 
-첫 출력에만 `koda-gitlab-egress`가 있고 두 번째 출력에는 없어야 합니다.
+웹과 전송 워커의 출력에만 `koda-gitlab-egress`가 있고 분석 워커와 Tracker API에는
+없어야 합니다. 분석 워커는 `none` 네트워크로 실행합니다.
 
 ## 스캔과 SBOM 전달
 

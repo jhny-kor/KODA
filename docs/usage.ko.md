@@ -14,7 +14,7 @@ python3 -m security_scanner app
 대시보드는 기본적으로 `127.0.0.1:8765`에만 바인딩됩니다. 명령별 전체 옵션은
 `python3 -m security_scanner <command> --help`로 확인하세요.
 
-### 개발 대시보드 접근 변경 — 2026-10-02
+### 개발 대시보드 접근 경계 — 2026-10-11
 
 미게시 보안 경계 개발 체크아웃에서는 점검·폴더 선택·내보내기·예방 템플릿·
 웹·ZAP POST 요청에 `Origin: http://<Host>`와 `/api/health` 응답의
@@ -42,12 +42,29 @@ JAR 보고서는 현재 HTML과 Markdown 모두 한국어로 생성되며 `--lan
 `ko`만 지원합니다. 취약점은 라이브러리·설치 버전별로
 통합되고 `Fixed`와 Grype DB 재검증 결과인 `Final`이 함께 표시됩니다.
 
-소스코드 분석은 `--standard`로 등록된 기준을 하나 선택해야 합니다. 예를 들어
+없는 소스 `--target` 경로는 입력 오류로 종료 코드 `2`를 반환합니다. 정상
+대상에 발견이 없으면 `--fail-on high`에서도 `0`이지만, 없는 경로를 빈 결과로
+성공 처리하지 않습니다.
+
+`jar-scan --fail-on` 또는 `--fail-on-kev`는 Grype가 없거나 `--no-grype`로
+비교를 끄면 경고와 종료 코드 `2`를 반환합니다. 취약점 게이트 없이
+`--builtin-only --no-grype`로 SBOM만 생성하는 정상 실행은 `0`입니다.
+macOS Java helper의 보고서도 UI 언어와 무관하게 한국어입니다.
+
+소스코드 분석에서 `--standard`로 등록된 기준을 하나 선택할 수 있습니다. 예를 들어
 `owasp-asvs-5`, `owasp-proactive-controls`, `sw-dev-security-49`,
 `sw-dev-security-7-types`를 사용할 수 있으며, `--standard-category`로 해당
 기준의 지원 범주를 더 좁힐 수 있습니다. HTML은 지정한 경로를 요약(메인)으로
 생성하고 같은 폴더에 `-detail.html` 상세 보고서를 함께 생성합니다. 기준 프로파일은
 KODA가 구현한 정적 룰 매핑 범위이며 전체 SAST 또는 공식 준수 판정을 의미하지 않습니다.
+
+외부 CodeQL 연동은 사전 점검(preflight)과 관리자가 생성한 Java SARIF의
+positive-only 가져오기를 구현합니다. KODA가 CodeQL을 직접 다운로드·실행하는
+경로는 지원하지 않으며 실행 요청은 `SKIPPED`/`NOT_SCANNED`로 남깁니다.
+깨끗한 SARIF를 가져와도 미발견 영역의 점검 완료나 PASS를 증명하지 않습니다.
+
+[2026-10-11 검증 기록](verification-2026-10-11.ko.md)은 실제 실행한 OS와
+조건을 설명합니다. 구현 여부는 [OS별 기능표](platform-feature-matrix.ko.md)를 보세요.
 
 ## 안전 경계
 

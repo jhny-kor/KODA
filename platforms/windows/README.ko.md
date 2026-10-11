@@ -1,5 +1,10 @@
 # KODA Windows EXE 설치본 빌드
 
+> 기준일 **2026-10-11**. 미커밋 개발 변경을 포함한 로컬 소스 기준입니다.
+> Mac 호스트에서 Windows 패키징·프로세스 회귀 및 PowerShell 문법 검사를
+> 통과했습니다. Windows EXE·설치본·WebView2·네이티브 Syft 실기 실행은
+> 사용자 지시로 제외했습니다. [검증 요약](../../docs/verification-2026-10-11.ko.md)을 확인하세요.
+
 이 폴더는 Windows 직접 배포용 Inno Setup 설치본을 만드는 경로입니다.
 실제 `.exe`는 Windows PC에서 PyInstaller와 Inno Setup으로 빌드해야 합니다.
 
@@ -11,7 +16,7 @@
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\scripts\build-koda-windows-installer.ps1
+  -File .\platforms\windows\scripts\build-koda-windows-installer.ps1
 ```
 
 버전은 `-Version 0.1.1`, Inno Setup 경로는
@@ -23,21 +28,27 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\scripts\build-koda-windows-installer.ps1 `
+  -File .\platforms\windows\scripts\build-koda-windows-installer.ps1 `
   -SourceOnly -SkipDependencyInstall
 ```
 
 이 프로파일은 같은 `KODASetup.exe`를 만들지만 Java/라이브러리·실시간 웹
 점검, Playwright/Chromium, Syft·Grype·Grype DB를 포함하지 않습니다. 대시보드,
 `koda scan --standard sw-dev-security-49`, 소스 HTML/JSON/Markdown 리포트와
-패키지 SW49 스모크 테스트는 유지됩니다. `jar-scan` 또는 `web-scan`이 필요할
+패키지 SW49 스모크 테스트는 유지됩니다. 대시보드 import에 필요한 경량 Python
+`grype_adapter` 모듈은 유지하고 Grype 실행 파일·DB는 제외합니다. 빌더는 완성된
+`KODA.exe --smoke-test`로 실제 로컬 대시보드 HTTP 응답을 확인하며, 비정상 종료나
+30초 제한 시간 초과 시 빌드를 중단합니다. 이 검사는 WebView2 화면을 시험하지
+않습니다. `jar-scan`, `web-scan`, `web-audit`이 필요할
 때는 `-SourceOnly` 없이 정식 설치본을 다시 빌드해야 합니다.
 `web-audit`의 21개 항목은 SourceOnly에서 자동 실행하지 않고
 `UNSUPPORTED(package_capability_missing)`으로 보고합니다.
 
-정식 Full 설치본은 공유 Python 엔진과 웹 점검 모듈을 포함하지만, 실행 전
-Playwright/Chromium·Docker/ZAP 이미지·add-on manifest·BOAST가 설치되어 있어야
-합니다. 설치본은 외부 도구나 브라우저를 자동 다운로드하지 않습니다. 먼저
+정식 Full 설치본은 공유 Python 엔진과 웹 점검 모듈을 포함합니다.
+Full 빌드는 빌드 PC에 Playwright를 설치하고 Chromium을 내려받아 GUI 번들에
+포함하며 CLI도 이 브라우저 자산을 재사용합니다. Docker·digest로 고정한 ZAP 이미지·
+add-on manifest·BOAST는 별도로 준비해야 합니다. 설치된 스캐너는 실행 중 외부
+도구·브라우저를 자동 다운로드하지 않습니다. 먼저
 다음처럼 무트래픽 사전 검증을 수행한 뒤 승인된 staging origin으로 실행하세요.
 
 ```powershell
@@ -76,3 +87,12 @@ koda jar-scan ^
 
 - [한국어 문서 인덱스](../../docs/README.md)
 - [English Windows installer guide](README.md)
+
+## 검사 종료 코드
+
+없는 소스 `--target`은 정상 보고서를 만들지 않고 `2`로 종료합니다. Java의
+`--fail-on`·`--fail-on-kev`는 실제 사용 가능한 Grype 비교가 필요합니다.
+Grype가 없거나 `--no-grype`로 꺼진 상태에서 게이트를 요청하면 `2`로 종료합니다.
+정상 평가한 게이트는 기준에 해당하는 취약점이 있으면 `1`, 없으면 `0`입니다.
+게이트 없는 명시적 `--no-grype` SBOM 생성은 지원하지만 이때의 `0`은 취약점이
+없다는 판정이 아닙니다. KEV 게이트는 CISA 자료가 없어 평가할 수 없을 때도 `2`입니다.

@@ -1,6 +1,6 @@
 # KODA Offline Docker Delivery
 
-> Updated 2026-10-02 against the local source checkout, including changes under
+> Updated 2026-10-11 against the local source checkout, including changes under
 > development. Publishing this documentation does not publish those source changes
 > or establish that GitHub main or previously built release images include them.
 > Confirm the deployed version and rebuild/validate the matching bundle before
@@ -13,7 +13,7 @@ global `PATH`.
 
 ## Additional checkout boundaries
 
-The following changes are under development in the 2026-10-02 checkout. Rebuild
+The following changes are under development in the 2026-10-11 checkout. Rebuild
 and validate the corresponding bundle before applying them to an existing
 installation; publishing the docs does not update its images or wrappers.
 
@@ -41,6 +41,33 @@ Loopback binding or an SSH tunnel alone does not provide Tracker identity and
 gateway proof for protected portal login; use the integrated suite for users
 and production scans. Source inspection does not establish live Docker/nginx
 integration, upgrade compatibility, or Chromium execution.
+
+## Runtime verification on 2026-10-11
+
+The current source ran in a `linux/amd64` test image on Debian 12 with Python
+3.12.15. Docker's LinuxKit VM on Apple Silicon emulated amd64 user space. This
+checks actual Linux userspace execution, not performance or compatibility on a
+physical x86_64 server or a native x86_64 kernel. Linux ARM64 was outside scope.
+
+- `platforms/linux/install.sh --no-link` installed the source distribution; CLI
+  commands and rejection of unauthenticated portal API requests passed. This did
+  not exercise the complete Docker bundle import through `docker/install.sh`.
+- The real Docker launcher created web, scan and delivery containers. ZIP upload,
+  analysis and JSON/PDF downloads succeeded. The PDF was 29,020 bytes, both
+  workers were healthy, and no scan workspaces remained. Test containers were
+  stopped and removed.
+- Syft 1.46.0 and Grype 0.115.0 ran without networking under a 4 GiB limit. A
+  synthetic `log4j-core 2.14.1` JAR produced seven vulnerabilities and no warnings;
+  `--fail-on high` correctly returned exit code `1`.
+- The full suite had **767 passes, no failures and one local LLM integration skip
+  out of 768 tests**.
+- Real Nginx gateway login, external Tracker/GitLab delivery, forced OOM recovery
+  and operational Suite upgrade/rollback remain unverified. Installer/rollback
+  unit tests use Docker test doubles, not a live production upgrade.
+
+This GitHub documentation publication does not publish execution source or deploy
+runtime images. See the [verification summary](../../../docs/verification-2026-10-11.md)
+and confirm the installed version and matching bundle separately.
 
 ## Bundle contents
 

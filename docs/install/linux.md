@@ -1,5 +1,7 @@
 # KODA Linux Install and Application Guide
 
+> Reviewed **2026-10-11** against the local worktree including unpublished development source; Linux scope is x86_64. Source installation, CLI, portal, PDF, and offline Java ran in an emulated amd64 container. This is separate from a production Suite installation, real external delivery, or importing the complete Docker delivery archive. See [current validation](../verification-2026-10-11.md).
+
 Linux uses the shared Python engine from `platforms/shared/python/` and the Linux wrapper in `platforms/linux/`. It is designed for closed-network servers and does not require administrator privileges when installed under a user-owned prefix.
 
 ## 1. Prerequisites

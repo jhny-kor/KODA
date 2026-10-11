@@ -1,10 +1,9 @@
 # KODA profile-driven 21-control web audit
 
-> Updated 2026-10-02 against the local source checkout, including changes under
-> development. Publishing this documentation does not publish those source changes
-> or establish that GitHub main or previously built release images include them.
-> Confirm the deployed version and rebuild/validate the matching bundle before
-> relying on the checkout behavior described below.
+> Updated 2026-10-11 against the local source checkout, including changes under
+> development. Publishing these docs does not publish the source changes or update
+> existing release images. See the [2026-10-11 validation record](../verification-2026-10-11.md)
+> and confirm the installed version and matching rebuilt bundle before use.
 
 `web-audit` is the approval-gated path for testing an owned or explicitly
 authorized staging/test service. It is not a generic crawler command and it does
@@ -52,8 +51,8 @@ Every active/intrusive tier is for systems you are explicitly authorized to test
 
 ## Checkout authentication and rendering boundaries
 
-The 2026-10-02 checkout contains additional web boundary changes under
-development. They apply to the shared crawl/authentication helpers used by
+The 2026-10-11 checkout implements the following web boundaries. They apply
+to the shared crawl/authentication helpers used by
 `web-scan` and `web-audit`; confirm the installed engine before relying on them.
 
 - Origins compare scheme, lowercase hostname and effective port (default
@@ -83,7 +82,11 @@ development. They apply to the shared crawl/authentication helpers used by
 
 Browser fallback or skipped rendering is a coverage gap. Neither a successful
 static crawl nor these source checks proves a live Chromium run, ZAP integration,
-or complete application-specific 21-control coverage.
+or complete application-specific 21-control coverage. The 2026-10-11 Linux
+x86_64 container validation exercised real Chromium PDF generation and the local
+portal. It did not validate full audits of live external services, live ZAP/OAST
+integration, or performance. Web-boundary regressions were included in the full
+Linux suite.
 
 ## Quick start
 

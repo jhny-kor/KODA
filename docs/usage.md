@@ -31,7 +31,7 @@ python3 -m security_scanner serve
 
 The default binding is `127.0.0.1:8765`. Open `http://127.0.0.1:8765/security-dashboard.html`.
 
-### Development dashboard access changes — 2026-10-02
+### Development dashboard access boundaries — 2026-10-11
 
 In the unpublished security-boundary development checkout, scan, directory
 selection, export, prevention, web, and ZAP POST requests require
@@ -106,6 +106,10 @@ python3 -m security_scanner jar-scan --target /deploy/apps --sbom-format nis-1.0
 python3 -m security_scanner sbom-verify --target /deploy/apps --sbom reports/approved-sbom.cdx.json --output-dir reports/sbom-verification --strict-hash --fail-on-mismatch
 ```
 
+A missing source `--target` path exits `2` as an input error, including with
+`--fail-on`; it is not an empty clean scan. An existing clean target can still exit
+`0` under a severity gate.
+
 Source HTML writes the requested summary path and a `-detail.html` sibling. The
 summary is the landing page; the detail page contains the complete static finding
 table and filters. `--standard` accepts only profiles registered by KODA and
@@ -143,7 +147,13 @@ Java reports are generated in Korean (`--language ko`). `server-library-report.h
 `Fixed` lists advisory candidates and `Final` is the lowest candidate verified against
 the same Grype database with no matching vulnerability. Repeat `--target` to scan
 multiple roots into this one report pair; archive, component, SBOM, and vulnerability
-entries are combined and duplicate archive locations are removed.
+entries are combined and duplicate archive locations are removed. The macOS
+helper uses Korean Java reports regardless of the UI language. If `jar-scan`
+requests `--fail-on` or `--fail-on-kev` while Grype is unavailable or disabled with
+`--no-grype`, it warns and exits `2`. Explicit SBOM-only execution with
+`--builtin-only --no-grype` and no vulnerability gate exits `0` when successful.
+See the [2026-10-11 validation record](verification-2026-10-11.md) for actual
+execution scope and the [OS feature matrix](platform-feature-matrix.ko.md) for implementation.
 
 `--fail-on` exits nonzero when a finding meets the specified severity. `--enable-osv` queries OSV.dev using exact package names and versions. `--enable-vuln-intel` includes OSV and enriches available CVEs with CISA KEV and FIRST EPSS data; both options are off by default so ordinary scans remain offline.
 

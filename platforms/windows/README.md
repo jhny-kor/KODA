@@ -1,5 +1,11 @@
 # KODA Windows EXE installer build
 
+> As of **2026-10-11**, this guide describes the local working tree, including
+> uncommitted development changes. Windows-specific packaging/process regression
+> tests and PowerShell syntax checks passed on the Mac host; actual Windows EXE,
+> installer, WebView2, and native Syft execution were excluded at the user's request.
+> See the [verification summary](../../docs/verification-2026-10-11.md).
+
 This folder contains the Inno Setup script used to build the direct-download
 KODA Windows installer.
 
@@ -65,21 +71,21 @@ koda jar-scan ^
 Run from the repository root:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-koda-windows-installer.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\platforms\windows\scripts\build-koda-windows-installer.ps1
 ```
 
-For a double-clickable wrapper, run `scripts\build-koda-windows-installer.bat`.
+For a double-clickable wrapper, run `platforms\windows\scripts\build-koda-windows-installer.bat`.
 
 Optional version override:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-koda-windows-installer.ps1 -Version 0.1.1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\platforms\windows\scripts\build-koda-windows-installer.ps1 -Version 0.1.1
 ```
 
 If Inno Setup is installed in a custom path:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-koda-windows-installer.ps1 -InnoCompilerPath "C:\Path\To\ISCC.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\platforms\windows\scripts\build-koda-windows-installer.ps1 -InnoCompilerPath "C:\Path\To\ISCC.exe"
 ```
 
 For fast SW49 source-code testing, build the same `KODASetup.exe` without
@@ -88,21 +94,28 @@ the Grype database. On the first build, omit `-SkipDependencyInstall` once to
 install PyInstaller; keep it for subsequent source-only rebuilds:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-koda-windows-installer.ps1 `
+powershell -NoProfile -ExecutionPolicy Bypass -File .\platforms\windows\scripts\build-koda-windows-installer.ps1 `
   -SourceOnly -SkipDependencyInstall
 ```
 
 This profile keeps the dashboard, `koda scan --standard sw-dev-security-49`,
-HTML/JSON/Markdown source reports, and the packaged SW49 smoke test. It is a
+HTML/JSON/Markdown source reports, and the packaged SW49 smoke test. The
+lightweight `grype_adapter` Python module remains included because dashboard
+imports depend on it; the Grype executable/database are still excluded. The
+builder additionally runs the produced `KODA.exe --smoke-test`, verifies a real
+local dashboard HTTP response, and rejects nonzero exit or a 30-second timeout.
+This startup check does not exercise WebView2. It is a
 test installer, not a replacement for the full production installer; rebuild
 without `-SourceOnly` for `jar-scan`, `web-scan`, or `web-audit`. The 21-control
 `web-audit` command reports `UNSUPPORTED(package_capability_missing)` in this
 profile instead of making live requests.
 
 The full installer includes the shared web-audit engine, but external capabilities
-remain preflight requirements. Playwright/Chromium, Docker with a digest-pinned
-ZAP image and add-on manifest, and BOAST must already be installed/configured;
-the installer and scanner do not download them automatically. Validate an
+remain preflight requirements. The full build installs Playwright and downloads
+Chromium on the build PC, then includes Chromium in the GUI bundle for offline
+use; the CLI reuses that browser payload. Docker with a digest-pinned ZAP image
+and add-on manifest, plus BOAST, must be provided/configured separately. The
+installed scanner does not automatically download these external capabilities. Validate an
 approval without target traffic first:
 
 ```powershell
@@ -137,3 +150,13 @@ Useful Microsoft references:
 - [MSIX documentation](https://learn.microsoft.com/en-us/windows/msix/)
 - [Package a desktop or UWP app in Visual Studio](https://learn.microsoft.com/en-us/windows/msix/package/packaging-uwp-apps)
 - [Create an app submission for your MSIX app](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/create-app-submission?pivots=store-installer-msix)
+
+## Scan exit codes
+
+A missing source `--target` exits `2` instead of producing a clean report.
+For Java scans, `--fail-on` or `--fail-on-kev` requires a configured, usable
+Grype comparison; missing Grype (including `--no-grype`) exits `2` rather than
+passing the gate. A successfully evaluated gate exits `1` for matching findings
+and `0` when none match. Explicit SBOM-only use with `--no-grype` and no gate
+remains supported; exit `0` is not a vulnerability-free determination. A KEV gate
+also exits `2` when missing CISA data prevents evaluation.

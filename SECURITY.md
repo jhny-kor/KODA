@@ -1,6 +1,6 @@
 # KODA Security Policy
 
-Reviewed: 2026-10-02
+Reviewed: 2026-10-11
 
 ## Supported source
 
@@ -14,7 +14,7 @@ Do not publish credentials, private source, exploit details, or sensitive scan
 reports in a public issue.
 
 GitHub private vulnerability reporting was **disabled** when checked on
-2026-10-02. The old `security@example.com` address was a placeholder and is not
+2026-10-11. The old `security@example.com` address was a placeholder and is not
 a reporting channel. No dedicated private contact address is currently listed
 in this repository.
 

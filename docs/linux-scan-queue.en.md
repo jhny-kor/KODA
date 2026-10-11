@@ -1,10 +1,10 @@
 # Sequential Linux Scans
 
-Source review and verification: **2026-10-02** · [한국어](linux-scan-queue.ko.md)
+Source review and verification: **2026-10-11** · [한국어](linux-scan-queue.ko.md)
 
-This describes changes in the local development source. Publishing implementation
-code, rebuilding images, and deploying to an operational Linux server are outside
-this verification.
+This describes current local source behavior. This GitHub documentation
+publication excludes implementation/test files and operational image deployment.
+Running an amd64 test image is separate from deploying an operational server.
 
 ## User-visible behavior
 
@@ -40,7 +40,31 @@ small control calls such as heartbeat and cancellation proceed during a download
 while archive/result transfer remains bounded. Authentication, lease checks, and
 existing body size limits remain in place.
 
-## Verification
+## Verification on 2026-10-11
+
+The full suite ran in a Debian 12 / Python 3.12.15 `linux/amd64` Docker container:
+**767 passes, no failures, one local LLM integration skip out of 768 tests**
+(198.051 seconds). Docker's LinuxKit VM on Apple Silicon emulated amd64 user
+space; no physical x86_64 server or native x86_64 kernel was tested.
+
+The current Docker launcher created real web, scan and delivery containers.
+ZIP upload, scanning, result retrieval and PDF download completed. Both workers
+were healthy and no scan workspaces remained. All test containers were stopped
+and removed. Real GitLab/Tracker delivery, Nginx gateway login, forced OOM
+recovery and operational Suite upgrade/rollback remain unverified. Installer and
+rollback unit tests use Docker test doubles.
+
+If analyzer termination cannot be confirmed, the worker preserves the workspace
+and execution state, records `scan.termination_failed`, and stops accepting the
+next scan. An exited leader alone does not prove its child group is gone;
+PermissionError is accepted only after group disappearance is confirmed. The
+cause of the initial intermittent error has not been established. See the
+[current verification summary](verification-2026-10-11.md).
+
+## Historical verification: 2026-10-02
+
+The results below and the unavailable Docker daemon describe the 2026-10-02 run.
+Use the current results above for the latest full regression count.
 
 These commands ran in the local development worktree containing the new tests
 and modified source. Implementation and test files are excluded from this documentation publication.
