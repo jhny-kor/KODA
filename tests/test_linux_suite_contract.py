@@ -20,17 +20,56 @@ class LinuxSuiteContractTests(unittest.TestCase):
         cls.gateway = (ROOT / "platforms/linux/suite/gateway.conf.template").read_text()
         cls.suite_env = (ROOT / "platforms/linux/suite/koda-suite.env.example").read_text()
 
-    def test_all_three_products_are_routed_and_health_checked(self) -> None:
+    def test_registered_public_key_is_required_without_private_key_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            env_file = root / '.env'
+            env_file.write_text('')
+            helper = root / 'suite-key-check'
+            helper.write_text(self.launcher.rsplit('\ncase "${1:-}"', 1)[0] + '\nverify_data_update_key "$1"\n')
+            helper.chmod(0o755)
+            env = {**os.environ, 'TRACKER_DATA_UPDATE_VERIFY_KEY_FILE': ''}
+            missing = subprocess.run([str(helper), str(env_file)], env=env, capture_output=True, text=True)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn('Register TRACKER_DATA_UPDATE_VERIFY_KEY_FILE', missing.stderr)
+            private, public = root/'signing.pem', root/'approved.pub'
+            subprocess.run(['openssl','genpkey','-algorithm','RSA','-pkeyopt','rsa_keygen_bits:1024','-out',str(private)],check=True,capture_output=True)
+            subprocess.run(['openssl','pkey','-in',str(private),'-pubout','-out',str(public)],check=True,capture_output=True)
+            public.chmod(0o644)
+            env_file.write_text('TRACKER_DATA_UPDATE_VERIFY_KEY_FILE=approved.pub\n')
+            accepted = subprocess.run([str(helper), str(env_file)], env=env, capture_output=True, text=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            public.write_bytes(public.read_bytes()+private.read_bytes())
+            private_present = subprocess.run([str(helper), str(env_file)], env=env, capture_output=True, text=True)
+            self.assertNotEqual(private_present.returncode, 0)
+            self.assertIn('Only the verification public key', private_present.stderr)
+
+    def test_managed_volume_and_key_reach_read_only_koda_runtime(self) -> None:
+        self.assertIn('VULN_DATA_VOLUME_NAME koda-sbom-vuln-data', self.launcher)
+        self.assertIn('KODA must use the Tracker approved vulnerability data volume', self.launcher)
+        self.assertIn('KODA_DATA_UPDATE_VERIFY_KEY_FILE="$data_verify_key"', self.launcher)
+        self.assertIn('$data_volume:/var/lib/koda-vuln-data:ro', self.docker_wrapper)
+        self.assertIn('$key:/run/secrets/tracker-data-update-verify.pub:ro', self.docker_wrapper)
+        self.assertIn('approved_key_opts', self.docker_wrapper)
+        image = (ROOT/'platforms/linux/docker/Dockerfile').read_text()
+        self.assertIn('KODA_REQUIRE_MANAGED_DATA=1', image)
+        self.assertIn('KODA_VULN_DATA_ROOT=/var/lib/koda-vuln-data', image)
+        self.assertIn('/opt/koda/grype-db', image.split('rm -rf',1)[1])
+        native = (ROOT/'platforms/linux/bin/koda').read_text()
+        self.assertIn('export KODA_REQUIRE_MANAGED_DATA=1', native)
+        self.assertNotIn('export KODA_NVD_DATA=', native)
+
+    def test_two_products_are_routed_without_excluded_dependency_track(self) -> None:
         self.assertIn('/koda/live', self.launcher)
         self.assertIn('/api/v1/healthz', self.launcher)
-        self.assertIn('/dependency-track/api/version', self.launcher)
-        self.assertIn('/dependency-track/static/config.json', self.launcher)
+        self.assertNotIn('/dependency-track/api/version', self.launcher)
+        self.assertNotIn('/dependency-track/static/config.json', self.launcher)
         self.assertIn('location ^~ /koda/', self.gateway)
         self.assertIn('location /api/', self.gateway)
-        self.assertIn('location /dependency-track/', self.gateway)
-        self.assertIn('location = /dependency-track/static/config.json', self.gateway)
+        self.assertNotIn('location /dependency-track/', self.gateway)
+        self.assertNotIn('location = /dependency-track/static/config.json', self.gateway)
         self.assertIn('add_header Cache-Control "no-store" always;', self.gateway)
-        self.assertIn('proxy_pass http://${DTRACK_FRONTEND_UPSTREAM}/;', self.gateway)
+        self.assertNotIn('DTRACK_FRONTEND_UPSTREAM', self.gateway)
         self.assertNotIn('proxy_pass http://${DTRACK_FRONTEND_UPSTREAM}${DTRACK_BASE_PATH}/;', self.gateway)
 
     def test_env_parser_is_quiet_on_linux_awk(self) -> None:
@@ -153,6 +192,7 @@ exit 1
             (prefix / 'koda').mkdir()
             fake_bin.mkdir()
             release.mkdir()
+            (release / 'retired-analysis-cleanup.py').write_text('# cleanup contract fixture\n')
             reset = release / 'reset-install.sh'
             reset.write_text(self.reset_installer)
             reset.chmod(0o755)
@@ -199,6 +239,7 @@ exit 1
             fake_bin = Path(temp) / 'bin'
             release.mkdir()
             fake_bin.mkdir()
+            (release / 'retired-analysis-cleanup.py').write_text('# cleanup contract fixture\n')
             reset = release / 'reset-install.sh'
             reset.write_text(self.reset_installer)
             reset.chmod(0o755)
@@ -246,7 +287,7 @@ DTRACK_APISERVER_IMAGE=dependencytrack/apiserver:5.0.3
             self.assertIn('PUBLIC_HTTP_PORT=9443\n', merged)
             self.assertEqual(merged.count('PUBLIC_HTTP_PORT='), 1)
             self.assertIn('POSTGRES_PASSWORD=secret\n', merged)
-            self.assertIn('DTRACK_APISERVER_IMAGE=dependencytrack/apiserver:5.0.3\n', merged)
+            self.assertNotIn('DTRACK_', merged)
 
             (release / 'koda-suite.env').write_text('POSTGRES_PASSWORD=retargeted\n')
             capture.unlink()
@@ -259,9 +300,9 @@ DTRACK_APISERVER_IMAGE=dependencytrack/apiserver:5.0.3
             self.assertFalse(capture.exists())
 
     def test_patch_groups_are_explicit_and_preserve_dependencies(self) -> None:
-        self.assertIn('koda|gateway|portal-web|portal-api-worker|dependency-track', self.launcher)
-        self.assertIn('services=(portal-api portal-worker)', self.launcher)
-        self.assertIn('services=(dtrack-apiserver dtrack-frontend)', self.launcher)
+        self.assertIn('koda|gateway|portal-web|portal-api-worker)', self.launcher)
+        self.assertIn('services=(portal-api portal-worker portal-data-updater portal-metadata-collector)', self.launcher)
+        self.assertNotIn('services=(dtrack-apiserver dtrack-frontend)', self.launcher)
         self.assertIn('--no-deps --force-recreate "${services[@]}"', self.launcher)
         self.assertIn('PostgreSQL is not patchable in place', self.launcher)
         self.assertIn("safe_name=\"$(printf '%s' \"$archive_ref\"", self.launcher)
@@ -292,6 +333,7 @@ DTRACK_APISERVER_IMAGE=dependencytrack/apiserver:5.0.3
             with tarfile.open(koda_bundle, 'w:gz') as archive:
                 archive.add(koda_root, arcname='koda')
 
+            (tracker_root / 'scripts/remove-retired-analysis.py').write_text('# native upgrade fixture\n')
             for script_name in ('install-airgap.sh', 'preflight-airgap.sh'):
                 script = tracker_root / f'scripts/{script_name}'
                 script.write_text('#!/usr/bin/env bash\nexit 0\n')
@@ -330,6 +372,7 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
                 ('.env.example', 'COMPOSE_PROJECT_NAME=koda-sbom\n'),
                 ('koda-suite.env.example', 'PUBLIC_HTTP_PORT=8088\n'),
                 ('reset-install.sh', '#!/usr/bin/env bash\nexit 0\n'),
+                ('retired-analysis-cleanup.py', '# cleanup contract fixture\n'),
             ):
                 path = release / relative
                 path.write_text(content)
@@ -367,6 +410,11 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
             flock = fake_bin / 'flock'
             flock.write_text('#!/usr/bin/env bash\nexit 0\n')
             flock.chmod(0o755)
+            private = root / 'signing-test.pem'
+            public = root / 'verify-test.pub'
+            subprocess.run(['openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:1024', '-out', str(private)], check=True, capture_output=True)
+            subprocess.run(['openssl', 'pkey', '-in', str(private), '-pubout', '-out', str(public)], check=True, capture_output=True)
+            public.chmod(0o644)
             result = subprocess.run(
                 [str(suite), 'patch', '--group', 'gateway', '--prefix', str(prefix)],
                 cwd=release, text=True, capture_output=True, check=False,
@@ -375,6 +423,7 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
                     'PATH': f'{fake_bin}:{os.environ["PATH"]}',
                     'DOCKER_LOG': str(docker_log),
                     'HOME': str(root / 'home'),
+                    'TRACKER_DATA_UPDATE_VERIFY_KEY_FILE': str(public),
                 },
             )
             self.assertNotEqual(result.returncode, 0)
@@ -663,7 +712,7 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
             tracker_metadata = work / 'metadata.env'
             tracker_metadata.write_text(
                 f'TRACKER_GIT_REVISION={tracker_revision}\n'
-                'TRACKER_WORKTREE_DIRTY=false\nVULNERABILITY_BUNDLE=included\n'
+                'TRACKER_WORKTREE_DIRTY=false\nVULNERABILITY_BUNDLE=included\nANALYSIS_BACKEND=koda-native\n'
             )
             tracker_bundle = work / 'tracker.tar.gz'
             with tarfile.open(tracker_bundle, 'w:gz') as archive:
@@ -710,6 +759,7 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
             (release / 'gateway/gateway.conf.template').write_text('server {}\n')
             (release / '.env.example').write_text('COMPOSE_PROJECT_NAME=koda-sbom\n')
             (release / 'koda-suite.env.example').write_text('PUBLIC_HTTP_PORT=8088\n')
+            (release / 'retired-analysis-cleanup.py').write_text('# cleanup contract fixture\n')
             reset = release / 'reset-install.sh'
             reset.write_text('#!/usr/bin/env bash\nexit 0\n')
             reset.chmod(0o755)

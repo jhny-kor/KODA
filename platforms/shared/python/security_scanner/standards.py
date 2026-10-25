@@ -168,7 +168,6 @@ PREVENTION_RULE_IDS = (
     "prevention.github-actions-unpinned",
     "prevention.slsa-sigstore-missing",
     "prevention.zap-baseline-missing",
-    "prevention.dependency-track-integration-missing",
     "prevention.vex-missing",
     "prevention.binary-artifact-committed",
     "prevention.threat-model-missing",
@@ -394,7 +393,6 @@ SCVS_RULE_IDS = DEPENDENCY_RULE_IDS + (
     "prevention.sbom-missing",
     "prevention.vex-missing",
     "prevention.dependency-update-automation-missing",
-    "prevention.dependency-track-integration-missing",
     "prevention.slsa-sigstore-missing",
     "prevention.release-provenance-automation-missing",
     "prevention.github-actions-unpinned",
@@ -2496,28 +2494,6 @@ OWASP_DEPENDENCY_CHECK_BASELINE = SecurityStandard(
 )
 
 
-OWASP_DEPENDENCY_TRACK_BASELINE = SecurityStandard(
-    "owasp-dependency-track-baseline",
-    {"en": "OWASP Dependency-Track / SBOM Baseline", "ko": "OWASP Dependency-Track / SBOM 기준"},
-    (
-        _all_category(_OWASP_DEPENDENCY_CHECK_CATEGORIES, {"en": "All mapped SBOM readiness checks", "ko": "매핑된 SBOM 준비성 항목 전체"}),
-        *_OWASP_DEPENDENCY_CHECK_CATEGORIES,
-    ),
-    description=_text(
-        "A local supply-chain readiness profile for projects that may later publish SBOMs to Dependency-Track.",
-        "향후 Dependency-Track에 SBOM을 연동할 프로젝트를 위한 로컬 공급망 준비성 프로파일입니다.",
-    ),
-    coverage=_text(
-        "External integration required. Portfolio tracking, SBOM ingestion, VEX, EPSS, and policy workflows require Dependency-Track integration.",
-        "외부 연동이 필요합니다. 포트폴리오 추적, SBOM 수집, VEX, EPSS, 정책 워크플로는 Dependency-Track 연동이 필요합니다.",
-    ),
-    references=(
-        _reference("OWASP Dependency-Track", "OWASP Dependency-Track", "https://owasp.org/www-project-dependency-track/"),
-        _reference("CycloneDX", "CycloneDX", "https://cyclonedx.org/"),
-    ),
-)
-
-
 _OPENSSF_SCORECARD_CATEGORIES = (
     StandardCategory("security-policy", {"en": "Security Policy", "ko": "보안 정책"}, scanner_categories=("prevention",), rule_ids=("prevention.security-policy-missing",)),
     StandardCategory("maintained-owners", {"en": "Maintained Owners", "ko": "관리 책임자"}, scanner_categories=("prevention",), rule_ids=("prevention.codeowners-missing", "prevention.repository-security-settings-missing")),
@@ -2556,7 +2532,7 @@ _CISA_KEV_EPSS_CATEGORIES = (
     StandardCategory("known-exploited", {"en": "Known Exploited Vulnerabilities", "ko": "실제 악용 취약점"}, scanner_categories=("dependencies",), rule_ids=("dependency.osv-known-vulnerability",)),
     StandardCategory("exploit-probability", {"en": "Exploit Probability", "ko": "악용 가능성"}, scanner_categories=("dependencies",), rule_ids=("dependency.osv-known-vulnerability",)),
     StandardCategory("vex-response", {"en": "VEX Response Tracking", "ko": "VEX 대응 추적"}, scanner_categories=("prevention",), rule_ids=("prevention.vex-missing",)),
-    StandardCategory("sbom-tracking", {"en": "SBOM Tracking", "ko": "SBOM 추적"}, scanner_categories=("prevention",), rule_ids=("prevention.sbom-missing", "prevention.dependency-track-integration-missing")),
+    StandardCategory("sbom-tracking", {"en": "SBOM Tracking", "ko": "SBOM 추적"}, scanner_categories=("prevention",), rule_ids=("prevention.sbom-missing",)),
 )
 
 CISA_KEV_EPSS_PRIORITY = SecurityStandard(
@@ -2735,7 +2711,7 @@ OWASP_MASVS = SecurityStandard(
 _OWASP_LLM_TOP_10_2025_CATEGORIES = (
     StandardCategory("llm01-prompt-injection", {"en": "LLM01 Prompt Injection", "ko": "LLM01 프롬프트 인젝션"}, scanner_categories=("code", "prevention"), rule_ids=("code.llm-prompt-user-concat", "prevention.threat-model-missing", "prevention.ai-llm-security-plan-missing")),
     StandardCategory("llm02-sensitive-information-disclosure", {"en": "LLM02 Sensitive Information Disclosure", "ko": "LLM02 민감정보 노출"}, scanner_categories=("secrets", "code", "prevention"), rule_ids=SECRET_RULE_IDS + ("code.llm-sensitive-data-in-prompt", "code.logging-sensitive-data", "prevention.secret-rotation-runbook-missing")),
-    StandardCategory("llm03-supply-chain", {"en": "LLM03 Supply Chain", "ko": "LLM03 공급망"}, scanner_categories=("dependencies", "prevention"), rule_ids=DEPENDENCY_RULE_IDS + ("prevention.sbom-missing", "prevention.vex-missing", "prevention.dependency-track-integration-missing")),
+    StandardCategory("llm03-supply-chain", {"en": "LLM03 Supply Chain", "ko": "LLM03 공급망"}, scanner_categories=("dependencies", "prevention"), rule_ids=DEPENDENCY_RULE_IDS + ("prevention.sbom-missing", "prevention.vex-missing")),
     StandardCategory("llm04-data-model-poisoning", {"en": "LLM04 Data and Model Poisoning", "ko": "LLM04 데이터 및 모델 오염"}, scanner_categories=("prevention",), rule_ids=("prevention.ai-llm-security-plan-missing", "prevention.threat-model-missing")),
     StandardCategory("llm05-improper-output-handling", {"en": "LLM05 Improper Output Handling", "ko": "LLM05 부적절한 출력 처리"}, scanner_categories=("code",), rule_ids=("code.eval-user-input", "code.command-injection", "code.unsafe-deserialization", "code.xss-dom-sink")),
     StandardCategory("llm06-excessive-agency", {"en": "LLM06 Excessive Agency", "ko": "LLM06 과도한 자율 권한"}, scanner_categories=("code", "prevention"), rule_ids=("code.llm-tool-unrestricted", "prevention.threat-model-missing")),
@@ -2832,10 +2808,10 @@ CISA_SECURE_SOFTWARE_ATTESTATION = SecurityStandard(
 
 _OWASP_SCVS_CATEGORIES = (
     StandardCategory("v1-inventory", {"en": "V1 Inventory", "ko": "V1 인벤토리"}, scanner_categories=("dependencies", "prevention"), rule_ids=DEPENDENCY_RULE_IDS + ("prevention.scvs-plan-missing",)),
-    StandardCategory("v2-sbom", {"en": "V2 SBOM", "ko": "V2 SBOM"}, scanner_categories=("prevention",), rule_ids=("prevention.sbom-missing", "prevention.dependency-track-integration-missing")),
+    StandardCategory("v2-sbom", {"en": "V2 SBOM", "ko": "V2 SBOM"}, scanner_categories=("prevention",), rule_ids=("prevention.sbom-missing",)),
     StandardCategory("v3-build-environment", {"en": "V3 Build Environment", "ko": "V3 빌드 환경"}, scanner_categories=("configuration", "prevention"), rule_ids=("prevention.github-token-permissions-not-readonly", "prevention.github-actions-unpinned", "prevention.ci-security-scan-missing", "prevention.release-provenance-automation-missing")),
     StandardCategory("v4-package-management", {"en": "V4 Package Management", "ko": "V4 패키지 관리"}, scanner_categories=("dependencies", "prevention"), rule_ids=DEPENDENCY_RULE_IDS + ("prevention.dependency-update-automation-missing",)),
-    StandardCategory("v5-component-analysis", {"en": "V5 Component Analysis", "ko": "V5 구성요소 분석"}, scanner_categories=("dependencies", "prevention"), rule_ids=("dependency.osv-known-vulnerability", "prevention.vex-missing", "prevention.dependency-track-integration-missing")),
+    StandardCategory("v5-component-analysis", {"en": "V5 Component Analysis", "ko": "V5 구성요소 분석"}, scanner_categories=("dependencies", "prevention"), rule_ids=("dependency.osv-known-vulnerability", "prevention.vex-missing")),
     StandardCategory("v6-pedigree-provenance", {"en": "V6 Pedigree and Provenance", "ko": "V6 출처 및 계보"}, scanner_categories=("prevention",), rule_ids=("prevention.slsa-sigstore-missing", "prevention.release-provenance-automation-missing", "prevention.binary-artifact-committed")),
 )
 
@@ -3048,7 +3024,6 @@ SECURITY_STANDARDS = (
     NIST_SSDF,
     OWASP_SAMM_2,
     OWASP_DEPENDENCY_CHECK_BASELINE,
-    OWASP_DEPENDENCY_TRACK_BASELINE,
     OPENSSF_SCORECARD_BASELINE,
     CISA_SECURE_BY_DESIGN,
     NIST_CSF_2,
@@ -3092,7 +3067,6 @@ EXTERNAL_COVERAGE_STANDARD_IDS = {
     "electronic-financial-supervision-8",
     "owasp-wstg",
     "owasp-dependency-check-baseline",
-    "owasp-dependency-track-baseline",
     "openssf-scorecard-baseline",
     "cisa-kev-epss-priority",
     "slsa-sigstore-baseline",

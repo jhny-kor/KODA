@@ -69,6 +69,13 @@ if missing:
     raise SystemExit(f"KODA archive is missing: {', '.join(missing)}")
 
 with tarfile.open(sys.argv[2], "r:gz") as archive:
+    metadata = next((m for m in archive.getmembers() if posixpath.normpath(m.name) == "metadata.env" and m.isfile()), None)
+    if metadata is None:
+        raise SystemExit("Tracker release metadata is missing")
+    handle = archive.extractfile(metadata)
+    values = dict(line.split("=", 1) for line in handle.read(65537).decode("utf-8").splitlines() if "=" in line)
+    if values.get("ANALYSIS_BACKEND") != "koda-native":
+        raise SystemExit("Tracker payload must declare the native analysis backend")
     for member in archive.getmembers():
         name = member.name
         normalized = posixpath.normpath(name)
@@ -147,6 +154,7 @@ cp "$koda_bundle" "$stage/bundles/$(basename -- "$koda_bundle")"
 cp "$tracker_bundle" "$stage/bundles/$(basename -- "$tracker_bundle")"
 install -m 0755 "$script_dir/suite/koda-suite" "$stage/koda-suite"
 install -m 0755 "$script_dir/suite/reset-install.sh" "$stage/reset-install.sh"
+install -m 0755 "$script_dir/suite/retired-analysis-cleanup.py" "$stage/retired-analysis-cleanup.py"
 sed "s/@SUITE_VERSION@/$version/g" "$script_dir/suite/README.ko.md" > "$stage/README.ko.md"
 cp "$script_dir/suite/TROUBLESHOOTING.ko.md" "$stage/TROUBLESHOOTING.ko.md"
 cp "$script_dir/suite/compose.integration.yaml" "$stage/compose.integration.yaml"
@@ -219,6 +227,29 @@ GATEWAY_AUTH_MODE=auth_request
 KODA_PORTAL_SCHEMA_VERSION=1
 KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
 EOF
+
+# Carry original image build identities through suite assembly; never replace
+# them with this suite archive's packaging clock.
+python3 - "$stage/metadata.env" "$koda_bundle" "$tracker_bundle" <<'PYIDENTITY'
+from pathlib import Path
+import posixpath
+import sys
+import tarfile
+
+def fields(path, suffix):
+    with tarfile.open(path, 'r:gz') as archive:
+        item = next((m for m in archive.getmembers() if posixpath.normpath(m.name).endswith(suffix) and m.isfile()), None)
+        if item is None:
+            return {}
+        return dict(line.split('=', 1) for line in archive.extractfile(item).read().decode().splitlines() if '=' in line)
+koda, tracker = fields(sys.argv[2], '/versions.txt'), fields(sys.argv[3], 'metadata.env')
+updates = {'KODA_IMAGE_REF': koda.get('docker_image', 'unknown'), 'KODA_IMAGE_TAG': koda.get('docker_image_tag', 'unknown'),
+           'KODA_IMAGE_BUILT_AT': koda.get('docker_image_built_at', 'unknown'),
+           'TRACKER_IMAGE_TAG': tracker.get('IMAGE_TAG', 'unknown'), 'TRACKER_IMAGE_BUILT_AT': tracker.get('IMAGE_BUILT_AT', 'unknown'),
+           'TRACKER_IMAGE_REVISION': tracker.get('IMAGE_REVISION', 'unknown')}
+with Path(sys.argv[1]).open('a') as output:
+    output.write(''.join(key + '=' + value + '\n' for key, value in updates.items()))
+PYIDENTITY
 
 python3 - "$stage" <<'PY'
 import hashlib

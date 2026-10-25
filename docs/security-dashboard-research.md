@@ -8,8 +8,6 @@ The current implementation borrows information architecture from established vul
   - https://docs.gitlab.com/user/application_security/security_dashboard/
 - DefectDojo Main Dashboard: summary cards, severity history, dashboard tiles, and vulnerability tracking environment overview.
   - https://docs.defectdojo.com/metrics_reports/dashboards/introduction_dashboard/
-- OWASP Dependency-Track: portfolio-level supply-chain risk, project metrics, policy/auditing workflow, and SBOM-centric application inventory.
-  - https://docs.dependencytrack.org/
 - SARIF 2.1.0: OASIS standard interchange format for static analysis results.
   - https://www.oasis-open.org/standard/sarif-v2-1-0/
 - GitHub code scanning SARIF support: practical SARIF ingestion expectations for code scanning alerts.

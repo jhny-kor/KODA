@@ -2243,7 +2243,7 @@ class PortalStore:
         scan = scalars(result.get("scan"), ("scope", "kind", "standard", "standard_category", "enable_local_vulnerabilities", "path"), 512)
         if isinstance(result.get("scan"), dict) and isinstance(result["scan"].get("local_vulnerability"), dict):
             scan["local_vulnerability"] = scalars(result["scan"]["local_vulnerability"], (
-                "status", "version", "queried_components", "matched_vulnerabilities", "available", "warning",
+                "status", "version", "queried_components", "matched_vulnerabilities", "available", "comparison_available", "warning",
             ))
         warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
         return {
@@ -2371,7 +2371,7 @@ class PortalStore:
                 "run_count": db.execute("SELECT count(*) FROM scan_runs WHERE project_id=? AND deleted_at IS NULL", (str(project_id),)).fetchone()[0],
             }
 
-    def dashboard_summary(self, project_ids: list[str]) -> dict:
+    def dashboard_summary(self, project_ids: list[str], *, include_projects: bool = True) -> dict:
         ids = list(dict.fromkeys(str(value) for value in project_ids))
         counts = dict.fromkeys(("critical", "high", "medium", "low", "info"), 0)
         output = {"total_runs": 0, "completed_runs": 0, "severity_counts": counts, "summary_pending": 0, "projects": []}
@@ -2393,6 +2393,8 @@ class PortalStore:
                 output["summary_pending"] += row["pending"]
                 for severity in counts:
                     counts[severity] += row[severity]
+            if not include_projects:
+                return output
             for project_id in ids:
                 summary = self.project_summary(project_id)
                 latest = db.execute(

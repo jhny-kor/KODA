@@ -174,3 +174,7 @@ rollback and select it with `KODA_IMAGE=koda-offline:<old-version>` if needed.
 
 - [English documentation index](../../../docs/README.en.md)
 - [Korean Docker delivery guide](README.md)
+
+## Image build identity
+
+New builds default to `<version>-YYYYMMDDTHHMMSSZ-<git12>[-dirty]`. The UTC build time, revision and selected tag flow through OCI labels, `versions.txt`, `image-ref.txt` and installation. Explicit `KODA_DOCKER_IMAGE_TAG`, `KODA_DOCKER_IMAGE` and `KODA_IMAGE` overrides remain available. Packaging an existing image preserves its original build evidence. [Detailed contract](../../../docs/install/linux-image-tags.ko.md).

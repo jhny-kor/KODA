@@ -53,7 +53,6 @@ SECURITY_WORKFLOW_KEYWORDS = (
     "koda",
     "osv",
     "dependency-check",
-    "dependency-track",
     "trivy",
     "grype",
     "snyk",
@@ -71,7 +70,6 @@ SECURITY_WORKFLOW_KEYWORDS = (
 SAST_WORKFLOW_KEYWORDS = ("codeql", "semgrep", "sonar", "bandit", "brakeman", "gosec")
 SCORECARD_WORKFLOW_KEYWORDS = ("scorecard-action", "openssf/scorecard", "scorecard")
 DAST_WORKFLOW_KEYWORDS = ("zap-baseline", "zaproxy", "owasp/zap", "ghcr.io/zaproxy")
-DEPENDENCY_TRACK_KEYWORDS = ("dependency-track", "/api/v1/bom")
 SLSA_SIGSTORE_KEYWORDS = ("slsa", "sigstore", "cosign", "provenance", "attestation", "attest")
 AI_LLM_KEYWORDS = ("openai", "anthropic", "langchain", "llamaindex", "chat.completions", "responses.create", "generatecontent", "tool_choice", "function_call")
 API_KEYWORDS = ("app.get(", "app.post(", "router.get(", "router.post(", "fastapi(", "@getmapping", "@postmapping", "/api/")
@@ -564,23 +562,6 @@ def check_project(root: Path, files: Iterable[Path], target: TargetConfig) -> li
                 "OWASP ZAP",
                 "No OWASP ZAP baseline workflow or guide found",
                 "For authorized staging URLs, add an OWASP ZAP baseline check or document the DAST handoff process.",
-            )
-        )
-
-    if (
-        has_dependency_manifest
-        and not _contains_any(combined_workflow_text, DEPENDENCY_TRACK_KEYWORDS)
-        and "docs/security/dependency_track.md" not in lower_rel_paths
-    ):
-        findings.append(
-            _finding(
-                "prevention.dependency-track-integration-missing",
-                "info",
-                root,
-                "Dependency-Track SBOM upload is not configured",
-                "Dependency-Track",
-                "No Dependency-Track SBOM upload workflow found",
-                "Upload release SBOMs to Dependency-Track or another SBOM analysis backend when the project has dependency manifests.",
             )
         )
 

@@ -364,8 +364,8 @@ final class ScannerBridge: ObservableObject {
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = "KODA-security-prevention-kit.md"
         panel.message = language == .ko
-            ? "보안 정책, Dependabot, CI 보안 점검, ZAP, Dependency-Track 템플릿을 저장할 위치를 선택하세요."
-            : "Choose where to save SECURITY.md, Dependabot, CI security, ZAP, and Dependency-Track templates."
+            ? "보안 정책, Dependabot, CI 보안 점검, ZAP, VEX 템플릿을 저장할 위치를 선택하세요."
+            : "Choose where to save SECURITY.md, Dependabot, CI security, ZAP, and VEX templates."
 
         guard panel.runModal() == .OK, let destination = panel.url else {
             return
@@ -2662,8 +2662,6 @@ final class ScannerBridge: ObservableObject {
             return "nist-ssdf-sp800-218"
         case "owasp-dependency-check":
             return "owasp-dependency-check-baseline"
-        case "owasp-dependency-track":
-            return "owasp-dependency-track-baseline"
         default:
             return appStandardID
         }
@@ -7554,7 +7552,6 @@ private enum SecurityPreventionToolkit {
             ("docs/security/PRE_COMMIT.md", preCommitGuide()),
             ("docs/security/GITHUB_REPOSITORY_SECURITY.md", repositorySecurityChecklist(projectName: projectName)),
             ("docs/security/ZAP_BASELINE.md", zapBaselineGuide()),
-            ("docs/security/DEPENDENCY_TRACK.md", dependencyTrackGuide(projectName: projectName)),
             ("docs/security/VEX.md", vexGuide()),
             ("docs/security/SLSA_SIGSTORE.md", slsaSigstoreGuide()),
             ("docs/security/NIST_SSDF_WORKFLOW.md", ssdfWorkflowPlan(projectName: projectName)),
@@ -7811,30 +7808,11 @@ private enum SecurityPreventionToolkit {
         """
     }
 
-    private static func dependencyTrackGuide(projectName: String) -> String {
-        """
-        # Dependency-Track SBOM Upload
-
-        Generate a CycloneDX SBOM from KODA, then upload it to your Dependency-Track server.
-
-        ```bash
-        python -m security_scanner scan --target . --format cyclonedx --output reports/sbom.cdx.json
-        python -m security_scanner upload-sbom \\
-          --server-url https://dependency-track.example.com \\
-          --api-key-env DEPENDENCY_TRACK_API_KEY \\
-          --project-name "\(projectName)" \\
-          --project-version main \\
-          --sbom reports/sbom.cdx.json \\
-          --auto-create
-        ```
-        """
-    }
-
     private static func vexGuide() -> String {
         """
         # VEX Tracking
 
-        Use VEX to record reviewed dependency vulnerabilities after OSV, Dependency-Track, or another advisory source reports a CVE.
+        Use VEX to record reviewed dependency vulnerabilities after Grype, NVD, or another advisory source reports a CVE.
 
         Create docs/security/vex.cdx.json or another CycloneDX/OpenVEX document with the component, vulnerability ID, status, impact statement, and review date.
 
@@ -8324,12 +8302,6 @@ private enum SecurityPreventionToolkit {
         python -m security_scanner zap-command --url https://example.com --output-dir reports/zap
         ```
 
-        ## Dependency-Track SBOM 업로드
-
-        ```bash
-        python -m security_scanner scan --target . --format cyclonedx --output reports/sbom.cdx.json
-        python -m security_scanner upload-sbom --server-url https://dependency-track.example.com --api-key-env DEPENDENCY_TRACK_API_KEY --project-name "\(projectName)" --project-version main --sbom reports/sbom.cdx.json --auto-create
-        ```
         """
     }
 
@@ -8362,7 +8334,7 @@ private enum SecurityPreventionToolkit {
         - Status update: 7 business days
         ```
 
-        ## Dependabot, CI Security, ZAP, and Dependency-Track
+        ## Dependabot, CI Security, ZAP, and VEX
 
         Use the same commands and YAML blocks from the Korean section if this file is shared bilingually, or generate the full project templates from the CLI:
 
@@ -8370,7 +8342,6 @@ private enum SecurityPreventionToolkit {
         python -m security_scanner init-security --target . --project-name "\(projectName)"
         python -m security_scanner zap-command --url https://example.com --output-dir reports/zap
         python -m security_scanner scan --target . --format cyclonedx --output reports/sbom.cdx.json
-        python -m security_scanner upload-sbom --server-url https://dependency-track.example.com --api-key-env DEPENDENCY_TRACK_API_KEY --project-name "\(projectName)" --project-version main --sbom reports/sbom.cdx.json --auto-create
         ```
         """
     }

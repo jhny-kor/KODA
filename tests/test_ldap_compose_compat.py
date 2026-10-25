@@ -12,9 +12,9 @@ spec.loader.exec_module(compat)
 class LdapCompatTests(unittest.TestCase):
     def test_reviewed_variant_preserved_and_other_changes_blocked(self):
         base = (ROOT/'platforms/linux/scheduled-release/contract/tracker/compose.yaml').read_text()
-        reviewed = base.replace('    restart: unless-stopped\n\n  portal-worker:', '      - ldap-egress\n    restart: unless-stopped\n    dns:\n      - 10.95.58.206\n      - 10.95.58.207\n\n  portal-worker:', 1).replace('\nvolumes:\n', '  ldap-egress:\n    name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-ldap-egress\n\nvolumes:\n', 1)
-        self.assertEqual(hashlib.sha256(reviewed.encode()).hexdigest(), compat.LDAP)
-        reviewed = reviewed.replace('      - 10.95', '        - 10.95').replace('  ldap-egress:\n', '\n  ldap-egress:\n').replace('-ldap-egress\n\nvolumes:', '-ldap-egress\nvolumes:')
+        reviewed = base.replace('    restart: unless-stopped\n\n  portal-worker:', '      - ldap-egress\n    restart: unless-stopped\n    dns:\n      - 192.0.2.53\n      - 198.51.100.53\n\n  portal-worker:', 1).replace('\nvolumes:\n', '  ldap-egress:\n    name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-ldap-egress\n\nvolumes:\n', 1)
+        self.assertIn(reviewed.encode(), compat.reviewed_variants(base, ('192.0.2.53', '198.51.100.53')))
+        reviewed = reviewed.replace('      - 192.0.2.53', '        - 192.0.2.53').replace('      - 198.51.100.53', '        - 198.51.100.53').replace('  ldap-egress:\n', '\n  ldap-egress:\n').replace('-ldap-egress\n\nvolumes:', '-ldap-egress\nvolumes:')
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);release=root/'release';prefix=root/'suite'
             (release/'contract/tracker').mkdir(parents=True);(prefix/'tracker').mkdir(parents=True)
@@ -36,13 +36,15 @@ class LdapCompatTests(unittest.TestCase):
         preflight = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(preflight)
         baseline = ROOT/'platforms/linux/scheduled-release/contract/tracker/compose.yaml'
-        accepted = preflight.ldap_variants(baseline)
-        self.assertEqual(len(accepted), 4)
         with tempfile.TemporaryDirectory() as folder:
             installed = Path(folder)/'compose.yaml'
-            for variant in compat.reviewed_variants(baseline.read_text()):
+            for variant in compat.reviewed_variants(baseline.read_text(), ("192.0.2.53", "198.51.100.53")):
                 installed.write_bytes(variant)
+                accepted = preflight.ldap_variants(baseline, installed)
+                self.assertEqual(len(accepted), 4)
                 preflight.same_file(baseline, installed, accepted=accepted)
             installed.write_bytes(variant + b'\n# unexpected')
             with self.assertRaises(preflight.PreflightError):
+                accepted = preflight.ldap_variants(baseline, installed)
+                self.assertEqual(len(accepted), 4)
                 preflight.same_file(baseline, installed, accepted=accepted)

@@ -65,6 +65,9 @@ def complete(
     spec = resolve_model(model)
     backend, _, name = spec.partition("/")
     backend = backend.strip().lower()
+    from ..network_policy import offline_mode
+    if offline_mode() and backend != "ollama":
+        raise LLMUnavailable("폐쇄망 모드에서는 클라우드 LLM 호출이 차단됩니다")
     name = name.strip()
     if not name:
         raise LLMUnavailable(
@@ -131,6 +134,9 @@ def _ollama_base(value: str) -> str:
         or parsed.fragment
     ):
         raise LLMUnavailable("KODA_LLM_API_BASE must be an HTTP(S) URL without credentials or query data")
+    from ..network_policy import offline_mode
+    if offline_mode() and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise LLMUnavailable("폐쇄망 모드의 Ollama는 루프백 주소만 허용합니다")
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
 
 

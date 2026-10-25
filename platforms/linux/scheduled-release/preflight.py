@@ -21,7 +21,7 @@ CONTRACT_KEYS = (
 )
 SERVICES = (
     "portal-web", "portal-api", "portal-worker", "postgres", "gateway",
-    "dtrack-apiserver", "dtrack-frontend",
+    "portal-data-updater", "portal-metadata-collector",
 )
 APP_SERVICES = set(SERVICES) - {"postgres"}
 ALLOWED_BIND_DESTINATIONS = (
@@ -79,25 +79,6 @@ def metadata(path: Path) -> dict[str, str]:
     return values
 
 
-KNOWN_LAUNCHER_HASHES = {
-    # Reviewed launchers from the original GitLab/Tracker integration releases.
-    "koda-suite": {
-        "455e3ed02c2612fee3af012be28989c561a3f7c3750df455a85a0b488f497652",
-        "3f66d2b530cf08391fd8421c0baac2a97340cb7d95f491584bb5ec20c4df4f18",
-        # Launcher shipped in the reviewed 20260910-ui1 offline patch.
-        "3243e6a1a7f29b5f8a8197ec8d2d2107cde6496716ad1dfd900262bee553a3b6",
-        # Reviewed launcher immediately preceding isolated portal workers.
-        "4e3b028376e49a5ecb6f6fab2da4432ec50d3454fcb04b1472d5b3bc5779c93b",
-    },
-    "koda-docker": {
-        "5d48e5b6a7ec1d287a7681c35469bd728c674e05d83cbce1097871d66dc25826",
-        "008fa4cdd4a53646ddcfa208611c193e92169e47f13d58cbfd7f45b5cd47017d",
-        # Launcher shipped in the reviewed 20260910-ui1 offline patch.
-        "6790dc49414110a086ba30c4a4058db5acc1000bfb3551b5c63e4ab195a9739c",
-        # Reviewed launcher immediately preceding isolated portal workers.
-        "b546221c2d8193802edcab9bc18cd264b284c07c730c18ccfd8ee4a2a06e4520",
-    },
-}
 
 
 def same_file(expected: Path, installed: Path, *, accepted: set[str] | frozenset[str] = frozenset()) -> None:
@@ -106,17 +87,17 @@ def same_file(expected: Path, installed: Path, *, accepted: set[str] | frozenset
     expected_hash = hashlib.sha256(expected.read_bytes()).hexdigest()
     installed_hash = hashlib.sha256(installed.read_bytes()).hexdigest()
     if expected_hash != installed_hash and installed_hash not in accepted:
-        raise PreflightError(f"installed contract differs: {installed.name}")
+        raise PreflightError(f"installed contract differs: {installed.name}; use a full installation")
 
 
-def ldap_variants(contract: Path) -> set[str]:
+def ldap_variants(contract: Path, installed: Path) -> set[str]:
     spec = importlib.util.spec_from_file_location("koda_ldap_compat", contract.parent.parent.parent / "support-ldap-compose.py")
     if spec is None or spec.loader is None:
         return set()
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     baseline = contract.read_text(encoding="utf-8")
-    return {hashlib.sha256(value).hexdigest() for value in module.reviewed_variants(baseline)}
+    return {hashlib.sha256(value).hexdigest() for value in module.reviewed_variants(baseline, module.configured_dns(installed.read_text(encoding="utf-8")))}
 
 
 def compose_base(contract: Path, prefix: Path) -> list[str]:
@@ -198,16 +179,6 @@ def check_backend_hashes(contract: Path, containers: dict[str, str], release_roo
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise PreflightError("invalid tracker-backend-sha256.json") from exc
     accepted = {json.dumps(expected, sort_keys=True)}
-    baseline_path = contract / "tracker-backend-baselines.json"
-    if baseline_path.is_file():
-        try:
-            raw_baselines = json.loads(baseline_path.read_text(encoding="utf-8"))
-            if not isinstance(raw_baselines, dict) or not raw_baselines:
-                raise ValueError
-            baselines = {name: normalize_digest_map(value) for name, value in raw_baselines.items()}
-            accepted.update(json.dumps(value, sort_keys=True) for value in baselines.values())
-        except (OSError, json.JSONDecodeError, ValueError) as exc:
-            raise PreflightError("invalid tracker-backend-baselines.json") from exc
     bundled = release_root / "source" / "tracker" / "koda_tracker"
     if bundled.is_dir():
         accepted.add(json.dumps({str(p.relative_to(bundled)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -228,6 +199,11 @@ def check_backend_hashes(contract: Path, containers: dict[str, str], release_roo
             raise PreflightError(f"{service} backend source differs")
 
 
+def require_native_services(services: dict) -> None:
+    if set(services) != set(SERVICES):
+        raise PreflightError("native-only service contract required; use a full installation before applying this patch")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="KODA Suite patch read-only preflight")
     parser.add_argument("--prefix", required=True, type=Path)
@@ -246,11 +222,11 @@ def main(argv: list[str] | None = None) -> int:
         if installed_meta[key] != current_meta[key]:
             raise PreflightError(f"patch contract changed: {key}")
     for name in ("compose.yaml", "compose.airgap.yaml", "compose.integration.yaml"):
-        accepted = ldap_variants(contract / "tracker" / name) if name == "compose.yaml" else set()
+        accepted = ldap_variants(contract / "tracker" / name, prefix / "tracker" / name) if name == "compose.yaml" else set()
         same_file(contract / "tracker" / name, prefix / "tracker" / name, accepted=accepted)
     same_file(contract / "tracker" / "gateway" / "gateway.conf.template", prefix / "tracker" / "gateway" / "gateway.conf.template")
     for name, relative in (("koda-docker", "koda/koda-docker"), ("koda-suite", "koda-suite")):
-        accepted = set(KNOWN_LAUNCHER_HASHES[name])
+        accepted = set()
         bundled = contract.parent / "launchers" / name
         if bundled.is_file():
             accepted.add(hashlib.sha256(bundled.read_bytes()).hexdigest())
@@ -259,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     rendered = json.loads(command(compose_base(contract, prefix) + ["config", "--format", "json"]))
     project = rendered.get("name") or installed_meta.get("COMPOSE_PROJECT_NAME", "koda-sbom")
     services = rendered.get("services", {})
+    require_native_services(services)
     refs = {service: services.get(service, {}).get("image", "") for service in APP_SERVICES}
     if any(not ref for ref in refs.values()) or "@sha256:" in refs["portal-web"]:
         raise PreflightError("application image reference is missing or digest-pinned")

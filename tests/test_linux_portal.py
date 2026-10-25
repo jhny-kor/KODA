@@ -1031,6 +1031,28 @@ class LinuxPortalStoreTests(unittest.TestCase):
 
 
 class LinuxPortalHttpTests(unittest.TestCase):
+    def test_dashboard_initial_request_skips_project_cards_and_queries(self):
+        self.server.portal_worker.close()
+        store = self.server.portal_store
+        project = store.create_project("dashboard history", self.admin)
+        for severity in ("critical", "high"):
+            source = Path(self.tmp.name) / f"dashboard-{severity}.py"
+            source.write_text("print('ok')\n", encoding="utf-8")
+            input_id = store.add_input(project, source.name, source, self.admin)
+            run = store.create_scan(self.admin, project, input_id, "local", "all")
+            store.complete_run(run["run_id"], {"findings": [{"severity": severity}]})
+        with patch.object(store, "project_summary", side_effect=AssertionError("card query")), \
+                patch.object(store, "run_summary", side_effect=AssertionError("card query")):
+            status, body = self.request("/koda", headers=self.headers())
+        self.assertEqual(status, 200)
+        self.assertNotIn("프로젝트별 최신 점검", body)
+        self.assertNotIn("dashboard history", body)
+        self.assertIn("href='/koda/runs'>전체 점검결과</a>", body)
+        self.assertIn("<small>전체 점검</small><strong>2</strong>", body)
+        self.assertIn("<small>완료</small><strong>2</strong>", body)
+        self.assertIn("<small>심각</small><strong>1</strong>", body)
+        self.assertIn("<small>높음</small><strong>1</strong>", body)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.admin = str(uuid.uuid4())
@@ -1265,6 +1287,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual((status, body["code"]), (422, "invalid_request"))
 
     def test_run_deletion_is_system_admin_only(self):
+        self.server.portal_worker.close()  # The fixture owns this run's terminal result.
         project = self.server.portal_store.create_project("run deletion", self.admin)
         target = Path(self.tmp.name) / "run-delete.txt"
         target.write_text("input", encoding="utf-8")
@@ -1319,7 +1342,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertIn("CWE", guide)
         self.assertIn("OWASP Top 10:2025", guide)
         self.assertIn("소프트웨어 개발보안 49", guide)
-        self.assertIn("현재 KODA 카탈로그에 등록된 27개 기준", guide)
+        self.assertIn("현재 KODA 카탈로그에 등록된 26개 기준", guide)
         self.assertNotIn("<strong>전체</strong><code>local</code>", guide)
         self.assertNotIn("관리자 설정</h3>", guide)
         self.assertNotIn("사용 가이드 목차", guide)
@@ -1612,6 +1635,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertIn("href='/koda/scans/library'", source)
 
     def test_screen_permissions_hide_navigation_and_keep_resource_404(self):
+        self.server.portal_worker.close()  # Exercise authorization against a stable fixture run.
         project = self.server.portal_store.create_project("partial access", self.admin)
         target = Path(self.tmp.name) / "partial.py"
         target.write_text("print('ok')\n", encoding="utf-8")
@@ -1631,12 +1655,14 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertNotIn("href='/koda/runs'", navigation)
         self.assertNotIn("href='/koda/scans/library'", navigation)
         self.assertNotIn("href='/koda/projects'", navigation)
+        self.assertNotIn("href='/koda/runs'>전체 점검결과</a>", dashboard_page)
         self.assertEqual(self.request("/koda/runs", headers=viewer_headers)[0], 403)
         self.assertEqual(self.request("/koda/scans/library", headers=viewer_headers)[0], 403)
         self.assertEqual(self.request(f"/koda/api/v1/runs/{run['run_id']}", headers=viewer_headers)[0], 404)
         self.assertEqual(self.request("/koda/runs", headers=self.headers())[0], 200)
 
     def test_compare_hides_unauthorized_cross_project_runs_as_404(self):
+        self.server.portal_worker.close()  # The fixture owns both completed results.
         first = self.server.portal_store.create_project("compare allowed", self.admin)
         second = self.server.portal_store.create_project("compare hidden", self.admin)
         target = Path(self.tmp.name) / "compare.py"
@@ -1762,6 +1788,40 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertIn("queried_components", detail["result"]["scan"]["local_vulnerability"])
         self.assertFalse(Path(self.server.portal_store.input(uploaded["input_id"])["path"]).exists())
 
+    def test_zip_upload_preserves_bytes_and_reports_invalid_zip(self):
+        status, created = self.request("/koda/api/v1/projects", method="POST", payload={"name": "ZIP input"}, headers=self.headers())
+        self.assertEqual(status, 201)
+        project_id = created["project_id"]
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("src/app.py", "print('hello')\n")
+        for body, expected_status in ((output.getvalue(), "completed"), (output.getvalue()[:-22], "failed")):
+            with self.subTest(expected_status=expected_status):
+                request = urllib.request.Request(
+                    self.base + f"/koda/api/v1/projects/{project_id}/inputs?name=source.zip",
+                    data=body, method="POST", headers={**self.headers(), "Content-Type": "application/octet-stream"},
+                )
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    self.assertEqual(response.status, 201)
+                    uploaded = json.loads(response.read())
+                stored = self.server.portal_store.input(uploaded["input_id"])
+                self.assertEqual(Path(stored["path"]).read_bytes(), body)
+                self.assertEqual(stored["content_hash"], hashlib.sha256(body).hexdigest())
+                status, run = self.request("/koda/api/v1/scans", method="POST", headers=self.headers(), payload={
+                    "project_id": project_id, "input_id": uploaded["input_id"],
+                    "standard": "local", "standard_category": "all", "scan_scope": "source",
+                })
+                self.assertEqual(status, 202)
+                for _ in range(100):
+                    _, detail = self.request(f"/koda/api/v1/runs/{run['run_id']}", headers=self.headers())
+                    if detail["status"] in {"completed", "failed"}:
+                        break
+                    time.sleep(.02)
+                self.assertEqual(detail["status"], expected_status, detail.get("error"))
+                if expected_status == "failed":
+                    self.assertIn("Invalid or incomplete ZIP archive", detail["error"])
+                    self.assertNotIn("Unsupported archive format", detail["error"])
+
     def test_streaming_upload_limit_and_vulnerability_database_status(self):
         _, created = self.request("/koda/api/v1/projects", method="POST", payload={"name": "large input"}, headers=self.headers())
         project_id = created["project_id"]
@@ -1809,6 +1869,9 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertIn("<div class='panel-body'><ul class='summary-list'>", page)
 
     def test_cancel_and_comparison_exports(self):
+        # This fixture assigns terminal results itself; do not let the real
+        # worker claim and finish the queued cancellation target first.
+        self.server.portal_worker.close()
         project = self.server.portal_store.create_project("history", self.admin)
         targets = [Path(self.tmp.name) / name for name in ("history-first.py", "history-second.py", "history-comparison.py")]
         for target in targets:
@@ -1848,6 +1911,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
             self.assertEqual(rows[0]["path"], "\t@SUM(1,2)")
 
     def test_cross_project_run_is_hidden_and_policy_versions_conflict(self):
+        self.server.portal_worker.close()  # Exercise authorization against a stable fixture run.
         project = self.server.portal_store.create_project("private", self.admin)
         target = Path(self.tmp.name) / "input.txt"
         target.write_text("safe", encoding="utf-8")
@@ -1861,6 +1925,9 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual(self.request("/koda/api/v1/admin/rules", method="POST", payload=body, headers=self.headers())[0], 409)
 
     def test_completed_run_downloads_authorized_nis_sbom_csv(self):
+        # This fixture writes its own completed result. Prevent the real worker
+        # from claiming the queued run before that result is persisted.
+        self.server.portal_worker.close()
         project = self.server.portal_store.create_project("NIS export", self.admin)
         target = Path(self.tmp.name) / "dependency.txt"
         target.write_text("package", encoding="utf-8")
@@ -1893,14 +1960,28 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual(rows[0]["SBOM Standard"], "NIS 1.0")
         self.assertEqual(rows[0]["Component Name"], "demo")
 
+        spdx_request = urllib.request.Request(
+            self.base + f"/koda/api/v1/runs/{run['run_id']}/sbom?format=spdx", headers=self.headers(),
+        )
+        with urllib.request.urlopen(spdx_request, timeout=10) as response:
+            document = json.load(response)
+            self.assertEqual(response.headers.get_content_type(), "application/spdx+json")
+            self.assertEqual(response.headers["Content-Disposition"], 'attachment; filename="koda-round-1-spdx-2.3.json"')
+        self.assertEqual(document["spdxVersion"], "SPDX-2.3")
+        self.assertEqual(document["packages"][0]["name"], "demo")
+        self.assertEqual(document["packages"][0]["licenseConcluded"], "NOASSERTION")
+
         unauthorized = {"X-KODA-Identity-Display": base64.urlsafe_b64encode(b"unknown").rstrip(b"=").decode()}
         self.assertEqual(self.request(f"/koda/api/v1/runs/{run['run_id']}/sbom?format=nis-sbom", headers=unauthorized)[0], 401)
+        self.assertEqual(self.request(f"/koda/api/v1/runs/{run['run_id']}/sbom?format=spdx", headers=unauthorized)[0], 401)
         other = str(uuid.uuid4())
         self.server.portal_store.ensure_subject(other, "other")
         self.server.portal_store.set_subject(other, status="enabled", actor=self.admin)
         self.assertEqual(self.request(f"/koda/api/v1/runs/{run['run_id']}/sbom?format=nis-sbom", headers=self.headers(other, "other"))[0], 404)
+        self.assertEqual(self.request(f"/koda/api/v1/runs/{run['run_id']}/sbom?format=spdx", headers=self.headers(other, "other"))[0], 404)
 
     def test_completed_run_separates_library_source_and_quality_tabs(self):
+        self.server.portal_worker.close()  # The fixture owns this run's terminal result.
         project = self.server.portal_store.create_project("분류 탭", self.admin)
         target = Path(self.tmp.name) / "app.py"
         target.write_text("print('demo')\n", encoding="utf-8")
@@ -1937,6 +2018,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertIn("align-items:center;justify-content:center;text-align:center", result_page)
 
     def test_completed_run_report_uses_the_shared_windows_cli_renderer(self):
+        self.server.portal_worker.close()  # The fixture owns this run's terminal result.
         project = self.server.portal_store.create_project("CLI report", self.admin)
         target = Path(self.tmp.name) / "unsafe.py"
         target.write_text("password = 'secret'\n", encoding="utf-8")
@@ -1981,6 +2063,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual(self.request(f"/koda/api/v1/runs/{run['run_id']}/report?format=unknown", headers=self.headers())[0], 422)
 
     def test_library_run_opens_a_library_vulnerability_report(self):
+        self.server.portal_worker.close()  # The fixture owns this run's terminal result.
         project = self.server.portal_store.create_project("library report", self.admin)
         target = Path(self.tmp.name) / "requirements.txt"
         target.write_text("demo==1.0\n", encoding="utf-8")

@@ -19,6 +19,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
 
 from .inventory import InstalledApp
 
@@ -27,6 +29,66 @@ NVD_CVE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 DEFAULT_MAX_APPS = 20
 DEFAULT_REQUEST_DELAY_SECONDS = 6.5
 DEFAULT_RESULTS_PER_PAGE = 20
+
+
+def query_offline_cpe_vulnerabilities(
+    cpes: Iterable[str], *, nvd_source: Path | None, cisa_source: Path | None = None,
+) -> tuple[list[dict], list[str], dict]:
+    """Evaluate reviewed CPEs against local NVD; never resolve names online.
+
+    Return matched NVD/KEV records with CPE evidence, warnings, and explicit
+    coverage status. No results must not be interpreted as an absence of risk.
+    """
+    from .offline_cpe import CONTRACT_VERSION, evaluate, prepare_inventory, product_key
+    from .offline_vuln_data import load_offline_cpe_data
+    values = tuple(dict.fromkeys(cpes))
+    valid, invalid = [], 0
+    for value in values:
+        try:
+            product_key(value)
+            valid.append(value)
+        except (TypeError, ValueError):
+            invalid += 1
+    summary = {"version": CONTRACT_VERSION, "status": "not_evaluated", "inputCpes": len(values),
+               "invalidCpes": invalid, "evaluatedCves": 0, "unknownCves": 0, "unresolved": [], "inventoryComplete": False}
+    if not valid:
+        return [], ["No concrete CPE 2.3 identities supplied for offline applicability"], summary
+    data = load_offline_cpe_data(nvd_source, cisa_source, valid)
+    summary.update(status="unavailable" if data.fatal or not data.loaded("nvd") else "completed",
+                   dataAsOf=data.data_as_of, sources=[source.payload() for source in data.sources])
+    if data.fatal or not data.loaded("nvd"):
+        return [], list(data.warnings), summary
+    from .offline_cpe import candidate_index
+    index_issues = {}
+    index = candidate_index(data.nvd, issues=index_issues)
+    summary["indexIncompleteCves"] = len(index_issues)
+    products = {product_key(value) for value in valid}
+    summary["unmatchedProducts"] = len(products.difference(index))
+    findings = []
+    inventory = prepare_inventory(valid)
+    for cve_id, record in sorted(data.nvd.items()):
+        if str(record.get("vulnStatus", "")).lower() == "rejected":
+            continue
+        summary["evaluatedCves"] += 1
+        if cve_id in index_issues:
+            summary["unknownCves"] += 1
+            if len(summary["unresolved"]) < 100:
+                summary["unresolved"].append({"id": cve_id, "reason": index_issues[cve_id]})
+            continue
+        decision = evaluate(record.get("configurations"), inventory)
+        if decision.status == "unknown":
+            summary["unknownCves"] += 1
+            if len(summary["unresolved"]) < 100:
+                summary["unresolved"].append({"id": cve_id, "reason": decision.reason})
+        if decision.status == "affected":
+            findings.append({"cve": cve_id, "matched_cpes": list(decision.matched_cpes),
+                             "cvss": _primary_cvss(record), "description": _english_description(record),
+                             "nvd": record, "cisa_kev": data.cisa_kev.get(cve_id, {}),
+                             "cpeEvidence": decision.payload()})
+    if invalid or summary["unknownCves"] or summary["unmatchedProducts"] or not summary["evaluatedCves"]:
+        summary["status"] = "incomplete"
+    summary["scope"] = "Only supplied CPE identities and imported NVD conditions; no-match is not a product safety certification"
+    return findings, list(data.warnings), summary
 
 
 @dataclass(frozen=True)
@@ -191,6 +253,8 @@ def _primary_cvss(cve: dict) -> float | None:
 
 def _english_description(cve: dict) -> str:
     for item in cve.get("descriptions", []) or []:
+        if isinstance(item, str):
+            return item.strip()
         if isinstance(item, dict) and item.get("lang") == "en":
             return str(item.get("value", "")).strip()
     return ""

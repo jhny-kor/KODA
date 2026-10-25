@@ -68,7 +68,7 @@ koda-docker-offline-x86_64-<version>/
 ├── install.sh          # 폐쇄망 설치 스크립트
 ├── koda-docker.sh      # 실행 래퍼 (설치 후 <prefix>/koda-docker)
 ├── README.md
-├── image-ref.txt       # koda-offline:<version>
+├── image-ref.txt       # 실제 UTC 빌드 시각·Git revision을 포함한 이미지 태그
 ├── versions.txt        # Syft/Grype/DB/NVD/CISA 기준 정보
 ├── manifest.sha256     # 전체 파일 SHA-256
 └── image/
@@ -201,7 +201,7 @@ URL·조회용 PAT·결과 저장용 PAT·선택적 CA를 저장합니다. 운�
 
 ### KODA SBOM Tracker 통합
 
-운영에서는 KODA·Tracker·Dependency-Track을 한 압축파일로 묶은 통합 gateway를
+운영에서는 KODA·Tracker 두 제품을 한 압축파일로 묶은 통합 gateway를
 사용합니다. 연결된 빌드 PC에서 검증된 두 전달물을 다음처럼 포장합니다.
 
 ```bash
@@ -218,8 +218,7 @@ KODA_TRACKER_BUNDLE=/path/to/koda-sbom-tracker-airgap-linux-amd64.tar.gz \
 적용됩니다.
 
 기본 gateway 호스트 포트는 `8088`입니다. 운영 환경에서는 TLS reverse proxy
-뒤의 동일 HTTPS 오리진으로 `/`(Tracker), `/koda/`(KODA),
-`/dependency-track/`(Dependency-Track)을 제공합니다. KODA의 8765 포트는
+뒤의 동일 HTTPS 오리진으로 `/`(Tracker), `/koda/`(KODA) 두 제품을 제공합니다. KODA의 8765 포트는
 호스트에 게시하지 않습니다.
 
 아래 별도 포트 연결은 통합본이 아닌 단독 호환성 확인용입니다. 포털의
@@ -353,3 +352,9 @@ PYTHONPATH=platforms/shared/python python3 tests/schedule_ui_preview.py \
 프로젝트 삭제는 상세 화면에서 실행하며 사용자 역할 연결, 입력, 결과, 스케줄,
 연동 설정을 정리합니다. 공용 계정, 다른 프로젝트, 외부 GitLab 게시물 및 감사
 기록은 유지합니다.
+
+## Docker 빌드 태그
+
+기본 이미지 태그는 `<제품버전>-YYYYMMDDTHHMMSSZ-<git12>[-dirty]`입니다. 실제 빌드의 UTC 시각을 OCI 라벨·`versions.txt`·`image-ref.txt`와 설치 설정에 일관되게 기록합니다. 명시적 `KODA_DOCKER_IMAGE_TAG`, `KODA_DOCKER_IMAGE` 또는 기존 `KODA_IMAGE` override도 유지합니다.
+
+묶음 생성 시각과 원래 이미지 빌드 시각은 구분합니다. 이미 빌드한 예약 기능 이미지의 포장은 새 빌드가 아닙니다. [태그·Suite 패치·롤백 계약](../../../docs/install/linux-image-tags.ko.md)을 참고하세요.

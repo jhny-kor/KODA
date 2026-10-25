@@ -111,7 +111,7 @@ project roles and administrator-only scan-rule settings. Use the offline suite
 instructions in `platforms/linux/suite/README.ko.md`; do not publish port 8765.
 
 On a connected build host, wrap the verified KODA Docker and Tracker air-gap
-payloads—including Dependency-Track—into one archive:
+payloads into one archive:
 
 ```bash
 TRACKER_REPO=../security-sbom-dependecy
@@ -148,7 +148,6 @@ the gateway and preserve the HTTPS origin. The public reverse proxy exposes:
 ```text
 https://<server>/                    # KODA SBOM Tracker
 https://<server>/koda/               # KODA security portal
-https://<server>/dependency-track/   # Dependency-Track
 ```
 
 Use `./koda-suite start|status|stop` for the installed suite. The launcher

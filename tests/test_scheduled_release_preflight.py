@@ -15,7 +15,7 @@ SPEC.loader.exec_module(preflight)
 
 
 class ScheduledReleasePreflightTests(unittest.TestCase):
-    def test_reviewed_tracker_backend_baseline(self):
+    def test_obsolete_backend_baseline_cannot_extend_native_contract(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -26,10 +26,24 @@ class ScheduledReleasePreflightTests(unittest.TestCase):
             (contract / "tracker-backend-sha256.json").write_text(json.dumps(expected))
             (contract / "tracker-backend-baselines.json").write_text(json.dumps({"20260910-ui1": legacy}))
             with patch.object(preflight, "command", return_value=json.dumps(legacy)):
-                preflight.check_backend_hashes(contract, {"portal-api": "api", "portal-worker": "worker"}, root)
+                with self.assertRaises(preflight.PreflightError):
+                    preflight.check_backend_hashes(contract, {"portal-api": "api", "portal-worker": "worker"}, root)
             with patch.object(preflight, "command", return_value=json.dumps({"koda_tracker/app.py": "unknown"})):
                 with self.assertRaises(preflight.PreflightError):
                     preflight.check_backend_hashes(contract, {"portal-api": "api", "portal-worker": "worker"}, root)
+
+    def test_current_contract_has_only_native_services_and_no_legacy_hashes(self):
+        native = dict.fromkeys(preflight.SERVICES, {})
+        preflight.require_native_services(native)
+        with self.assertRaisesRegex(preflight.PreflightError, "full installation"):
+            preflight.require_native_services({**native, "dtrack-frontend": {}})
+        contract = ROOT / "platforms/linux/scheduled-release/contract"
+        hashes = json.loads((contract / "tracker-backend-sha256.json").read_text())
+        self.assertNotIn("dtrack.py", hashes)
+        self.assertNotIn("migration.py", hashes)
+        self.assertFalse((contract / "tracker-backend-baselines.json").exists())
+        self.assertEqual((contract / "koda-suite").read_bytes(), (ROOT / "platforms/linux/suite/koda-suite").read_bytes())
+        self.assertEqual((contract / "tracker/compose.integration.yaml").read_bytes(), (ROOT / "platforms/linux/suite/compose.integration.yaml").read_bytes())
 
     def test_chunked_digest_contract_is_normalized(self):
         self.assertEqual(

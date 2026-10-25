@@ -21,9 +21,12 @@ class ScheduledPackageTests(unittest.TestCase):
             for directory in ('apps/api/koda_tracker', 'apps/web/src', 'apps/web/public'):
                 (tracker / directory).mkdir(parents=True)
             (tracker / 'apps/api/pyproject.toml').write_text('[project]\nname="test"\n')
+            (tracker / 'apps/api/koda_tracker/__init__.py').write_text('# native test source\n')
+            (tracker / 'scripts').mkdir()
+            (tracker / 'scripts/remove-retired-analysis.py').write_text('# native release cleanup helper\n')
             def command(*args):
                 if args[:3] == ('docker', 'image', 'inspect'):
-                    return json.dumps([{'Os': 'linux', 'Architecture': 'amd64', 'Id': 'sha256:' + 'a' * 64, 'Size': 10}])
+                    return json.dumps([{'Os': 'linux', 'Architecture': 'amd64', 'Id': 'sha256:' + 'a' * 64, 'Size': 10, 'Created': '2026-10-18T01:02:03Z', 'Config': {'Labels': {'org.opencontainers.image.revision': 'original-build'}}}])
                 return 'commit' if 'rev-parse' in args else 'dirty'
             def save(args, **kwargs):
                 with tarfile.open(args[3], 'w') as archive:
@@ -44,5 +47,17 @@ class ScheduledPackageTests(unittest.TestCase):
                     self.assertIn(base + '/' + name, archive.getnames())
                 for launcher in ('koda-suite', 'koda-docker'):
                     self.assertTrue(archive.getmember(base + '/launchers/' + launcher).mode & 0o111)
-                self.assertEqual(len(json.load(archive.extractfile(base + '/image-inventory.json'))), 3)
+                self.assertIn(base + '/external-tools/tracker/scripts/remove-retired-analysis.py', archive.getnames())
+                hashes = json.load(archive.extractfile(base + '/contract/tracker-backend-sha256.json'))
+                self.assertEqual(hashes, {'__init__.py': hashlib.sha256(b'# native test source\n').hexdigest()})
+                self.assertNotIn(base + '/verification.json', archive.getnames())
+                provenance = json.load(archive.extractfile(base + '/provenance.json'))
+                self.assertEqual(provenance['base_suite'], 'native-two-product-contract')
+                self.assertEqual(json.load(archive.extractfile(base + '/source-image-check.json'))['status'], 'not_verified')
+                inventory = json.load(archive.extractfile(base + '/image-inventory.json'))
+                self.assertEqual(len(inventory), 3)
+                self.assertTrue(all(row['image_created'] == '2026-10-18T01:02:03Z' and row['image_revision'] == 'original-build' for row in inventory))
+                self.assertTrue(all(row['reference'] == row['source_reference'] and not row['tag_is_package_alias'] for row in inventory))
+                self.assertIn('packaged_at', provenance)
+                self.assertNotIn('built_at', provenance)
             self.assertEqual(archive_path.with_suffix('.gz.sha256').read_text().split()[0], module.digest(archive_path))

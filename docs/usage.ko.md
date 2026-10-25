@@ -69,7 +69,7 @@ positive-only 가져오기를 구현합니다. KODA가 CodeQL을 직접 다운�
 ## 안전 경계
 
 일반 스캔과 `sbom-verify`는 읽기 전용입니다. `fix --apply`, 템플릿 생성,
-`web-scan`, `net-scan`, `zap-run`, `upload-sbom`은 파일을 변경하거나 외부 시스템에
+`web-scan`, `net-scan`, `zap-run`은 파일을 변경하거나 외부 시스템에
 접근할 수 있으므로 승인된 대상에서만 사용하세요.
 
 `net-scan`은 비웹 네트워크 표면을 다룹니다 — 엄선된 TCP 포트/배너 스윕, 능동 TLS

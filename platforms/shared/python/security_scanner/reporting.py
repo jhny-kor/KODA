@@ -19,7 +19,7 @@ from . import __version__
 from .checks.secrets import SECRET_RULES, _redact_line
 from .dependency_inventory import component_payload
 from .models import DependencyComponent, Finding, SEVERITIES, SEVERITY_RANK
-from .sbom import cyclonedx_payload, nis_sbom_payload, render_cyclonedx, render_nis_sbom
+from .sbom import cyclonedx_payload, nis_sbom_payload, render_cyclonedx, render_nis_sbom, render_spdx, spdx_from_cyclonedx
 from .standards import (
     CODE_PATTERN_RULE_IDS,
     CONFIGURATION_RULE_IDS,
@@ -140,6 +140,7 @@ TRANSLATIONS = {
         "download_sbom": "Download SBOM",
         "sbom_format": "SBOM format",
         "sbom_cyclonedx_16": "CycloneDX 1.6 (JSON)",
+        "sbom_spdx_23": "SPDX 2.3 (JSON)",
         "sbom_nis_10": "NIS-SBOM 1.0 (CSV)",
         "settings": "Settings",
         "settings_title": "Check rule settings",
@@ -388,6 +389,7 @@ TRANSLATIONS = {
         "download_sbom": "SBOM 다운로드",
         "sbom_format": "SBOM 생성 형식",
         "sbom_cyclonedx_16": "CycloneDX 1.6 (JSON)",
+        "sbom_spdx_23": "SPDX 2.3 (JSON)",
         "sbom_nis_10": "국정원 NIS-SBOM 1.0 (CSV)",
         "settings": "설정",
         "settings_title": "점검 규칙 설정",
@@ -667,11 +669,6 @@ RULE_TRANSLATIONS_KO = {
         "title": "DAST baseline이 설정되지 않음",
         "description": "웹 프로젝트로 보이나 OWASP ZAP baseline workflow 또는 가이드가 확인되지 않았습니다.",
         "recommendation": "권한이 있는 staging URL에 대해 OWASP ZAP baseline 점검 또는 DAST 인수인계 절차를 추가하세요.",
-    },
-    "prevention.dependency-track-integration-missing": {
-        "title": "Dependency-Track SBOM 업로드가 설정되지 않음",
-        "description": "의존성 매니페스트는 있으나 Dependency-Track 같은 SBOM 분석 backend로 업로드하는 workflow가 없습니다.",
-        "recommendation": "릴리스 SBOM을 Dependency-Track 또는 동등한 SBOM 분석 backend에 업로드하도록 자동화하세요.",
     },
     "prevention.vex-missing": {
         "title": "VEX 문서가 없음",
@@ -1367,6 +1364,8 @@ def render_report(
 ) -> str:
     if report_format == "cyclonedx":
         return render_cyclonedx(components)
+    if report_format == "spdx":
+        return render_spdx(components, product_name=target_names[0] if target_names else "KODA scan")
     if report_format == "nis-sbom":
         return render_nis_sbom(components, product_name=target_names[0] if target_names else "KODA scan")
     if report_format == "cyclonedx-vex":
@@ -1840,9 +1839,18 @@ def render_html_pair_zip_from_payload(payload: dict[str, object], language: str 
         main_html = main_html.replace("</main>", f"{audit_html}</main>", 1)
         detail_html = detail_html.replace("</main>", f"{audit_html}</main>", 1)
     buffer = io.BytesIO()
+    original_sbom = payload.get("sbom")
+    spdx_sbom = None
+    if isinstance(original_sbom, dict) and original_sbom.get("bomFormat") == "CycloneDX":
+        spdx_sbom = spdx_from_cyclonedx(original_sbom)
+        links = '<p class="sbom-downloads"><a href="sbom.cdx.json" download>CycloneDX 1.6</a> · <a href="sbom.spdx.json" download>SPDX 2.3 JSON</a></p>'
+        main_html = main_html.replace("</main>", links + "</main>", 1)
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("report.html", main_html)
         archive.writestr("report-detail.html", detail_html)
+        if spdx_sbom is not None:
+            archive.writestr("sbom.cdx.json", json.dumps(original_sbom, ensure_ascii=False, indent=2) + "\n")
+            archive.writestr("sbom.spdx.json", json.dumps(spdx_sbom, ensure_ascii=False, indent=2) + "\n")
         if vulnerability_html:
             archive.writestr("report-vulnerabilities.html", vulnerability_html)
     return buffer.getvalue()
@@ -1899,6 +1907,8 @@ def _java_library_payload(payload: dict[str, object]) -> dict[str, object]:
             "known_exploited": item.get("known_exploited", False), "fixed_versions": item.get("fixed_versions", []),
             "locations": item.get("locations", []), "match_details": item.get("match_details", []),
             "nvd": item.get("nvd", {}), "cisa_kev": item.get("cisa_kev", {}),
+            **{key: value for key, value in item.items() if key.startswith("epss_")},
+            **{key: value for key, value in item.items() if key == "offline_intelligence"},
         }])
         vulnerabilities.append(item)
     components = payload.get("components", []) if isinstance(payload.get("components"), list) else []
@@ -1914,7 +1924,7 @@ def _java_library_payload(payload: dict[str, object]) -> dict[str, object]:
     database = (((payload.get("scan") or {}).get("local_vulnerability") or {}).get("database") or {})
     data_as_of = str(payload.get("data_as_of") or database.get("built") or "unknown")
     summary = {"archive_count": 0, "component_count": len(components) or len(affected_versions), "unresolved_component_count": unresolved, "duplicate_file_count": sum(max(0, len(item.get("locations", ())) - 1) for item in components if isinstance(item, dict)), "severity_counts": severity_counts, "kev_count": sum(bool(item.get("known_exploited")) for item in vulnerabilities), "raw_match_count": len(vulnerabilities), "unique_vulnerability_count": len(cve_ids), "affected_library_version_count": len(affected_versions)}
-    return {"summary": summary, "target": str((payload.get("scan") or {}).get("path") or "Linux library scan"), "targets": [], "completed_at": str(payload.get("generated_at") or ""), "data_as_of": data_as_of, "components": components, "vulnerabilities": vulnerabilities, "vulnerabilities_available": "vulnerabilities" in payload, "warnings": (payload.get("scan") or {}).get("warnings", [])}
+    return {"offline_intelligence": payload.get("offline_intelligence", {}), "summary": summary, "target": str((payload.get("scan") or {}).get("path") or "Linux library scan"), "targets": [], "completed_at": str(payload.get("generated_at") or ""), "data_as_of": data_as_of, "components": components, "vulnerabilities": vulnerabilities, "vulnerabilities_available": "vulnerabilities" in payload, "warnings": (payload.get("scan") or {}).get("warnings", [])}
 
 
 def _render_java_library_reports(payload: dict[str, object], language: str) -> str:
@@ -2366,8 +2376,8 @@ def _web_audit_html(result: dict[str, object], language: str = "ko") -> str:
         '<section class="web-audit-results">'
         f"<h2>{html.escape(title)}</h2>"
         f"<p>Overall: <strong>{html.escape(str(result.get('status', 'NOT_SCANNED')))}</strong></p>"
-        '<table><thead><tr><th>ID</th><th>Control</th><th>Status</th><th>Executed</th><th>Coverage</th><th>Reason</th></tr></thead>'
-        f"<tbody>{''.join(rows)}</tbody></table></section>"
+        '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Control</th><th>Status</th><th>Executed</th><th>Coverage</th><th>Reason</th></tr></thead>'
+        f"<tbody>{''.join(rows)}</tbody></table></div></section>"
     )
 
 
@@ -2823,9 +2833,9 @@ _SOURCE_DETAIL_EXTRA_CSS = """
 _SOURCE_MAIN_EXTRA_CSS = """
 .report-brand{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:26px}.report-brand .brand{display:flex;align-items:center;gap:12px}.report-brand .brand-copy strong{display:block;color:#10233f;font-size:17px;letter-spacing:-.02em}.report-brand .brand-copy span{display:block;color:#60708a;font-size:12px;font-weight:500;letter-spacing:0;text-transform:none}.report-header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.report-mode{display:inline-flex;align-items:center;height:36px;padding:0 12px;border:1px solid #b8cdf1;border-radius:999px;color:#0b3b89;background:#edf4ff;font-size:11px;font-weight:800;letter-spacing:.04em}.report-brand .koda-main-classification-badge{margin-left:0}.koda-main-classification-badge{min-height:46px;padding:9px 18px;font-size:14px}.source-main-filters{display:grid;grid-template-columns:minmax(240px,1.6fr) repeat(3,minmax(150px,1fr));gap:10px;margin:18px 0 0;padding:14px;border:1px solid #dce4ee;border-radius:16px;background:#fff;box-shadow:0 8px 20px rgba(15,35,64,.04)}
 .source-main-filters label{display:grid;gap:5px;color:#60708a;font-size:11px;font-weight:800}.source-main-filters input,.source-main-filters select{width:100%;min-height:42px;border:1px solid #cbd6e5;border-radius:10px;padding:0 11px;background:#fff;color:#10233f}.source-main-filter-count{grid-column:1/-1;color:#60708a;font-size:12px}.source-severity-panel{margin:18px 0 0;padding:20px;border:1px solid #dce4ee;border-radius:18px;background:#fff;box-shadow:0 8px 20px rgba(15,35,64,.04)}.source-severity-panel h2{margin:0;font-size:18px}.source-severity-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}.source-severity-card{min-width:0;padding:14px;border:1px solid #e7edf4;border-radius:12px;background:#f8fafc}.source-severity-card strong{display:block;font-size:12px}.source-severity-card b{display:block;margin-top:3px;font-size:22px}.source-severity-locations{margin-top:8px;color:#60708a;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}@media(max-width:820px){.source-main-filters{grid-template-columns:1fr 1fr}.source-severity-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.source-main-filters{grid-template-columns:1fr}.source-severity-grid{grid-template-columns:1fr}}
-.source-summary-wrap{overflow:auto;padding:0 20px 20px}.source-summary-table{border-left:1px solid #dce4ee;border-right:1px solid #dce4ee}.source-summary-table th:first-child,.source-summary-table td:first-child{min-width:92px;white-space:nowrap}
+.source-summary-wrap{min-width:0;max-width:100%;overflow-x:auto;padding:0 20px 20px}.source-summary-table{border-left:1px solid #dce4ee;border-right:1px solid #dce4ee}.source-summary-table th:first-child,.source-summary-table td:first-child{min-width:92px;white-space:nowrap}
 .source-summary-table{table-layout:fixed}.source-summary-table th{position:relative}.source-criteria{display:block;white-space:pre-line}.source-verification{display:inline-flex;margin-top:6px;padding:3px 7px;border-radius:999px;background:#e8f4ff;color:#0b3b89;font-size:10px;font-weight:850}.source-verification--needs_review{background:#fff4d6;color:#7a5400}.source-location-list{display:grid;gap:5px}.source-location-list code{overflow-wrap:anywhere}.source-collapse-item[hidden],.source-collapse-toggle[hidden]{display:none!important}.source-collapse-controls{display:flex;gap:6px;margin-top:2px}.source-collapse-toggle{min-height:30px;padding:0 8px;border:1px solid #cbd6e5;border-radius:8px;color:#0b3b89;background:#fff;cursor:pointer;font-size:11px;font-weight:750}.source-severity-details{margin-top:8px}.source-severity-details summary{color:#0b3b89;font-size:11px;font-weight:800;cursor:pointer}.source-severity-locations{margin-top:7px;color:#60708a;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.column-resizer{position:absolute;top:0;right:-5px;z-index:3;width:10px;height:100%;cursor:col-resize;touch-action:none;user-select:none}.column-resizer::after{content:"";position:absolute;top:24%;bottom:24%;left:4px;width:2px;border-radius:2px;background:transparent}.column-resizer:hover::after,.column-resizer:focus-visible::after{background:#1368e8}
-.source-sw49-panel{overflow:hidden;margin-top:18px;border:1px solid #dce4ee;border-radius:18px;background:#fff;box-shadow:0 10px 28px rgba(15,35,64,.06)}.source-sw49-wrap{overflow:auto;padding:0 20px 20px}.source-sw49-table{width:100%;min-width:1060px;border-collapse:separate;border-spacing:0;border:1px solid #dce4ee}.source-sw49-table th{padding:10px 12px;background:#f6f8fb;color:#4a5b73;text-align:left;font-size:11px}.source-sw49-table td{padding:11px 12px;border-top:1px solid #e7edf4;vertical-align:top}.source-sw49-table th:not(:last-child),.source-sw49-table td:not(:last-child){border-right:1px solid #e7edf4}.source-sw49-table tr[data-sw49-status="VULNERABLE"] td{background:#fff5f4}.sw49-summary{color:#0b3b89!important;font-weight:750}.sw49-zero-note{margin:0 20px 20px;padding:12px 14px;border-radius:10px;background:#fff8d8;color:#6c5200}
+.source-sw49-panel{overflow:hidden;margin-top:18px;border:1px solid #dce4ee;border-radius:18px;background:#fff;box-shadow:0 10px 28px rgba(15,35,64,.06)}.source-sw49-wrap{min-width:0;max-width:100%;overflow-x:auto;padding:0 20px 20px}.source-sw49-table{width:100%;min-width:1060px;border-collapse:separate;border-spacing:0;border:1px solid #dce4ee}.source-sw49-table th{padding:10px 12px;background:#f6f8fb;color:#4a5b73;text-align:left;font-size:11px}.source-sw49-table td{padding:11px 12px;border-top:1px solid #e7edf4;vertical-align:top}.source-sw49-table th:not(:last-child),.source-sw49-table td:not(:last-child){border-right:1px solid #e7edf4}.source-sw49-table tr[data-sw49-status="VULNERABLE"] td{background:#fff5f4}.sw49-summary{color:#0b3b89!important;font-weight:750}.sw49-zero-note{margin:0 20px 20px;padding:12px 14px;border-radius:10px;background:#fff8d8;color:#6c5200}
 """
 
 
@@ -2943,6 +2953,7 @@ def build_dashboard_payload(
     source_analysis: object | None = None,
     stored_source_contexts: dict[tuple[str, str, object, str], object] | None = None,
 ) -> dict[str, object]:
+    from .network_policy import osv_disabled
     generated, generated_display = _generated_at()
     summary = _summary(findings, target_names, target_paths, source_analysis)
     summary["raw_finding_count"] = len(findings)
@@ -2974,7 +2985,8 @@ def build_dashboard_payload(
             "standard_category": standard_category,
             "scanned_categories": list(scanned_categories),
             "warnings": list(warnings),
-            "enable_osv": enable_osv,
+            "enable_osv": enable_osv and not osv_disabled(),
+            "osv_available": not osv_disabled(),
             "coverage_message": "현재 활성화된 점검 범위에서 탐지된 항목입니다." if kind == "web" else "",
         },
         "findings_by_language": {
@@ -2995,6 +3007,7 @@ def build_dashboard_payload(
     }
     if source_analysis is not None:
         payload["source_analysis"] = _source_analysis_payload(source_analysis)
+    payload["spdx_sbom"] = spdx_from_cyclonedx(payload["sbom"], product_name=target_names[0] if target_names else "KODA scan")
     return payload
 
 
@@ -3960,7 +3973,9 @@ HTML_TEMPLATE = """<!doctype html>
     }
 
     .table-wrap {
-      overflow: auto;
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: auto;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: #fff;
@@ -4364,7 +4379,9 @@ HTML_TEMPLATE = """<!doctype html>
     }
 
     .coverage-table-wrap {
-      overflow: auto;
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: auto;
       border-radius: 8px;
     }
 
@@ -4683,6 +4700,7 @@ HTML_TEMPLATE = """<!doctype html>
           <select id="sbom-format">
             <option value="cyclonedx"></option>
             <option value="nis-sbom"></option>
+            <option value="spdx"></option>
           </select>
         </label>
         <button id="sbom-download" type="button"></button>
@@ -5043,6 +5061,7 @@ HTML_TEMPLATE = """<!doctype html>
       setText("sbom-format-label", activeLabels.sbom_format);
       byId("sbom-format").options[0].textContent = activeLabels.sbom_cyclonedx_16;
       byId("sbom-format").options[1].textContent = activeLabels.sbom_nis_10;
+      byId("sbom-format").options[2].textContent = activeLabels.sbom_spdx_23;
       setText("sbom-download", activeLabels.download_sbom);
       setText("report-download-open", activeLabels.download_report);
       setText("download-dialog-title", activeLabels.download_format_prompt);
@@ -5141,7 +5160,13 @@ HTML_TEMPLATE = """<!doctype html>
       byId("prevention-create-ignore").disabled = state.scanRunning;
       byId("scan-standard").disabled = state.scanRunning;
       byId("scan-standard-category").disabled = state.scanRunning;
-      byId("scan-osv").disabled = state.scanRunning;
+      const osvExcluded = payload.scan && payload.scan.osv_available === false;
+      byId("scan-osv").disabled = state.scanRunning || osvExcluded;
+      byId("scan-osv").closest("label").hidden = !!osvExcluded;
+      if (osvExcluded) {
+        byId("scan-osv").checked = false;
+        setText("scan-osv-note", "폐쇄망 모드: 반입한 로컬 Grype·NVD·KEV·EPSS 자료를 사용합니다.");
+      }
       byId("scan-host").disabled = state.scanRunning;
       byId("sbom-format").disabled = components().length === 0;
       byId("sbom-download").disabled = components().length === 0;
@@ -6150,12 +6175,12 @@ HTML_TEMPLATE = """<!doctype html>
       const content = format === "nis-sbom"
         ? "\ufeff" + [nis.columns, ...nis.rows.map((row) => nis.columns.map((column) => row[column] || ""))]
           .map((row) => row.map(csvCell).join(",")).join("\\r\\n") + "\\r\\n"
-        : JSON.stringify(payload.sbom, null, 2);
+        : JSON.stringify(format === "spdx" ? payload.spdx_sbom : payload.sbom, null, 2);
       const blob = new Blob([content], { type: format === "nis-sbom" ? "text/csv;charset=utf-8" : "application/json" });
       const link = document.createElement("a");
       const downloadUrl = URL.createObjectURL(blob);
       link.href = downloadUrl;
-      link.download = format === "nis-sbom" ? "koda-nis-sbom-1.0.csv" : "koda-cyclonedx-1.6.json";
+      link.download = format === "nis-sbom" ? "koda-nis-sbom-1.0.csv" : format === "spdx" ? "koda-spdx-2.3.json" : "koda-cyclonedx-1.6.json";
       document.body.appendChild(link);
       link.click();
       link.remove();

@@ -6,7 +6,7 @@
   "status": "pass",
   "visualReview": "pending",
   "artifact": {
-    "path": "/Users/plo/Documents/security/dist/diagrams/koda-remote-daily-delta.html",
+    "path": "/Users/<user>/Documents/security/dist/diagrams/koda-remote-daily-delta.html",
     "sha256": "32c2d4378bdcc177d70e0542b1cba82f9f5b3dd1f86447d05fb81eaece85da6d",
     "bytes": 722510
   },

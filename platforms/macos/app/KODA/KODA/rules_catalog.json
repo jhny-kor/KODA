@@ -101,11 +101,6 @@
           "description": "웹 프로젝트로 보이나 OWASP ZAP baseline workflow 또는 가이드가 확인되지 않았습니다."
         },
         {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency-Track SBOM 업로드가 설정되지 않음",
-          "description": "의존성 매니페스트는 있으나 Dependency-Track 같은 SBOM 분석 backend로 업로드하는 workflow가 없습니다."
-        },
-        {
           "id": "prevention.vex-missing",
           "title": "VEX 문서가 없음",
           "description": "의존성 취약점 검토 결과를 추적할 VEX 산출물이 확인되지 않았습니다."
@@ -1293,11 +1288,6 @@
           "id": "prevention.zap-baseline-missing",
           "title": "DAST baseline이 설정되지 않음",
           "description": "웹 프로젝트로 보이나 OWASP ZAP baseline workflow 또는 가이드가 확인되지 않았습니다."
-        },
-        {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency-Track SBOM 업로드가 설정되지 않음",
-          "description": "의존성 매니페스트는 있으나 Dependency-Track 같은 SBOM 분석 backend로 업로드하는 workflow가 없습니다."
         },
         {
           "id": "prevention.vex-missing",
@@ -2868,11 +2858,6 @@
           "id": "prevention.vex-missing",
           "title": "VEX 문서가 없음",
           "description": "의존성 취약점 검토 결과를 추적할 VEX 산출물이 확인되지 않았습니다."
-        },
-        {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency-Track SBOM 업로드가 설정되지 않음",
-          "description": "의존성 매니페스트는 있으나 Dependency-Track 같은 SBOM 분석 backend로 업로드하는 workflow가 없습니다."
         },
         {
           "id": "code.eval-user-input",
@@ -5656,11 +5641,6 @@
           "description": "웹 프로젝트로 보이나 OWASP ZAP baseline workflow 또는 가이드가 확인되지 않았습니다."
         },
         {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency-Track SBOM 업로드가 설정되지 않음",
-          "description": "의존성 매니페스트는 있으나 Dependency-Track 같은 SBOM 분석 backend로 업로드하는 workflow가 없습니다."
-        },
-        {
           "id": "prevention.vex-missing",
           "title": "VEX 문서가 없음",
           "description": "의존성 취약점 검토 결과를 추적할 VEX 산출물이 확인되지 않았습니다."
@@ -6863,83 +6843,6 @@
       "key": "owasp-dependency-check-baseline",
       "kind": "security",
       "label": "OWASP Dependency-Check 기준",
-      "rules": [
-        {
-          "id": "dependency.package-json-invalid",
-          "title": "잘못된 package.json",
-          "description": "잘못된 의존성 매니페스트는 의존성 검토와 재현 가능한 설치를 방해할 수 있습니다."
-        },
-        {
-          "id": "dependency.node-missing-lockfile",
-          "title": "Node 프로젝트에 lockfile이 없음",
-          "description": "lockfile이 없으면 설치 결과가 재현되지 않아 공급망 변경 위험이 커집니다."
-        },
-        {
-          "id": "dependency.node-unbounded-version",
-          "title": "범위가 제한되지 않은 Node 의존성 버전",
-          "description": "제한 없는 의존성 버전은 설치 시 예상하지 못한 코드를 가져올 수 있습니다."
-        },
-        {
-          "id": "dependency.python-unpinned-requirement",
-          "title": "고정되지 않은 Python 의존성",
-          "description": "고정되지 않은 requirements는 설치 시점마다 달라질 수 있어 의존성 검토가 어려워집니다."
-        },
-        {
-          "id": "dependency.python-wildcard-version",
-          "title": "와일드카드 Python 의존성 버전",
-          "description": "와일드카드 버전은 설치 시 예상하지 못한 코드를 가져올 수 있습니다."
-        },
-        {
-          "id": "dependency.docker-unpinned-base",
-          "title": "Docker 베이스 이미지가 고정되지 않음",
-          "description": "떠 있는 베이스 이미지 태그는 검토 없이 바뀔 수 있습니다."
-        },
-        {
-          "id": "dependency.node-insecure-url",
-          "title": "HTTP로 가져오는 의존성",
-          "description": "HTTP 의존성 소스는 전송 중 변조될 수 있습니다."
-        },
-        {
-          "id": "dependency.python-insecure-url",
-          "title": "HTTP로 가져오는 Python 의존성",
-          "description": "HTTP 의존성 소스는 전송 중 변조될 수 있습니다."
-        },
-        {
-          "id": "config.docker-add-http",
-          "title": "Dockerfile ADD가 HTTP를 사용함",
-          "description": "HTTP 다운로드는 이미지 빌드 중 전송 경로에서 변조될 수 있습니다."
-        },
-        {
-          "id": "dependency.remote-shell-script",
-          "title": "원격 콘텐츠를 셸로 실행하는 패키지 스크립트",
-          "description": "패키지 스크립트에서 원격 콘텐츠를 바로 실행하면 감사하기 어렵고 내용이 바뀔 수 있습니다."
-        },
-        {
-          "id": "dependency.docker-remote-shell",
-          "title": "Docker 빌드에서 원격 콘텐츠를 셸로 실행",
-          "description": "빌드 중 원격 콘텐츠를 바로 실행하면 감사하기 어렵고 내용이 바뀔 수 있습니다."
-        },
-        {
-          "id": "prevention.dependency-update-automation-missing",
-          "title": "의존성 업데이트 자동화가 없음",
-          "description": "Dependabot 또는 Renovate 설정이 없어 취약·노후 의존성을 지속적으로 확인하기 어렵습니다."
-        },
-        {
-          "id": "prevention.ci-security-scan-missing",
-          "title": "CI 보안 점검 워크플로가 없음",
-          "description": "CI에서 실행되는 보안 점검 워크플로가 확인되지 않았습니다."
-        },
-        {
-          "id": "prevention.sbom-missing",
-          "title": "SBOM 산출물이 없음",
-          "description": "의존성 매니페스트는 있으나 로컬 SBOM 산출물이 확인되지 않았습니다."
-        }
-      ]
-    },
-    {
-      "key": "owasp-dependency-track-baseline",
-      "kind": "security",
-      "label": "OWASP Dependency-Track / SBOM 기준",
       "rules": [
         {
           "id": "dependency.package-json-invalid",
@@ -8757,11 +8660,6 @@
           "description": "의존성 매니페스트는 있으나 로컬 SBOM 산출물이 확인되지 않았습니다."
         },
         {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency-Track SBOM 업로드가 설정되지 않음",
-          "description": "의존성 매니페스트는 있으나 Dependency-Track 같은 SBOM 분석 backend로 업로드하는 workflow가 없습니다."
-        },
-        {
           "id": "prevention.github-token-permissions-not-readonly",
           "title": "GitHub Actions 토큰 권한이 읽기 전용으로 제한되지 않음",
           "description": "workflow token의 기본 권한이 최소 권한으로 명시되어 있지 않습니다."
@@ -8822,11 +8720,6 @@
           "id": "prevention.sbom-missing",
           "title": "SBOM 산출물이 없음",
           "description": "의존성 매니페스트는 있으나 로컬 SBOM 산출물이 확인되지 않았습니다."
-        },
-        {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency-Track SBOM 업로드가 설정되지 않음",
-          "description": "의존성 매니페스트는 있으나 Dependency-Track 같은 SBOM 분석 backend로 업로드하는 workflow가 없습니다."
         }
       ]
     },
@@ -9009,11 +8902,6 @@
         {
           "id": "prevention.zap-baseline-missing",
           "title": "Zap baseline missing",
-          "description": ""
-        },
-        {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency track integration missing",
           "description": ""
         },
         {
@@ -10203,11 +10091,6 @@
         {
           "id": "prevention.zap-baseline-missing",
           "title": "Zap baseline missing",
-          "description": ""
-        },
-        {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency track integration missing",
           "description": ""
         },
         {
@@ -11778,11 +11661,6 @@
         {
           "id": "prevention.vex-missing",
           "title": "Vex missing",
-          "description": ""
-        },
-        {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency track integration missing",
           "description": ""
         },
         {
@@ -14567,11 +14445,6 @@
           "description": ""
         },
         {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency track integration missing",
-          "description": ""
-        },
-        {
           "id": "prevention.vex-missing",
           "title": "Vex missing",
           "description": ""
@@ -15774,83 +15647,6 @@
       "key": "owasp-dependency-check-baseline",
       "kind": "security",
       "label": "OWASP Dependency-Check Baseline",
-      "rules": [
-        {
-          "id": "dependency.package-json-invalid",
-          "title": "Package json invalid",
-          "description": ""
-        },
-        {
-          "id": "dependency.node-missing-lockfile",
-          "title": "Node missing lockfile",
-          "description": ""
-        },
-        {
-          "id": "dependency.node-unbounded-version",
-          "title": "Node unbounded version",
-          "description": ""
-        },
-        {
-          "id": "dependency.python-unpinned-requirement",
-          "title": "Python unpinned requirement",
-          "description": ""
-        },
-        {
-          "id": "dependency.python-wildcard-version",
-          "title": "Python wildcard version",
-          "description": ""
-        },
-        {
-          "id": "dependency.docker-unpinned-base",
-          "title": "Docker unpinned base",
-          "description": ""
-        },
-        {
-          "id": "dependency.node-insecure-url",
-          "title": "Node insecure url",
-          "description": ""
-        },
-        {
-          "id": "dependency.python-insecure-url",
-          "title": "Python insecure url",
-          "description": ""
-        },
-        {
-          "id": "config.docker-add-http",
-          "title": "Docker add http",
-          "description": ""
-        },
-        {
-          "id": "dependency.remote-shell-script",
-          "title": "Remote shell script",
-          "description": ""
-        },
-        {
-          "id": "dependency.docker-remote-shell",
-          "title": "Docker remote shell",
-          "description": ""
-        },
-        {
-          "id": "prevention.dependency-update-automation-missing",
-          "title": "Dependency update automation missing",
-          "description": ""
-        },
-        {
-          "id": "prevention.ci-security-scan-missing",
-          "title": "Ci security scan missing",
-          "description": ""
-        },
-        {
-          "id": "prevention.sbom-missing",
-          "title": "Sbom missing",
-          "description": ""
-        }
-      ]
-    },
-    {
-      "key": "owasp-dependency-track-baseline",
-      "kind": "security",
-      "label": "OWASP Dependency-Track / SBOM Baseline",
       "rules": [
         {
           "id": "dependency.package-json-invalid",
@@ -17668,11 +17464,6 @@
           "description": ""
         },
         {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency track integration missing",
-          "description": ""
-        },
-        {
           "id": "prevention.github-token-permissions-not-readonly",
           "title": "Github token permissions not readonly",
           "description": ""
@@ -17732,11 +17523,6 @@
         {
           "id": "prevention.sbom-missing",
           "title": "Sbom missing",
-          "description": ""
-        },
-        {
-          "id": "prevention.dependency-track-integration-missing",
-          "title": "Dependency track integration missing",
           "description": ""
         }
       ]

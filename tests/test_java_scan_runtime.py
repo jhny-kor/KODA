@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -31,6 +32,13 @@ def _write_jar(path: Path, files: dict[str, str | bytes]) -> None:
 
 
 class JavaScanRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        # Explicit local-file development fixtures; Linux production defaults
+        # are exercised independently by test_managed_data_current_only.
+        local_profile = patch("security_scanner.data_release.sys", SimpleNamespace(platform="darwin"))
+        local_profile.start()
+        self.addCleanup(local_profile.stop)
+
     def test_vulnerability_gates_fail_when_grype_comparison_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

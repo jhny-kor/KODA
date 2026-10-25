@@ -61,8 +61,15 @@ class PatchPreflightTests(unittest.TestCase):
             with self.assertRaises(preflight.PreflightError):
                 preflight.main(["--prefix", str(self.root / "installed")])
 
+    def test_only_native_service_set_is_accepted(self):
+        native = dict.fromkeys(preflight.SERVICES, {})
+        preflight.require_native_services(native)
+        for changed in ({**native, "dtrack-apiserver": {}}, {name: {} for name in native if name != "portal-data-updater"}):
+            with self.assertRaisesRegex(preflight.PreflightError, "full installation"):
+                preflight.require_native_services(changed)
+
     def test_success_prints_compatibility(self):
-        rendered = {"name": "koda-sbom", "services": {name: {"image": f"local/{name}:new"} for name in preflight.APP_SERVICES}}
+        rendered = {"name": "koda-sbom", "services": {name: {"image": f"local/{name}:new"} for name in preflight.SERVICES}}
         records = {
             name: {"Image": "sha256:test", "State": {"Status": "running"}, "Config": {"Image": f"local/{name}:new"}, "Mounts": []}
             for name in preflight.APP_SERVICES

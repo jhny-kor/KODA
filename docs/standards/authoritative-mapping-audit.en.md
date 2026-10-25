@@ -44,7 +44,7 @@ document as a separate standard.
 | OWASP SAMM 2 | Corrected to the five official business functions | Shows evidence for Governance, Design, Implementation, Verification, and Operations, but does not score the 15 practices or maturity levels |
 | OWASP SCVS | Matches the six official control families | Covers repository evidence and optional SBOM/VEX integrations only |
 | OWASP Top 10 for LLM Applications 2025 | Matches official LLM01-LLM10 | Checks related code and configuration hints; model and prompt attack validation remain external |
-| Dependency-Check / Dependency-Track baseline | KODA readiness profiles for using OWASP projects | Not represented as separate OWASP compliance standards |
+| Dependency-Check baseline | KODA readiness profiles for using OWASP projects | Not represented as separate OWASP compliance standards |
 
 ### Source finding semantics
 

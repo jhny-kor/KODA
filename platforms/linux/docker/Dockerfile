@@ -16,7 +16,8 @@ RUN mkdir -p /tmp/koda-bundle \
  && KODA_PREFIX=/opt/koda bash /tmp/koda-bundle/install.sh --no-link \
  && mv /opt/koda/manifest.sha256 /opt/koda/source-bundle-manifest.sha256 \
  && rm -rf /opt/koda/app/render-wheels \
-      /opt/koda/grype-db/incoming \
+      /opt/koda/grype-db \
+      /opt/koda/vuln-data \
       /tmp/koda-bundle /tmp/koda-bundle.tar.gz \
  && chmod -R a+rX /opt/koda
 
@@ -29,20 +30,25 @@ COPY --from=installer /opt/koda /opt/koda
 # Chromium shared-library dependencies for dashboard PDF export, then a
 # the SSH client for scheduled collection, then a fixed non-root user.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-client \
+ && apt-get install -y --no-install-recommends openssh-client openssl \
  && PYTHONPATH=/opt/koda/render-lib python3 -m playwright install-deps chromium \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 1000 koda \
  && useradd --uid 1000 --gid 1000 --home-dir /home/koda --create-home koda
 
 ENV KODA_PREFIX=/opt/koda \
+    KODA_OFFLINE_MODE=1 \
+    KODA_EXCLUDE_OSV=1 \
+    KODA_REQUIRE_MANAGED_DATA=1 \
+    KODA_VULN_DATA_ROOT=/var/lib/koda-vuln-data \
     KODA_GRYPE_BIN=/opt/koda/tools/grype \
     HOME=/tmp/koda-home \
     XDG_CACHE_HOME=/tmp/koda-cache \
-    GRYPE_DB_CACHE_DIR=/opt/koda/grype-db/db \
+    GRYPE_DB_CACHE_DIR=/var/lib/koda-vuln-data/current/grype-db \
     GRYPE_DB_AUTO_UPDATE=false \
     GRYPE_DB_VALIDATE_AGE=false \
-    GRYPE_CHECK_FOR_APP_UPDATE=false
+    GRYPE_CHECK_FOR_APP_UPDATE=false \
+    GRYPE_EXTERNAL_SOURCES_ENABLE=false
 
 WORKDIR /work
 USER 1000:1000

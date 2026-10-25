@@ -75,6 +75,19 @@ def render_cyclonedx(components: tuple[DependencyComponent, ...] | list[Dependen
     return json.dumps(cyclonedx_payload(components), indent=2, ensure_ascii=False)
 
 
+def spdx_from_cyclonedx(payload: dict, *, product_name: str = "KODA scan") -> dict:
+    from .spdx import from_cyclonedx
+    return from_cyclonedx(payload, product_name=product_name)
+
+
+def spdx_payload(components: tuple[DependencyComponent, ...] | list[DependencyComponent], *, product_name: str = "KODA scan") -> dict:
+    return spdx_from_cyclonedx(cyclonedx_payload(components), product_name=product_name)
+
+
+def render_spdx(components: tuple[DependencyComponent, ...] | list[DependencyComponent], *, product_name: str = "KODA scan") -> str:
+    return json.dumps(spdx_payload(components, product_name=product_name), indent=2, ensure_ascii=False)
+
+
 def nis_sbom_payload(
     components: tuple[DependencyComponent, ...] | list[DependencyComponent],
     *,

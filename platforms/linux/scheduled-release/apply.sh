@@ -103,6 +103,7 @@ backup="$prefix/backups/scheduled-release/$stamp"
 mkdir -p "$backup/sqlite" "$backup"
 chmod 700 "$backup" "$backup/sqlite"
 compose() {
+  env -u PORTAL_IMAGE_TAG -u PORTAL_WEB_IMAGE -u PORTAL_API_IMAGE -u PORTAL_WORKER_IMAGE \
   docker compose --project-directory "$prefix/tracker" --env-file "$prefix/tracker/.env" \
     -f "$prefix/tracker/compose.yaml" -f "$prefix/tracker/compose.airgap.yaml" \
     -f "$prefix/tracker/compose.integration.yaml" "$@"
@@ -121,30 +122,25 @@ cp -a "$prefix/tracker/gateway/." "$backup/tracker/gateway/"
 next_compose="$backup/tracker/compose.next.yaml"
 if [[ -f "$root/migration/tracker/compose.yaml" ]]; then
   cp -p "$root/migration/tracker/compose.yaml" "$next_compose"
-  python3 - "$backup/tracker/compose.yaml" "$next_compose" <<'PYLDAP' \
+  python3 - "$backup/tracker/compose.yaml" "$next_compose" "$root/support-ldap-compose.py" <<'PYLDAP' \
     || fail "could not preserve Tracker LDAP Compose networking"
 from pathlib import Path
+import importlib.util
 import sys
 
-previous, replacement = map(Path, sys.argv[1:])
+previous, replacement, helper = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("ldap_network", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
 old = previous.read_text(encoding="utf-8")
 new = replacement.read_text(encoding="utf-8")
 if "\n  ldap-egress:\n    name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-ldap-egress\n" in old:
-    service_anchor = "    networks:\n      - app\n    restart: unless-stopped\n\n  portal-worker:"
-    network_anchor = "\nvolumes:\n"
-    if new.count(service_anchor) != 1 or new.count(network_anchor) != 1:
-        raise SystemExit("updated Compose layout does not support the reviewed LDAP network")
-    new = new.replace(
-        service_anchor,
-        "    networks:\n      - app\n      - ldap-egress\n    restart: unless-stopped\n"
-        "    dns:\n      - 10.95.58.206\n      - 10.95.58.207\n\n  portal-worker:",
-        1,
-    ).replace(
-        network_anchor,
-        "\n  ldap-egress:\n    name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-ldap-egress\n\nvolumes:\n",
-        1,
-    )
-    replacement.write_text(new, encoding="utf-8")
+    dns = module.configured_dns(old)
+    candidates = module.reviewed_variants(new, dns)
+    if not candidates or any(candidate == new.encode() for candidate in candidates):
+        raise SystemExit("updated Compose layout does not support configured LDAP networking")
+    replacement.write_bytes(sorted(candidates)[0])
+
 PYLDAP
 fi
 
@@ -256,6 +252,7 @@ printf '%s\n' "${old_refs[@]}" >"$backup/old-image-refs.txt"
 printf '%s\n' "${rollback_refs[@]}" >"$backup/rollback-image-refs.txt"
 cp -p "$prefix/koda-suite" "$backup/koda-suite.previous"
 cp -p "$prefix/koda/koda-docker" "$backup/koda-docker.previous"
+cp -p "$prefix/koda/image-ref.txt" "$backup/koda-image-ref.previous"
 printf '%s\n' "$backup" >"$prefix/.koda-scheduled-last-backup"
 echo "rollback backup ready: $backup"
 # Install the reviewed data-updater Compose wiring only after the old files and
@@ -309,10 +306,21 @@ if [[ -d "$root/migration/tracker" ]]; then
     'from pathlib import Path; import os, pwd; p=Path("/spool"); u=pwd.getpwnam("tracker"); os.chown(p,u.pw_uid,u.pw_gid)' \
     || fail "Tracker updater spool ownership preparation failed"
 fi
-tag_image "$koda_release_ref" "$koda_ref"
-tag_image "$portal_web_release_ref" "$web_ref"
-tag_image "$portal_api_release_ref" "$api_ref"
-tag_image "$portal_api_release_ref" "$worker_ref"
+tag_image "$koda_release_ref" "$koda_release_ref"
+tag_image "$portal_web_release_ref" "$portal_web_release_ref"
+tag_image "$portal_api_release_ref" "$portal_api_release_ref"
+printf '%s\n' "$koda_release_ref" > "$prefix/koda/image-ref.txt"
+python3 - "$prefix/tracker/.env" "$portal_web_release_ref" "$portal_api_release_ref" <<'PYIMAGES'
+from pathlib import Path
+import sys
+path, web, api = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+web_repo, web_tag = web.rsplit(':', 1); api_repo, api_tag = api.rsplit(':', 1)
+if web_tag != api_tag:
+    raise SystemExit('scheduled Tracker images require a shared release tag')
+values = {'PORTAL_IMAGE_TAG': api_tag, 'PORTAL_WEB_IMAGE': web_repo, 'PORTAL_API_IMAGE': api_repo, 'PORTAL_WORKER_IMAGE': api_repo}
+lines = [line for line in path.read_text().splitlines() if line.partition('=')[0] not in values]
+path.write_text('\n'.join(lines + [key + '=' + value for key, value in values.items()]) + '\n')
+PYIMAGES
 install -m 0755 "$root/launchers/koda-suite" "$prefix/koda-suite"
 install -m 0755 "$root/launchers/koda-docker" "$prefix/koda/koda-docker"
 printf '%s\n' "$backup" >"$prefix/.koda-scheduled-last-backup"

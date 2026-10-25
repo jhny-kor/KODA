@@ -27,6 +27,8 @@ Environment:
   KODA_PYTHON_IMAGE   base image, default python:3.12-slim-bookworm
                       (pinned to its digest at build time)
   KODA_LINUX_DIST_DIR output directory, default dist/linux
+  KODA_DOCKER_IMAGE   explicit tagged output image (KODA_IMAGE also accepted)
+  KODA_DOCKER_IMAGE_TAG explicit tag override; default version-UTC-git12[-dirty]
 EOF
 }
 
@@ -57,7 +59,6 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required."
 version="$(awk -F'"' '/^version =/ { print $2; exit }' "$repo_root/platforms/shared/python/pyproject.toml")"
 version="${version:-0.1.0}"
 git_sha="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || echo unknown)"
-image_ref="koda-offline:$version"
 bundle_name="koda-linux-x86_64-$version"
 bundle_tar="$dist_dir/$bundle_name.tar.gz"
 package_name="koda-docker-offline-x86_64-$version"
@@ -69,6 +70,10 @@ if [ ! -f "$bundle_tar" ] || [ "$refresh" -eq 1 ]; then
   bash "$script_dir/package-offline.sh" ${refresh_flag[@]+"${refresh_flag[@]}"}
 fi
 [ -f "$bundle_tar" ] || fail "offline bundle not found: $bundle_tar"
+
+# The cached application must match the source revision used in image labels.
+python3 "$script_dir/docker/build_identity.py" verify-source --bundle "$bundle_tar" \
+  --root-name "$bundle_name" --source "$repo_root/platforms/shared/python/security_scanner"
 
 # read tool versions/data ranges from the bundle for OCI labels
 bundle_versions="$(tar -xzOf "$bundle_tar" "$bundle_name/versions.txt" 2>/dev/null || true)"
@@ -94,14 +99,21 @@ trap cleanup EXIT
 cp "$script_dir/docker/Dockerfile" "$build_context/Dockerfile"
 cp "$bundle_tar" "$build_context/$bundle_name.tar.gz"
 
-# 8. build linux/amd64 image (--load so docker save can find it)
+# 8. Assign one UTC identity immediately before the actual build.
+IFS=$'\t' read -r image_ref build_tag built_at git_sha worktree_dirty < <(
+  python3 "$script_dir/docker/build_identity.py" stamp --repo "$repo_root" --version "$version" \
+    --image "${KODA_DOCKER_IMAGE:-${KODA_IMAGE:-}}" --tag "${KODA_DOCKER_IMAGE_TAG:-}"
+)
+# Build linux/amd64 image (--load so docker save can find it).
 docker buildx build \
   --platform linux/amd64 \
   --load \
   --build-arg KODA_BUNDLE="$bundle_name.tar.gz" \
   --build-arg PYTHON_IMAGE="$python_image_digest" \
   --label "org.opencontainers.image.title=KODA offline scanner" \
-  --label "org.opencontainers.image.version=$version" \
+  --label "org.opencontainers.image.version=$build_tag" \
+  --label "org.opencontainers.image.created=$built_at" \
+  --label "io.koda.product.version=$version" \
   --label "org.opencontainers.image.revision=$git_sha" \
   --label "io.koda.syft.version=${syft_version:-unknown}" \
   --label "io.koda.grype.version=${grype_version:-unknown}" \
@@ -142,6 +154,8 @@ printf '%s\n' "$image_ref" > "$stage/image-ref.txt"
 {
   printf '%s\n' "$bundle_versions"
   echo "docker_image=$image_ref"
+  echo "docker_image_tag=$build_tag"
+  echo "docker_image_built_at=$built_at"
   echo "docker_base_image=$python_image_digest"
   echo "git_revision=$git_sha"
   echo "git_worktree_dirty=$worktree_dirty"

@@ -70,7 +70,7 @@ CLI의 `jar-scan`을 사용합니다.
 통합 압축파일 생성·검증·설치와 최초 관리자 지정은
 [KODA + KODA SBOM Tracker 폐쇄망 통합본](../../platforms/linux/suite/README.ko.md)을
 따릅니다. KODA 컨테이너의 8765 포트는 직접 공개하지 않습니다.
-설치·주소·로그인·Dependency-Track 오류는
+설치·주소·로그인 오류는
 [폐쇄망 설치 장애 대응서](../../platforms/linux/suite/TROUBLESHOOTING.ko.md)를
 따릅니다.
 

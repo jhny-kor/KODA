@@ -53,7 +53,6 @@ universal macOS builds/ARM execution and actual Linux amd64 container checks.
 - [Java SBOM and vulnerability scan](security/java-sbom-vulnerability-scan.en.md)
 - [Pre-commit security gate](security/PRE_COMMIT.md)
 - [GitHub repository security checklist](security/GITHUB_REPOSITORY_SECURITY.md)
-- [Dependency-Track SBOM upload](security/DEPENDENCY_TRACK.md)
 - [OWASP ZAP baseline](security/ZAP_BASELINE.md)
 - [Profile-driven 21-control web audit](security/WEB_AUDIT.md)
 - [CycloneDX VEX tracking](security/VEX.md)

@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+from functools import wraps
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,16 @@ class GrypeResult:
     fatal: bool
 
 
+def _with_approved_release(function):
+    @wraps(function)
+    def invoke(*args, **kwargs):
+        from .data_release import pinned_release
+        with pinned_release():
+            return function(*args, **kwargs)
+    return invoke
+
+
+@_with_approved_release
 def inspect_grype(binary: Path | None, timeout: float = 10.0) -> dict[str, object]:
     if binary is None:
         return {
@@ -58,9 +69,11 @@ def inspect_grype(binary: Path | None, timeout: float = 10.0) -> dict[str, objec
     }
 
 
+@_with_approved_release
 def run_grype(sbom_path: Path, binary: Path | None, timeout: float) -> GrypeResult:
     if binary is None:
-        return GrypeResult((), "", {}, "Grype is not configured; vulnerability comparison was not run.", False)
+        from .data_release import managed_data_required
+        return GrypeResult((), "", {"status": "unavailable"}, "Grype is not configured; vulnerability comparison was not run.", managed_data_required())
     validation = _validate_binary(binary)
     if validation:
         return GrypeResult((), "", {}, validation, True)
@@ -74,6 +87,7 @@ def run_grype(sbom_path: Path, binary: Path | None, timeout: float) -> GrypeResu
     return GrypeResult(tuple(matches), version, database, "; ".join(item for item in (version_warning, database_warning, warning) if item), False)
 
 
+@_with_approved_release
 def run_grype_purls(purls: tuple[str, ...], binary: Path | None, timeout: float) -> GrypeResult:
     """Scan a bounded set of package URLs using the existing local Grype DB.
 
@@ -183,14 +197,19 @@ def _validate_binary(binary: Path) -> str:
 
 
 def _run(binary: Path, arguments: tuple[str, ...], timeout: float) -> subprocess.CompletedProcess[str]:
+    from .data_release import data_unavailable_reason, grype_cache_dir, managed_data_required
+    reason = data_unavailable_reason()
+    cache_dir = grype_cache_dir()
+    if managed_data_required() and not reason:
+        if cache_dir is None or not cache_dir.is_dir() or not any(cache_dir.rglob("*.db")):
+            reason = "승인 릴리스에 Grype DB가 없어 CVE 점검을 수행할 수 없습니다."
+    if reason:
+        return subprocess.CompletedProcess([str(binary), *arguments], 125, "", reason)
     env = os.environ.copy()
     env["GRYPE_DB_AUTO_UPDATE"] = "false"
+    env["GRYPE_CHECK_FOR_APP_UPDATE"] = "false"
+    env["GRYPE_EXTERNAL_SOURCES_ENABLE"] = "false"
     env["GRYPE_DB_VALIDATE_AGE"] = "false"
-    try:
-        from .data_release import grype_cache_dir
-        cache_dir = grype_cache_dir()
-    except (ImportError, OSError):
-        cache_dir = None
     if cache_dir is not None:
         env["GRYPE_DB_CACHE_DIR"] = str(cache_dir)
     try:

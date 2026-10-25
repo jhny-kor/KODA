@@ -45,7 +45,7 @@ KISA Python 시큐어코딩 가이드는 언어별 참고자료입니다. 현재
 | OWASP SAMM 2 | 공식 5개 비즈니스 기능으로 수정 | Governance·Design·Implementation·Verification·Operations 증거를 표시하지만 15개 보안 관행이나 성숙도 점수는 판정하지 않음 |
 | OWASP SCVS | 공식 6개 통제군과 일치 | 공급망 저장소 증거와 선택형 SBOM/VEX 연동 범위만 확인 |
 | OWASP LLM Top 10:2025 | 공식 LLM01~LLM10과 일치 | LLM 관련 코드·설정 단서만 확인하며 모델·프롬프트의 실제 공격 검증은 별도 필요 |
-| Dependency-Check / Dependency-Track baseline | OWASP 프로젝트를 활용하기 위한 KODA 준비성 프로파일 | OWASP가 발행한 별도 준수 표준으로 주장하지 않음 |
+| Dependency-Check baseline | OWASP 프로젝트를 활용하기 위한 KODA 준비성 프로파일 | OWASP가 발행한 별도 준수 표준으로 주장하지 않음 |
 
 ### 소스 판정 방식
 

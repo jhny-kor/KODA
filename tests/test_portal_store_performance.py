@@ -87,6 +87,25 @@ class PortalStorePerformanceTests(unittest.TestCase):
             self.assertEqual(dashboard["severity_counts"]["high"], 1)
         self.assertLess(len(json.dumps(dashboard)), 5000)
 
+    def test_cardless_dashboard_preserves_historical_totals_without_project_queries(self):
+        self.create_run([{"severity": "critical"}])
+        self.create_run([{"severity": "high"}])
+        self.create_run(None)  # Queued runs still contribute to the total.
+        deleted = self.create_run([{"severity": "critical"}])
+        self.store.delete_run(deleted["run_id"], self.admin)
+        other = self.store.create_project("inaccessible", self.admin)
+        self.create_run([{"severity": "critical"}], project=other)
+        expected = self.store.dashboard_summary([self.project])
+        with self.reject_column("result_json"), \
+                patch.object(self.store, "project_summary", side_effect=AssertionError("card query")), \
+                patch.object(self.store, "run_summary", side_effect=AssertionError("card query")):
+            actual = self.store.dashboard_summary([self.project], include_projects=False)
+        self.assertEqual(actual, {**expected, "projects": []})
+        self.assertEqual(actual["total_runs"], 3)
+        self.assertEqual(actual["completed_runs"], 2)
+        self.assertEqual(actual["severity_counts"]["critical"], 1)
+        self.assertEqual(actual["severity_counts"]["high"], 1)
+
     def test_pagination_filters_before_limit_and_preserves_total(self):
         runs = [self.create_run([], scope=scope) for scope in ("source", "library", "source", "library", "source")]
         rows = self.store.paginate_runs([self.project], page=2, page_size=2, scan_scope="source", status="completed", source="manual")

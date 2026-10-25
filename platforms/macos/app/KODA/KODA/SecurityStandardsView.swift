@@ -335,7 +335,7 @@ enum AppLanguage: String, Hashable, Sendable {
         case .ko:
             return [
                 "자동 수정 마법사: 선택한 폴더의 누락된 예방 가드레일을 계산해 목록으로 보여줍니다. 새 파일 생성과 기존 파일 보수적 줄 추가를 구분해서 표시하므로, 운영 중인 프로젝트에서는 이 항목으로 변경 내용을 먼저 검토한 뒤 필요한 것만 적용합니다.",
-                "선택 폴더에 예방 설정 적용: 새 프로젝트나 보안 기준 파일이 거의 없는 폴더에 기본 예방 파일을 한 번에 생성합니다. SECURITY.md, Dependabot, KODA 보안 workflow, release provenance workflow, CODEOWNERS, .dockerignore, .env.example, pre-commit 안내, 저장소 보안 체크리스트, ZAP/Dependency-Track/VEX/SLSA/SSDF/Secure by Design 문서가 포함됩니다.",
+                "선택 폴더에 예방 설정 적용: 새 프로젝트나 보안 기준 파일이 거의 없는 폴더에 기본 예방 파일을 한 번에 생성합니다. SECURITY.md, Dependabot, KODA 보안 workflow, release provenance workflow, CODEOWNERS, .dockerignore, .env.example, pre-commit 안내, 저장소 보안 체크리스트, ZAP/VEX/SLSA/SSDF/Secure by Design 문서가 포함됩니다.",
                 "커밋 전 보안 차단 설치: Git 저장소의 .git/hooks/pre-commit에 KODA hook을 설치합니다. commit 직전에 앱 내장 스캐너가 로컬 점검을 실행하고, 기본적으로 high 이상 발견 항목이 있으면 commit을 막습니다. 차단 기준은 KODA_PRE_COMMIT_FAIL_ON으로 조정합니다.",
                 "SBOM 생성: 선택한 프로젝트의 의존성을 CycloneDX JSON으로 저장합니다. requirements, pyproject/poetry, Pipfile.lock, package-lock, yarn.lock, pnpm-lock 같은 lockfile 기반 의존성 목록을 릴리스 검토 자료로 남길 때 사용합니다.",
                 "OSV/CVE + KEV/EPSS 조회: 고정 버전이 있는 의존성을 OSV.dev로 조회하고, CVE가 있으면 CISA KEV와 FIRST EPSS 우선순위를 덧붙입니다. 네트워크 조회가 필요하므로 오프라인 기본 스캔과 분리되어 있습니다.",
@@ -366,7 +366,7 @@ enum AppLanguage: String, Hashable, Sendable {
         case .en:
             return [
                 "Auto-Fix Wizard: calculates missing prevention guardrails for selected folders and previews them as a selectable list. It separates new file creation from conservative line additions, so use it on existing projects when you want to review changes before applying them.",
-                "Apply Guardrails to Folders: creates the baseline prevention files at once for new or lightly configured projects. It includes SECURITY.md, Dependabot, KODA security workflow, release provenance workflow, CODEOWNERS, .dockerignore, .env.example, pre-commit guide, repository security checklist, and ZAP/Dependency-Track/VEX/SLSA/SSDF/Secure by Design documents.",
+                "Apply Guardrails to Folders: creates the baseline prevention files at once for new or lightly configured projects. It includes SECURITY.md, Dependabot, KODA security workflow, release provenance workflow, CODEOWNERS, .dockerignore, .env.example, pre-commit guide, repository security checklist, and ZAP/VEX/SLSA/SSDF/Secure by Design documents.",
                 "Install Pre-Commit Gate: writes a KODA hook to .git/hooks/pre-commit. Before commit, the built-in app scanner runs a local scan and blocks the commit when high-or-higher findings are present by default. Adjust the threshold with KODA_PRE_COMMIT_FAIL_ON.",
                 "Generate SBOM: saves project dependencies as CycloneDX JSON. Use it to keep release review material for requirements, pyproject/poetry, Pipfile.lock, package locks, yarn.lock, and pnpm-lock dependency sources.",
                 "Run OSV/CVE + KEV/EPSS: queries OSV.dev for exact-version dependencies and enriches CVEs with CISA KEV and FIRST EPSS priority when available. It requires network access, so it is separate from the offline default scan.",
@@ -1567,12 +1567,6 @@ private enum SecurityStandardLocalization {
             title: "OWASP Dependency-Check Baseline",
             subtitle: "Dependency hygiene baseline for identifying known vulnerable components.",
             scope: "Dependency manifests and lockfiles",
-            coverage: "External integration required"
-        ),
-        "owasp-dependency-track": StandardText(
-            title: "OWASP Dependency-Track / SBOM Baseline",
-            subtitle: "Checks local evidence for SBOM readiness, dependency tracking, and automation readiness.",
-            scope: "SBOM and supply-chain management",
             coverage: "External integration required"
         ),
         "openssf-scorecard-baseline": StandardText(
@@ -3030,7 +3024,7 @@ enum SecurityStandardCatalog {
                 category("v2-sbom", "V2 SBOM", "SBOM 산출물과 SBOM 분석 backend 연동 준비성을 확인합니다."),
                 category("v3-build", "V3 Build Environment", "CI token 권한, 고정된 Actions, 릴리스 provenance 준비성을 확인합니다."),
                 category("v4-package", "V4 Package Management", "lockfile, 버전 고정, 안전한 패키지 소스를 확인합니다."),
-                category("v5-analysis", "V5 Component Analysis", "OSV/CVE, VEX, Dependency-Track 인수인계 준비성을 확인합니다."),
+                category("v5-analysis", "V5 Component Analysis", "CVE, VEX 인수인계 준비성을 확인합니다."),
                 category("v6-provenance", "V6 Pedigree and Provenance", "SLSA/Sigstore, 체크섬, 서명, binary artifact 관리 상태를 확인합니다.")
             ],
             references: [
@@ -3054,25 +3048,6 @@ enum SecurityStandardCatalog {
             ],
             references: [
                 reference("OWASP Dependency-Check", "https://owasp.org/www-project-dependency-check/")
-            ]
-        ),
-        AppSecurityStandard(
-            id: "owasp-dependency-track",
-            title: "OWASP Dependency-Track / SBOM 기준",
-            subtitle: "SBOM 준비성과 의존성 추적을 위한 로컬 증거를 확인합니다.",
-            scope: "SBOM 및 공급망 관리",
-            coverage: "외부 연동 필요",
-            badge: "공급망",
-            icon: "doc.zipper",
-            accent: .orange,
-            categories: [
-                category("sbom-readiness", "SBOM 준비성", "매니페스트, 락파일, SBOM 산출물 존재 여부를 확인합니다."),
-                category("version-hygiene", "버전 위생", "고정되지 않은 의존성과 wildcard를 확인합니다."),
-                category("dependency-source", "의존성 소스", "안전하지 않은 다운로드와 원격 실행 패턴을 확인합니다."),
-                category("automation", "자동화 준비성", "Dependabot/Renovate와 CI 보안 점검 workflow를 확인합니다.")
-            ],
-            references: [
-                reference("OWASP Dependency-Track", "https://owasp.org/www-project-dependency-track/")
             ]
         ),
         AppSecurityStandard(
@@ -3110,7 +3085,7 @@ enum SecurityStandardCatalog {
                 category("known-exploited", "실제 악용 취약점", "CISA KEV에 등록된 CVE를 최우선으로 표시합니다."),
                 category("exploit-probability", "악용 가능성", "FIRST EPSS 확률과 percentile을 근거로 우선순위를 높입니다."),
                 category("vex-response", "VEX 대응 추적", "검토된 CVE의 VEX 문서화 준비성을 확인합니다."),
-                category("sbom-tracking", "SBOM 추적", "SBOM과 Dependency-Track 연동 준비성을 확인합니다.")
+                category("sbom-tracking", "SBOM 추적", "SBOM 산출물 준비성을 확인합니다.")
             ],
             references: [
                 reference("CISA KEV Catalog", "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"),

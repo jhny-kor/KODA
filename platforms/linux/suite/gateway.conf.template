@@ -154,6 +154,19 @@ server {
         return 503 '{"detail":"authentication service unavailable"}';
     }
 
+    location = /api/v1/vulnerability-intelligence/import-csv {
+        client_max_body_size 65m;
+        proxy_request_buffering off;
+        proxy_set_header Host $host;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_pass http://${PORTAL_API_UPSTREAM}/api/v1/vulnerability-intelligence/import-csv;
+    }
+
     location /api/ {
         proxy_set_header Host $host;
         proxy_set_header Forwarded "";
@@ -163,28 +176,6 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_pass http://${PORTAL_API_UPSTREAM}/api/;
-    }
-    location = /dependency-track { return 308 /dependency-track/; }
-    location /dependency-track/api/ {
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_pass http://${DTRACK_APISERVER_UPSTREAM}/api/;
-    }
-    location = /dependency-track/static/config.json {
-        proxy_hide_header Cache-Control;
-        add_header Cache-Control "no-store" always;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Prefix ${DTRACK_BASE_PATH};
-        proxy_pass http://${DTRACK_FRONTEND_UPSTREAM}/static/config.json;
-    }
-    location /dependency-track/ {
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Prefix ${DTRACK_BASE_PATH};
-        # The frontend serves /static/config.json at its container root.
-        # Strip the public prefix before proxying or this path returns 404.
-        proxy_pass http://${DTRACK_FRONTEND_UPSTREAM}/;
     }
     location / {
         proxy_set_header Host $host;

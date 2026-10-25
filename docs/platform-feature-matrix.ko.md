@@ -97,7 +97,6 @@
 | 결과 — 항목별 신규·해결·유지 비교 | X | O | O |
 | 결과 — SBOM·VEX·발견·체크리스트·checksum 릴리스 패키지 | O | O | O |
 | 결과 — 배포 파일 SHA-256 manifest 생성·비교 | X | O | O |
-| 연동 — Dependency-Track 업로드 명령 생성·SBOM 전송 | X | O | O |
 | AI — 선택적 발견 항목 설명·오탐/위험 검토 | O | O | O |
 | AI — 조치·수정 방향 제안 | O | O | O |
 | AI — 점검 결과의 AI 요약·설명 보고서 | O | O | O |
@@ -137,7 +136,7 @@
 | 운영 — Python 별도 설치가 필요 없는 데스크톱 번들 | O | O | X |
 | 운영 — Windows EXE·Inno Setup 설치본 빌드 | X | O | X |
 | 운영 — Linux x86_64 오프라인 설치·Docker/Suite 패키지 | X | X | O |
-| 운영 — KODA·Tracker·Dependency-Track 통합 gateway | X | X | O |
+| 운영 — KODA·Tracker 통합 gateway | X | X | O |
 | 운영 — Docker CPU·메모리·PID·네트워크·읽기 전용 제한 | X | X | O |
 | 운영 — Suite 사전 점검·백업·업데이트·롤백 스크립트 | X | X | O |
 

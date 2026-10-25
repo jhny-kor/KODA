@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Linux distribution runs on imported data; old config flags cannot enable OSV.
+export KODA_OFFLINE_MODE="${KODA_OFFLINE_MODE:-1}"
+export KODA_EXCLUDE_OSV=1
+export KODA_REQUIRE_MANAGED_DATA=1
+export KODA_VULN_DATA_ROOT="${KODA_VULN_DATA_ROOT:-/var/lib/koda-vuln-data}"
+export GRYPE_DB_AUTO_UPDATE=false
+export GRYPE_CHECK_FOR_APP_UPDATE=false
+export GRYPE_EXTERNAL_SOURCES_ENABLE=false
+
 select_python() {
   if [ -n "${KODA_PYTHON:-}" ]; then
     printf '%s\n' "$KODA_PYTHON"
@@ -50,17 +59,7 @@ fi
 if [ -x "$bundle_root/tools/grype" ]; then
   export KODA_GRYPE_BIN="${KODA_GRYPE_BIN:-$bundle_root/tools/grype}"
 fi
-if [ -d "$bundle_root/grype-db/db" ]; then
-  export GRYPE_DB_CACHE_DIR="${GRYPE_DB_CACHE_DIR:-$bundle_root/grype-db/db}"
-  export GRYPE_DB_AUTO_UPDATE="${GRYPE_DB_AUTO_UPDATE:-false}"
-  export GRYPE_DB_VALIDATE_AGE="${GRYPE_DB_VALIDATE_AGE:-false}"
-fi
-if [ -d "$bundle_root/vuln-data/nvd" ]; then
-  export KODA_NVD_DATA="${KODA_NVD_DATA:-$bundle_root/vuln-data/nvd}"
-fi
-if [ -f "$bundle_root/vuln-data/known_exploited_vulnerabilities.json" ]; then
-  export KODA_CISA_KEV="${KODA_CISA_KEV:-$bundle_root/vuln-data/known_exploited_vulnerabilities.json}"
-fi
+# Approved current release is the only CVE source; packaged legacy feeds are not selected.
 if [ -d "$bundle_root/app/security_scanner" ]; then
   app_root="$bundle_root/app"
 elif [ -d "$bundle_root/../security_scanner" ]; then

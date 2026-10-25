@@ -57,7 +57,7 @@ establish availability in the Mac App Store app.
 ## Server and external integrations
 
 Uploaded projects and server reports reside in the configured portal storage.
-GitLab, Tracker, Dependency-Track, and SBOM upload integrations can send project,
+GitLab, Tracker, and SBOM upload integrations can send project,
 component, or finding data to the configured systems. Online web and ZAP checks
 contact their authorized targets. Operators control those endpoints, storage
 access, and retention; local-app privacy claims do not imply that server data

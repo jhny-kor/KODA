@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from .data_release import approved_data_read
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,11 +34,18 @@ class OfflineVulnerabilityData:
         return any(source.status == "loaded" and source.metadata.get("name") == name for source in self.sources)
 
 
+@approved_data_read
 def load_offline_data(
     nvd_source: Path | None,
     cisa_source: Path | None,
     cve_ids: Iterable[str],
 ) -> OfflineVulnerabilityData:
+    from .data_release import managed_data_required, vulnerability_paths, data_unavailable_reason
+    if managed_data_required():
+        nvd_source, cisa_source = vulnerability_paths()
+        unavailable = data_unavailable_reason()
+        if unavailable:
+            return OfflineVulnerabilityData({}, {}, (), "unknown", (unavailable,), True)
     requested = {value.upper() for value in cve_ids}
     warnings: list[str] = []
     sources: list[DataSource] = []
@@ -60,6 +68,8 @@ def _load_nvd(
     source: Path | None,
     requested: set[str],
     warnings: list[str],
+    *,
+    cpe_products: set[tuple[str, str, str]] | None = None,
 ) -> tuple[dict[str, dict[str, object]], DataSource, tuple[str, ...], bool]:
     if source is None:
         return {}, _not_provided("nvd"), (), False
@@ -69,10 +79,11 @@ def _load_nvd(
         return {}, _source_info(source, "invalid", {"name": "nvd"}), (), True
     records: dict[str, dict[str, object]] = {}
     dates: list[str] = []
+    applicability_records = details_only = 0
     try:
         for path in files:
             payload = _read_json(path)
-            dates.extend(_date_values(payload, ("lastModifiedDate", "lastModified")))
+            dates.extend(_date_values(payload, ("lastModifiedDate", "lastModified", "timestamp")))
             vulnerabilities = payload.get("vulnerabilities", payload.get("CVE_Items", []))
             if isinstance(vulnerabilities, dict):
                 # Tracker's compact offline index stores CVE records by ID.
@@ -84,15 +95,52 @@ def _load_nvd(
                 if not isinstance(cve, dict):
                     continue
                 cve = _normalize_nvd_record(cve)
+                if cve.get("configurations"):
+                    applicability_records += 1
+                else:
+                    details_only += 1
                 metadata = cve.get("CVE_data_meta")
                 legacy_id = metadata.get("ID", "") if isinstance(metadata, dict) else ""
                 cve_id = str(cve.get("id", legacy_id)).upper()
-                if cve_id in requested:
+                is_candidate = False
+                if cpe_products:
+                    from .offline_cpe import GLOBAL_PRODUCT, candidate_index
+                    products = candidate_index({cve_id: cve})
+                    is_candidate = GLOBAL_PRODUCT in products or bool(cpe_products.intersection(products))
+                if cve_id in requested or is_candidate:
                     records[cve_id] = cve
     except (OSError, EOFError, json.JSONDecodeError, UnicodeDecodeError, AttributeError, TypeError, ValueError) as exc:
         warnings.append(f"Could not load NVD data {source}: {exc}")
         return records, _source_info(source, "invalid", {"name": "nvd"}), tuple(dates), True
-    return records, _source_info(source, "loaded", {"name": "nvd"}), tuple(dates), False
+    return records, _source_info(source, "loaded", {"name": "nvd", "applicabilityRecords": applicability_records,
+                                                   "legacyDetailsOnly": details_only}), tuple(dates), False
+
+
+@approved_data_read
+def load_offline_cpe_data(nvd_source: Path | None, cisa_source: Path | None, cpes: Iterable[str]) -> OfflineVulnerabilityData:
+    """Read local NVD applicability candidates for reviewed CPE identities.
+
+    Full feeds and new compact indexes work. Old compact display-only CPE lists
+    are never synthesized into an applicability tree.
+    """
+    from .data_release import managed_data_required, vulnerability_paths, data_unavailable_reason
+    if managed_data_required():
+        nvd_source, cisa_source = vulnerability_paths()
+        unavailable = data_unavailable_reason()
+        if unavailable:
+            return OfflineVulnerabilityData({}, {}, (), "unknown", (unavailable,), True)
+    from .offline_cpe import product_key
+    warnings: list[str] = []
+    products = set()
+    for cpe in cpes:
+        try:
+            products.add(product_key(cpe))
+        except (TypeError, ValueError):
+            warnings.append("Invalid or ambiguous CPE 2.3 identity was not evaluated")
+    nvd, nvd_info, nvd_dates, nvd_fatal = _load_nvd(nvd_source, set(), warnings, cpe_products=products)
+    kev, kev_info, kev_dates, kev_fatal = _load_kev(cisa_source, set(nvd), warnings)
+    dates = sorted(value for value in (*nvd_dates, *kev_dates) if value)
+    return OfflineVulnerabilityData(nvd, kev, (nvd_info, kev_info), dates[-1] if dates else "unknown", tuple(warnings), nvd_fatal or kev_fatal)
 
 
 def _normalize_nvd_record(record: dict[str, object]) -> dict[str, object]:

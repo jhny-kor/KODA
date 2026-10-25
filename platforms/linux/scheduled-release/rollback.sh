@@ -36,6 +36,9 @@ for relative in tracker/compose.yaml tracker/compose.airgap.yaml tracker/compose
   install -m 0644 "$backup/$relative" "$prefix/$relative"
 done
 chmod 600 "$prefix/tracker/.env"
+if [[ -f "$backup/koda-image-ref.previous" ]]; then
+  install -m 0644 "$backup/koda-image-ref.previous" "$prefix/koda/image-ref.txt"
+fi
 if [[ -d "$backup/tracker/gateway" ]]; then
   cp -a "$backup/tracker/gateway/." "$prefix/tracker/gateway/"
 fi

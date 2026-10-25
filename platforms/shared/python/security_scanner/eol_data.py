@@ -46,6 +46,22 @@ def query_cycle_eol(
 
     if not product or not cycle:
         return None, []
+    # Prefer the approved local snapshot in every mode, before constructing URLs.
+    from .intelligence_enrichment import load_document, records
+    from .network_policy import offline_mode
+    local, local_status, local_error = load_document()
+    if local is not None:
+        matches = [(row, source) for row, source in records(local, "lifecycle")
+                   if row.get("product") == product and row.get("cycle") == cycle]
+        if matches:
+            row, source = matches[-1]
+            result = _result_from_payload(product, cycle, {"eol": row.get("eolDate") or row.get("isEol"),
+                                                          "latest": row.get("latestVersion")}, today or date.today())
+            if source.get("status") != "fresh":
+                return EolResult(product, cycle, result.eol_date, result.latest, result.is_eol, True), ["반입한 지원 종료 자료가 오래되었거나 기준일을 확인할 수 없습니다."]
+            return result, []
+    if offline_mode():
+        return None, [local_error or f"반입 자료에 {product}/{cycle} 지원 종료 정보가 없습니다 ({local_status})."]
     url = ENDOFLIFE_CYCLE_URL.format(product=urllib_quote(product), cycle=urllib_quote(cycle))
     try:
         payload = _fetch(url, timeout_seconds)
@@ -82,6 +98,8 @@ def _parse_date(value: str) -> date | None:
 
 
 def _fetch(url: str, timeout_seconds: float) -> object:
+    from .network_policy import require_online
+    require_online("endoflife.date")
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname != "endoflife.date":
         raise ValueError("unexpected endoflife.date URL")

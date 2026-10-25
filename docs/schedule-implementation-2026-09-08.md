@@ -54,7 +54,7 @@ SSH 목록/전송 제한·제외·속도·설정 저장·Linux 프로세스 종�
 | 마지막 대기 중 정책 변경 보완 후 API·설정·worker·게시 테스트 | 36개 통과 |
 | Linux amd64: API·전송·프로세스 제한 (`--network none --cpus 1 --memory 4g --read-only`) | 24개 통과 |
 | Docker/Suite 가짜 Docker 실행 회귀 | 19개 통과, 실행 중 포털 보존·worker 마운트 및 전용 SSH 네트워크 검증 |
-| Tracker 전체 백엔드 (`uv run --project apps/api pytest -vv`) | 80개 통과, 외부 Dependency-Track live integration 1개 skip |
+| Tracker 전체 백엔드 (`uv run --project apps/api pytest -vv`) | 80개 통과(당시 검증 기록) |
 | Tracker 예약/RBAC/API 집중 테스트 | 32개 통과 |
 | Tracker 웹 전체 테스트 및 빌드 | 29개 통과, production build 성공 |
 | Python 구문 검사·쉘 `bash -n`·`git diff --check` | 통과 |

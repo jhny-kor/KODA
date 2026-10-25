@@ -76,8 +76,9 @@ allowed_suite_keys = {
     "KODA_PUBLISH_DASHBOARD", "KODA_DASHBOARD_NETWORK",
     "KODA_PORTAL_UPSTREAM", "TRACKER_SESSION_UPSTREAM",
     "TRACKER_ENVIRONMENT", "TRACKER_PUBLIC_ORIGIN", "GATEWAY_PUBLIC_SCHEME",
-    "DTRACK_API_BASE_URL", "DTRACK_ADMIN_API_BASE_URL", "DTRACK_BASE_PATH",
-    "TRACKER_DEPENDENCY_TRACK_UI_URL", "APP_NETWORK_SUBNET", "GATEWAY_APP_IP",
+    "TRACKER_OFFLINE_MODE",
+    "TRACKER_PACKAGE_METADATA_ENABLED", "TRACKER_EPSS_POLICY_MAX_AGE_DAYS",
+    "APP_NETWORK_SUBNET", "GATEWAY_APP_IP",
     "TRACKER_TRUSTED_PROXY_CIDRS", "KODA_SSBOM_TRACKER_URL", "KODA_GITLAB_URL",
     "KODA_GITLAB_TOKEN_FILE", "KODA_GITLAB_WRITE_TOKEN_FILE", "KODA_GITLAB_CA_FILE", "KODA_GITLAB_NETWORK",
     "KODA_TRACKER_URL", "KODA_TRACKER_TOKEN_DIR", "KODA_TRACKER_CA_FILE", "KODA_CPUS",
@@ -113,6 +114,8 @@ def read_env(path):
 base, order = read_env(base_path)
 suite, suite_order = read_env(suite_path)
 for key in suite_order:
+    if key.startswith(("DTRACK_", "TRACKER_DEPENDENCY_TRACK_", "DEPENDENCY_TRACK_", "KODA_INCLUDE_DEPENDENCY_TRACK")):
+        continue  # Retired settings are not reapplied.
     if key not in allowed_suite_keys:
         if key in base and suite[key] == base[key]:
             continue  # Accept unchanged keys from the previous combined env format.
@@ -126,7 +129,7 @@ for key in suite_order:
 if not re.fullmatch(r"koda-sbom(?:[-_][a-z0-9][a-z0-9_-]*)?", base.get("COMPOSE_PROJECT_NAME", "")):
     raise SystemExit("COMPOSE_PROJECT_NAME must be koda-sbom or a koda-sbom-* name")
 
-output_path.write_text("".join(f"{key}={base[key]}\n" for key in order), encoding="utf-8")
+output_path.write_text("".join(f"{key}={base[key]}\n" for key in order if not key.startswith(("DTRACK_", "TRACKER_DEPENDENCY_TRACK_", "DEPENDENCY_TRACK_", "KODA_INCLUDE_DEPENDENCY_TRACK"))), encoding="utf-8")
 PY
 
 env_value() {
@@ -156,7 +159,6 @@ old_project="$(env_value "$old_env" COMPOSE_PROJECT_NAME koda-sbom)"
 
 volume_specs=(
   "POSTGRES_DATA_VOLUME_NAME:koda-sbom-postgres-data"
-  "DTRACK_DATA_VOLUME_NAME:koda-sbom-dtrack-data"
   "TRACKER_ARTIFACTS_VOLUME_NAME:koda-sbom-tracker-artifacts"
   "VULN_DATA_VOLUME_NAME:koda-sbom-vuln-data"
   "BACKUP_VOLUME_NAME:koda-sbom-backups"
@@ -171,7 +173,7 @@ for spec in "${volume_specs[@]}"; do
   volumes+=("$volume")
 done
 
-compose_services=(gateway portal-web portal-api portal-worker postgres dtrack-apiserver dtrack-frontend)
+compose_services=(gateway portal-web portal-api portal-worker postgres)
 for service in "${compose_services[@]}"; do
   container="${project}-${service}"
   docker container inspect "$container" >/dev/null 2>&1 || continue
@@ -208,6 +210,8 @@ for volume in "${volumes[@]}"; do
   owner="$(docker volume inspect -f '{{index .Labels "com.docker.compose.project"}}' "$volume")"
   [[ "$owner" == "$project" ]] || fail "refusing to delete foreign volume: $volume"
 done
+
+python3 "$script_dir/retired-analysis-cleanup.py" --env-file "$old_env" --phase resources
 
 echo "WARNING: no backup will be created. Deleting KODA Suite project '$project' and prefix '$prefix'."
 
@@ -259,6 +263,7 @@ done
 "$script_dir/koda-suite" install --env-file "$merged_env" --prefix "$prefix"
 install -m 0600 "$script_dir/.env" "$prefix/.env"
 install -m 0600 "$script_dir/koda-suite.env" "$prefix/koda-suite.env"
+python3 "$script_dir/retired-analysis-cleanup.py" --env-file "$merged_env" --install-dir "$prefix" --phase files
 
 subnet="$(env_value "$merged_env" APP_NETWORK_SUBNET 172.30.80.0/24)"
 gateway_ip="$(env_value "$merged_env" GATEWAY_APP_IP 172.30.80.10)"

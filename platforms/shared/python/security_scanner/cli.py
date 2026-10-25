@@ -37,6 +37,70 @@ def main(argv: list[str] | None = None) -> int:
             print(category)
         return 0
 
+    if args.command == "cpe-scan":
+        from .cpe_lookup import query_offline_cpe_vulnerabilities
+        from .data_release import pinned_release, vulnerability_paths
+
+        try:
+            cpes = list(args.cpe)
+            sbom_components = []
+            if args.sbom:
+                source = expand_path(args.sbom, Path.cwd())
+                if source.stat().st_size > 50 * 1024 * 1024:
+                    raise ValueError("CPE SBOM exceeds 50 MiB limit")
+                document = json.loads(source.read_text(encoding="utf-8"))
+                if isinstance(document, dict) and "spdxVersion" in document:
+                    from .spdx_input import to_cyclonedx
+                    document = to_cyclonedx(document)
+                if not isinstance(document, dict) or document.get("bomFormat") != "CycloneDX" or not isinstance(document.get("components", []), list):
+                    raise ValueError("CycloneDX or SPDX 2.3 JSON SBOM required")
+                stack = [(component, 0) for component in document.get("components", [])]
+                root_component = (document.get("metadata") or {}).get("component")
+                if root_component:
+                    stack.append((root_component, 0))
+                seen = 0
+                while stack:
+                    component, depth = stack.pop()
+                    seen += 1
+                    if seen > 50000 or depth > 64 or not isinstance(component, dict):
+                        raise ValueError("Invalid or excessive SBOM component tree")
+                    sbom_components.append({key: value for key, value in component.items() if key != "components"})
+                    if component.get("cpe"):
+                        if not isinstance(component["cpe"], str):
+                            raise ValueError("SBOM CPE must be a string")
+                        cpes.append(component["cpe"])
+                    children = component.get("components", [])
+                    if not isinstance(children, list):
+                        raise ValueError("SBOM nested components must be a list")
+                    stack.extend((child, depth + 1) for child in children)
+            with pinned_release():
+                default_nvd, default_kev = vulnerability_paths()
+                nvd = expand_path(args.nvd_data, Path.cwd()) if args.nvd_data else default_nvd
+                kev = expand_path(args.cisa_kev, Path.cwd()) if args.cisa_kev else default_kev if default_kev and default_kev.is_file() else None
+                findings, warnings, coverage = query_offline_cpe_vulnerabilities(cpes, nvd_source=nvd, cisa_source=kev)
+                from .offline_epss import enrich_records
+                findings = enrich_records(findings)
+                from .intelligence_enrichment import enrich_records as enrich_intelligence
+                findings = enrich_intelligence(findings, components=sbom_components)
+                component_evidence = enrich_intelligence(sbom_components)
+                from .intelligence_enrichment import snapshot_summary
+                intelligence_summary = snapshot_summary()
+            result = {"format": "koda-offline-cpe-report-v1", "findings": findings, "warnings": warnings, "coverage": coverage,
+                      "offline_intelligence": intelligence_summary, "components": component_evidence}
+            output = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+            if args.output:
+                destination = expand_path(args.output, Path.cwd())
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(output, encoding="utf-8")
+            else:
+                print(output, end="")
+            if coverage["status"] != "completed":
+                return 2
+            return 1 if findings else 0
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError) as exc:
+            print(f"Offline CPE scan error: {exc}", file=sys.stderr)
+            return 2
+
     if args.command == "jar-scan":
         from .java_vulnerability_scan import JavaScanOptions, run_java_scan
 
@@ -486,44 +550,6 @@ def main(argv: list[str] | None = None) -> int:
         print(json_dumps(manifest))
         return 0
 
-    if args.command == "dependency-track-command":
-        from .integrations import dependency_track_upload_command
-
-        try:
-            print(
-                dependency_track_upload_command(
-                    server_url=args.server_url,
-                    project_name=args.project_name,
-                    project_version=args.project_version,
-                    sbom_path=args.sbom,
-                    api_key_env=args.api_key_env,
-                    auto_create=args.auto_create,
-                )
-            )
-        except ValueError as exc:
-            print(f"Dependency-Track command error: {exc}", file=sys.stderr)
-            return 2
-        return 0
-
-    if args.command == "upload-sbom":
-        from .integrations import api_key_from_env, upload_sbom_to_dependency_track
-
-        try:
-            api_key = args.api_key or api_key_from_env(args.api_key_env)
-            payload = upload_sbom_to_dependency_track(
-                server_url=args.server_url,
-                api_key=api_key,
-                project_name=args.project_name,
-                project_version=args.project_version,
-                sbom_path=expand_path(args.sbom, Path.cwd()),
-                auto_create=args.auto_create,
-            )
-        except (RuntimeError, ValueError, OSError) as exc:
-            print(f"Dependency-Track upload error: {exc}", file=sys.stderr)
-            return 2
-        print(json_dumps(payload))
-        return 0
-
     if args.command == "host-scan":
         report = ReportConfig(
             format=args.format or "markdown",
@@ -920,6 +946,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
 
+    cpe_scan = subparsers.add_parser("cpe-scan", help="evaluate supplied CPE 2.3 identities against local NVD conditions; no network")
+    cpe_scan.add_argument("--cpe", action="append", default=[], help="reviewed CPE 2.3 identity; repeatable")
+    cpe_scan.add_argument("--sbom", help="CycloneDX or SPDX 2.3 JSON SBOM with explicit CPE identities")
+    cpe_scan.add_argument("--nvd-data", help="local NVD JSON/JSON.gz file or directory; defaults to the active data release")
+    cpe_scan.add_argument("--cisa-kev", help="optional local CISA KEV JSON")
+    cpe_scan.add_argument("--output", help="write JSON report; otherwise stdout. Exit 0=completed no match, 1=affected, 2=incomplete/error")
+
     scan = subparsers.add_parser(
         "scan",
         help="scan configured local project folders",
@@ -952,7 +985,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--standard-category",
         help="optional category within --standard (for example sw-dev-security-49/input-validation-expression)",
     )
-    scan.add_argument("--format", choices=("markdown", "json", "html", "sarif", "cyclonedx", "nis-sbom", "cyclonedx-vex"), help="report format")
+    scan.add_argument("--format", choices=("markdown", "json", "html", "sarif", "cyclonedx", "spdx", "nis-sbom", "cyclonedx-vex"), help="report format")
     scan.add_argument("--output", type=Path, help="report output path")
     scan.add_argument("--language", choices=("ko",), default="ko", help="report language (Korean only)")
     scan.add_argument("--min-severity", choices=SEVERITIES, help="minimum severity to include")
@@ -1046,7 +1079,7 @@ def build_parser() -> argparse.ArgumentParser:
     jar_scan.add_argument("--fail-on-kev", action="store_true", help="exit 1 when a CISA KEV match exists")
     jar_scan.add_argument("--no-grype", action="store_true", help="write SBOM and skip vulnerability comparison")
     jar_scan.add_argument("--builtin-only", action="store_true", help="skip Syft and use the built-in Java identifier")
-    jar_scan.add_argument("--sbom-format", choices=("cyclonedx-1.6", "nis-1.0"), default="cyclonedx-1.6", help="SBOM output: CycloneDX 1.6 JSON or NIS-SBOM 1.0 CSV")
+    jar_scan.add_argument("--sbom-format", choices=("cyclonedx-1.6", "spdx-2.3", "nis-1.0"), default="cyclonedx-1.6", help="SBOM output: CycloneDX 1.6 JSON, SPDX 2.3 JSON or NIS-SBOM 1.0 CSV")
     jar_scan.add_argument("--verify-sbom", action="store_true", help="compare the generated SBOM with deployed archives")
     jar_scan.add_argument("--baseline-sbom", help="approved baseline CycloneDX SBOM")
     jar_scan.add_argument("--fail-on-mismatch", action="store_true", help="with --verify-sbom, exit 1 for any mismatch")
@@ -1383,23 +1416,6 @@ def build_parser() -> argparse.ArgumentParser:
     release_package.add_argument("--project-name", default="", help="project name")
     release_package.add_argument("--language", choices=("en", "ko"), default="ko", help="package language")
     release_package.add_argument("--enable-vuln-intel", action="store_true", help="query OSV/CVE and KEV/EPSS while building package")
-
-    dependency_track_command = subparsers.add_parser("dependency-track-command", help="print a Dependency-Track SBOM upload curl command")
-    dependency_track_command.add_argument("--server-url", required=True, help="Dependency-Track backend URL")
-    dependency_track_command.add_argument("--project-name", required=True, help="Dependency-Track project name")
-    dependency_track_command.add_argument("--project-version", default="main", help="Dependency-Track project version")
-    dependency_track_command.add_argument("--sbom", default="reports/sbom.cdx.json", help="CycloneDX SBOM path")
-    dependency_track_command.add_argument("--api-key-env", default="DEPENDENCY_TRACK_API_KEY", help="environment variable used in the generated command")
-    dependency_track_command.add_argument("--auto-create", action=argparse.BooleanOptionalAction, default=True, help="allow project auto-creation")
-
-    upload_sbom = subparsers.add_parser("upload-sbom", help="upload a CycloneDX SBOM to Dependency-Track")
-    upload_sbom.add_argument("--server-url", required=True, help="Dependency-Track backend URL")
-    upload_sbom.add_argument("--project-name", required=True, help="Dependency-Track project name")
-    upload_sbom.add_argument("--project-version", default="main", help="Dependency-Track project version")
-    upload_sbom.add_argument("--sbom", required=True, help="CycloneDX SBOM path")
-    upload_sbom.add_argument("--api-key", default="", help="Dependency-Track API key; prefer --api-key-env for shell history safety")
-    upload_sbom.add_argument("--api-key-env", default="DEPENDENCY_TRACK_API_KEY", help="environment variable containing the API key")
-    upload_sbom.add_argument("--auto-create", action=argparse.BooleanOptionalAction, default=True, help="allow project auto-creation")
 
     subparsers.add_parser("list-categories", help="show available check categories")
     return parser

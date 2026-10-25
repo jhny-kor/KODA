@@ -20,7 +20,7 @@ CONTRACT_KEYS = (
 )
 SERVICES = (
     "portal-web", "portal-api", "portal-worker", "postgres", "gateway",
-    "dtrack-apiserver", "dtrack-frontend",
+    "portal-data-updater", "portal-metadata-collector",
 )
 APP_SERVICES = set(SERVICES) - {"postgres"}
 ALLOWED_BIND_DESTINATIONS = (
@@ -30,6 +30,29 @@ ALLOWED_BIND_DESTINATIONS = (
 
 class PreflightError(RuntimeError):
     pass
+
+
+def check_dashboard_mount(mount: dict, prefix: Path) -> None:
+    destination = str(mount.get("Destination", ""))
+    if destination == "/var/lib/koda-vuln-data":
+        if mount.get("Type") != "volume" or mount.get("RW") is not False:
+            raise PreflightError("KODA vulnerability data mount must be a read-only volume")
+        return
+    if destination in ("/run/koda/ssh", "/run/koda/schedule"):
+        source = Path(str(mount.get("Source", "")))
+        if mount.get("Type") != "bind" or mount.get("RW") is not False or not source.is_dir():
+            raise PreflightError(f"schedule mount must be an existing read-only bind directory: {destination}")
+        if destination == "/run/koda/schedule" and source.resolve() != (prefix / "data/koda-portal/schedule-auth").resolve():
+            raise PreflightError("unexpected schedule authentication mount source")
+        return
+    if destination != "/var/lib/koda" and not any(
+        destination == allowed.rstrip("/") or destination.startswith(allowed.rstrip("/") + "/")
+        for allowed in ("/run/secrets", "/run/koda/tracker-tokens")
+    ):
+        raise PreflightError("unexpected KODA mount; inspect custom runtime before patch")
+    if mount.get("Type") == "bind" and not Path(str(mount.get("Source", ""))).exists():
+        raise PreflightError("KODA bind mount source is missing")
+
 
 
 def command(args: list[str], *, input_text: str | None = None) -> str:
@@ -60,7 +83,7 @@ def same_file(expected: Path, installed: Path) -> None:
     if not expected.is_file() or not installed.is_file():
         raise PreflightError(f"required contract file is missing: {installed}")
     if hashlib.sha256(expected.read_bytes()).digest() != hashlib.sha256(installed.read_bytes()).digest():
-        raise PreflightError(f"installed contract differs: {installed.name}")
+        raise PreflightError(f"installed contract differs: {installed.name}; use a full installation")
 
 
 def compose_base(contract: Path, prefix: Path) -> list[str]:
@@ -128,6 +151,11 @@ def check_backend_hashes(contract: Path, containers: dict[str, str]) -> None:
             raise PreflightError(f"{service} backend source differs")
 
 
+def require_native_services(services: dict) -> None:
+    if set(services) != set(SERVICES):
+        raise PreflightError("native-only service contract required; use a full installation before applying this patch")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="KODA Suite patch read-only preflight")
     parser.add_argument("--prefix", required=True, type=Path)
@@ -154,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     rendered = json.loads(command(compose_base(contract, prefix) + ["config", "--format", "json"]))
     project = rendered.get("name") or installed_meta.get("COMPOSE_PROJECT_NAME", "koda-sbom")
     services = rendered.get("services", {})
+    require_native_services(services)
     refs = {service: services.get(service, {}).get("image", "") for service in APP_SERVICES}
     if any(not ref for ref in refs.values()) or "@sha256:" in refs["portal-web"]:
         raise PreflightError("application image reference is missing or digest-pinned")
@@ -198,14 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     if not (prefix / "data" / "koda-portal").exists():
         raise PreflightError("KODA portal data directory is missing")
     for mount in mounts:
-        destination = str(mount.get("Destination", ""))
-        if destination != "/var/lib/koda" and not any(
-            destination == allowed.rstrip("/") or destination.startswith(allowed.rstrip("/") + "/")
-            for allowed in ("/run/secrets", "/run/koda/tracker-tokens")
-        ):
-            raise PreflightError("unexpected KODA mount; inspect custom runtime before patch")
-        if mount.get("Type") == "bind" and not Path(str(mount.get("Source", ""))).exists():
-            raise PreflightError("KODA bind mount source is missing")
+        check_dashboard_mount(mount, prefix)
     check_backend_hashes(contract, containers)
     print(f"prefix={prefix}")
     print(f"project={project}")

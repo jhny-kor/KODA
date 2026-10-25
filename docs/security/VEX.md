@@ -1,6 +1,6 @@
 # VEX Tracking
 
-Use VEX to record reviewed dependency vulnerabilities after OSV, Dependency-Track, or another advisory source reports a CVE.
+Use VEX to record reviewed dependency vulnerabilities after Grype, NVD, or another advisory source reports a CVE.
 
 Generate KODA's CycloneDX VEX draft from exact-version OSV findings with:
 

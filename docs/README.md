@@ -41,7 +41,7 @@ Windows Full/SourceOnly, Linux 호스트/Docker의 차이와 선택 도구 조�
 | Linux KODA 화면과 결과 분류 확인 | 실제 결과 화면, 라이브러리·소스코드·품질 탭, 기능 흐름도 | [KODA 웹 포털 화면과 기능](koda-web-portal.ko.md) |
 | 사내 GitLab 저장소를 선택해 점검 | SHA 고정 점검, Tracker 자동 전송, 확정 취약점별 비공개 Issue 등록 | [GitLab 저장소 연동](gitlab-integration-ko.md) |
 | KODA와 SBOM Tracker를 폐쇄망에 함께 설치 | `koda-suite-offline-x86_64-<version>.tar.gz` 단일 압축파일, SHA-256 검증, 계정·로그아웃 공유와 사이트별 권한 | [통합 폐쇄망 설치](../platforms/linux/suite/README.ko.md) |
-| 폐쇄망 설치 오류를 진단 | 압축·주소·로그인·Dependency-Track·업로드·이미지 교체별 확인과 복구 절차 | [폐쇄망 설치 장애 대응](../platforms/linux/suite/TROUBLESHOOTING.ko.md) |
+| 폐쇄망 설치 오류를 진단 | 압축·주소·로그인·업로드·이미지 교체별 확인과 복구 절차 | [폐쇄망 설치 장애 대응](../platforms/linux/suite/TROUBLESHOOTING.ko.md) |
 | 폐쇄망 JAR/WAR/EAR를 점검 | 오프라인 SBOM·취약점·KEV·승인 SBOM 비교 결과 | [폐쇄망 배포 개요](install/offline-delivery.md) |
 | Windows 데스크톱 앱을 설치 | KODA 설치본과 별도 취약점 데이터 갱신 경로 | [Windows 설치](install/windows.ko.md) |
 | 승인된 웹 서비스의 보안 상태를 점검 | 웹·ZAP 보고서. 능동 점검은 명시적 권한 필요 | [CLI 및 로컬 사용법](usage.ko.md#승인된-웹-점검) |
@@ -75,7 +75,6 @@ Linux 포털을 운영할 때는 8765 포트를 직접 공개하지 말고 통�
 | [java-sbom-vulnerability-scan.md](security/java-sbom-vulnerability-scan.md) | 폐쇄망 Java(JAR/WAR/EAR) SBOM·취약점 점검 런북 |
 | [PRE_COMMIT.ko.md](security/PRE_COMMIT.ko.md) | KODA pre-commit 보안 게이트 |
 | [GITHUB_REPOSITORY_SECURITY.ko.md](security/GITHUB_REPOSITORY_SECURITY.ko.md) | GitHub 저장소 보안 설정 체크리스트 |
-| [DEPENDENCY_TRACK.ko.md](security/DEPENDENCY_TRACK.ko.md) | Dependency-Track SBOM 업로드 연동 |
 | [ZAP_BASELINE.ko.md](security/ZAP_BASELINE.ko.md) | OWASP ZAP baseline DAST 실행 |
 | [WEB_AUDIT.ko.md](security/WEB_AUDIT.ko.md) | 승인·프로필·oracle 기반 21개 웹취약점 자동 점검 |
 | [VEX.ko.md](security/VEX.ko.md) | CycloneDX VEX 취약점 상태 추적 |

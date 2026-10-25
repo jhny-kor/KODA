@@ -48,6 +48,10 @@ def query_vulnerability_intel(
     *,
     timeout_seconds: float = 12.0,
 ) -> tuple[dict[str, VulnerabilityIntel], list[str]]:
+    from .network_policy import offline_mode
+
+    if offline_mode():
+        return {}, ["KEV/EPSS 온라인 조회가 차단되었습니다. 오프라인 반입 자료를 사용하세요."]
     requested = tuple(sorted({cve.upper() for cve in cve_ids if CVE_RE.fullmatch(cve.upper())}))
     if not requested:
         return {}, []
@@ -107,6 +111,8 @@ def prioritize_severity(base: str, cve_ids: Iterable[str], intel: dict[str, Vuln
 
 
 def _fetch_kev(timeout_seconds: float) -> dict[str, dict[str, object]]:
+    from .network_policy import require_online
+    require_online("CISA KEV")
     request = urllib.request.Request(
         CISA_KEV_JSON_URL,
         headers={"User-Agent": "koda-local-security-scanner"},
@@ -128,6 +134,8 @@ def _fetch_kev(timeout_seconds: float) -> dict[str, dict[str, object]]:
 
 
 def _fetch_epss(cve_ids: tuple[str, ...], timeout_seconds: float) -> dict[str, dict[str, object]]:
+    from .network_policy import require_online
+    require_online("FIRST EPSS")
     output: dict[str, dict[str, object]] = {}
     for chunk in _cve_chunks(cve_ids):
         url = f"{FIRST_EPSS_URL}?{urllib.parse.urlencode({'cve': ','.join(chunk)})}"

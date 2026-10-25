@@ -52,6 +52,8 @@ def prepare_input_target(
     target_dir.mkdir(parents=True, exist_ok=True)
     budget = {"files": 0, "bytes": 0}
     try:
+        if path.stat().st_size == 0:
+            raise ConfigError(f"Archive input is empty: {path.name}. Check the original file and upload again.")
         if zipfile.is_zipfile(path):
             _extract_zip(path, target_dir, budget, max_files, max_bytes)
             return target_dir
@@ -61,6 +63,12 @@ def prepare_input_target(
         if path.suffix.lower() == ".gz":
             _extract_gzip(path, target_dir, budget, max_files, max_bytes)
             return target_dir
+        if path.suffix.lower() in {".zip", ".jar", ".war", ".ear"}:
+            raise ConfigError(
+                f"Invalid or incomplete ZIP archive: {path.name}. "
+                "The ZIP directory could not be read. Check for a damaged or incomplete upload, "
+                "split archive parts, or a file whose actual format differs from its extension."
+            )
     except ConfigError:
         raise
     except (OSError, tarfile.TarError, zipfile.BadZipFile, EOFError, RuntimeError) as exc:
@@ -125,9 +133,20 @@ def _extract_zip(
                 continue
             if stat.S_IFMT(member.external_attr >> 16) == stat.S_IFLNK:
                 raise ConfigError(f"Archive contains a symbolic link: {member.filename}")
+            if member.flag_bits & 1:
+                raise ConfigError(
+                    f"Encrypted ZIP member requires a password and is not supported: {member.filename}. "
+                    "Upload an unencrypted ZIP archive."
+                )
             _reserve_file(member.filename, member.file_size, budget, max_files, max_bytes)
-            with archive.open(member) as source:
-                _copy_member(source, destination, budget, max_bytes)
+            try:
+                with archive.open(member) as source:
+                    _copy_member(source, destination, budget, max_bytes)
+            except NotImplementedError as exc:
+                raise ConfigError(
+                    f"Unsupported ZIP compression method {member.compress_type}: {member.filename}. "
+                    "Recompress using ZIP Deflate or Store."
+                ) from exc
 
 
 def _extract_tar(

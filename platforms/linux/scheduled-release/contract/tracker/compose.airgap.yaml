@@ -7,9 +7,9 @@ services:
     pull_policy: never
   portal-worker:
     pull_policy: never
+  portal-metadata-collector:
+    pull_policy: never
+  portal-data-updater:
+    pull_policy: never
   postgres:
-    pull_policy: never
-  dtrack-apiserver:
-    pull_policy: never
-  dtrack-frontend:
     pull_policy: never

@@ -88,7 +88,7 @@ cap-drop ALL, CPU/메모리/PID 제한으로 실행됩니다. 대상 JAR은 읽�
 
 상세: [platforms/linux/docker/README.md](../../platforms/linux/docker/README.md)
 
-### KODA + KODA SBOM Tracker + Dependency-Track 통합본
+### KODA + KODA SBOM Tracker 통합본
 
 로그인·계정·권한·분석 회차 화면을 운영하려면 두 제품을 묶은 단일 압축파일을
 사용합니다. Tracker가 계정과 현재 브라우저 세션을 관리하고 KODA는 자체 프로젝트
@@ -107,7 +107,7 @@ KODA_TRACKER_BUNDLE=dist/linux/koda-sbom-tracker-airgap-linux-amd64.tar.gz \
 ```
 
 생성된 `koda-suite-offline-x86_64-<version>.tar.gz` 하나와 `.sha256`을 반입합니다.
-Tracker 전달물에 포함된 Dependency-Track·PostgreSQL·포털 이미지도 같은 통합
+Tracker 전달물에 포함된 PostgreSQL·포털 이미지도 같은 통합
 압축파일에 들어갑니다. 압축파일에는 실제 비밀번호나 API 키를 넣지 않습니다.
 
 ```bash
@@ -128,10 +128,9 @@ HTTPS 오리진을 유지해야 합니다. 외부 reverse proxy 기준 경로는
 ```text
 https://<서버주소>/                    # KODA SBOM Tracker
 https://<서버주소>/koda/               # KODA
-https://<서버주소>/dependency-track/   # Dependency-Track
 ```
 
-이후에는 설치 경로의 `koda-suite start|status|stop`으로 세 서비스를 함께
+이후에는 설치 경로의 `koda-suite start|status|stop`으로 두 제품과 gateway를 함께
 관리합니다. 상세 절차는
 [통합 폐쇄망 설치 가이드](../../platforms/linux/suite/README.ko.md)를 따릅니다.
 
@@ -232,7 +231,7 @@ git 저장소에 대용량 전달물을 직접 커밋하지 마십시오. 상세
 
 | 명령 | 산출물 | 용도 |
 | --- | --- | --- |
-| `package-suite-offline.sh` | `dist/linux/koda-suite-offline-*.tar.gz` | KODA·Tracker·Dependency-Track 통합 전달물 |
+| `package-suite-offline.sh` | `dist/linux/koda-suite-offline-*.tar.gz` | KODA·Tracker 통합 전달물 |
 | `package-docker-offline.sh [--refresh]` | `dist/linux/koda-docker-offline-*.tar.gz` | Docker 전달물 |
 | `package-offline.sh [--refresh]` | `dist/linux/koda-linux-x86_64-*.tar.gz` | Linux tarball |
 | `package-offline.sh --vuln-data-only` | `dist/Windows/koda-vuln-data-<date>.zip` | Windows 데이터 |

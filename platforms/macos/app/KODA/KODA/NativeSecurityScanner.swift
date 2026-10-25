@@ -3121,9 +3121,6 @@ final class NativeSecurityScanner {
         if looksLikeWebProject(files: files, basenames: basenames) && !containsAny(workflowText, ["zap-baseline", "zaproxy", "owasp/zap", "ghcr.io/zaproxy"]) && !lowerRelPaths.contains("docs/security/zap_baseline.md") {
             findings.append(finding("prevention.zap-baseline-missing", "info", "prevention", "DAST baseline이 설정되지 않음", ".", nil, "OWASP ZAP workflow 없음", "권한이 있는 staging URL에 대해 OWASP ZAP baseline 점검 또는 DAST 인수인계 절차를 추가하세요."))
         }
-        if hasDependencyManifest && !containsAny(workflowText, ["dependency-track", "/api/v1/bom"]) && !lowerRelPaths.contains("docs/security/dependency_track.md") {
-            findings.append(finding("prevention.dependency-track-integration-missing", "info", "prevention", "Dependency-Track SBOM 업로드가 설정되지 않음", ".", nil, "Dependency-Track workflow 없음", "릴리스 SBOM을 Dependency-Track 또는 동등한 SBOM 분석 backend에 업로드하도록 자동화하세요."))
-        }
         if hasDependencyManifest && !hasVEX(lowerRelPaths: lowerRelPaths, lowerBasenames: lowerBasenames) {
             findings.append(finding("prevention.vex-missing", "info", "prevention", "VEX 문서가 없음", ".", nil, "VEX 산출물 없음", "검토된 의존성 취약점에 대해 exploitable, fixed, not_affected 같은 VEX 결정을 문서화하세요."))
         }
@@ -3136,7 +3133,7 @@ final class NativeSecurityScanner {
 
     private func hasSecurityWorkflow(_ workflowFiles: [URL]) -> Bool {
         let keywords = [
-            "sec-chk", "koda", "osv", "dependency-check", "dependency-track", "trivy",
+            "sec-chk", "koda", "osv", "dependency-check", "trivy",
             "grype", "snyk", "semgrep", "codeql", "gitleaks", "trufflehog", "zap",
             "bandit", "safety", "pip-audit", "npm audit",
         ]
@@ -4159,7 +4156,6 @@ private extension NativeSecurityScanner {
         case "prevention.github-actions-unpinned": return "GitHub Actions references are not tightly pinned"
         case "prevention.slsa-sigstore-missing": return "Release signing or provenance is not configured"
         case "prevention.zap-baseline-missing": return "DAST baseline is not configured"
-        case "prevention.dependency-track-integration-missing": return "Dependency-Track SBOM upload is not configured"
         case "prevention.vex-missing": return "VEX document is not present"
         case "prevention.binary-artifact-committed": return "Binary release artifact is committed"
         case "prevention.threat-model-missing": return "Threat model is not documented"
@@ -4347,8 +4343,6 @@ private extension NativeSecurityScanner {
             return "Add Sigstore/cosign signing or SLSA provenance generation for release artifacts."
         case "prevention.zap-baseline-missing":
             return "For authorized staging URLs, add an OWASP ZAP baseline check or document the DAST handoff process."
-        case "prevention.dependency-track-integration-missing":
-            return "Upload release SBOMs to Dependency-Track or another SBOM analysis backend."
         case "prevention.vex-missing":
             return "Generate a VEX document for reviewed dependency vulnerabilities so exploitable, fixed, and not-affected decisions are traceable."
         case "prevention.binary-artifact-committed":

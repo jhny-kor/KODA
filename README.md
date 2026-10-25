@@ -1,5 +1,7 @@
 # KODA
 
+Linux closed-network runtime, offline CPE/EPSS and Tracker SSVC: [운영 안내](docs/security/OFFLINE-OPERATIONS.ko.md).
+
 <p align="center">
   <img src="docs/assets/readme/koda-readme-poster-en.svg" alt="KODA offline-first security and quality scanner poster" width="620">
 </p>
@@ -33,7 +35,7 @@ offline package. Check the snapshot before using development-only commands.
 | --- | --- |
 | Install the native macOS app | [Mac App Store](https://apps.apple.com/kr/app/koda/id6770264012?mt=12) or [macOS install guide](docs/install/macos.md) |
 | Run KODA on Linux | [Linux install and operation guide](docs/install/linux.md) |
-| Deploy KODA, KODA SBOM Tracker, and Dependency-Track together in an air-gapped network | [Combined Linux suite guide](platforms/linux/suite/README.ko.md) |
+| Deploy KODA and KODA SBOM Tracker together in an air-gapped network | [Combined Linux suite guide](platforms/linux/suite/README.ko.md) |
 | Review sequential scheduled scans and the multi-user Linux queue (local development) | [Sequential Linux scan guide](docs/linux-scan-queue.en.md) |
 | Diagnose an air-gapped suite installation | [Closed-network troubleshooting guide](platforms/linux/suite/TROUBLESHOOTING.ko.md) |
 | Build or install the Windows desktop app | [Windows install guide](docs/install/windows.md) |
@@ -110,10 +112,8 @@ compliance decision. Fields that KODA cannot establish from scanned evidence
 remain empty.
 
 For an air-gapped Linux x86_64 server, `package-suite-offline.sh` wraps the
-verified KODA and Tracker payloads—including Tracker's Dependency-Track
-services—into one archive. The installed `koda-suite` command starts one gateway
-with Tracker at `/`, KODA at `/koda/`, and Dependency-Track at
-`/dependency-track/`; see the [combined suite guide](platforms/linux/suite/README.ko.md).
+verified KODA and Tracker payloads into one archive. The installed `koda-suite` command starts one gateway
+with Tracker at `/` and KODA at `/koda/`; see the [combined suite guide](platforms/linux/suite/README.ko.md).
 The authenticated KODA portal keeps searchable project and analysis-round
 history, runs the bundled offline Grype database for exact manifest dependency
 versions, and exports HTML ZIP, PDF, Excel, JSON, Markdown, CycloneDX 1.6, and
@@ -148,7 +148,7 @@ The [English documentation index](docs/README.en.md) is the complete map. The [K
 | Closed-network Docker, Linux, Windows, and combined Tracker delivery | [Offline delivery overview](docs/install/offline-delivery.en.md) |
 | Closed-network installation errors and recovery | [Air-gapped suite troubleshooting](platforms/linux/suite/TROUBLESHOOTING.ko.md) |
 | macOS, Linux, and Windows installation | [Install guides](docs/README.en.md#installation-and-delivery) |
-| Java SBOM, pre-commit, Dependency-Track, ZAP, VEX, and supply-chain guidance | [Security integration docs](docs/README.en.md#security-integrations) |
+| Java SBOM, pre-commit, ZAP, VEX, and supply-chain guidance | [Security integration docs](docs/README.en.md#security-integrations) |
 | Approval-gated web controls, profiles, OAST, and package limits | [Web audit runbook](docs/security/WEB_AUDIT.md) |
 | Report fields and output contracts | [Report contract](docs/report-contract.md) |
 | Dashboard design rationale and limits | [Dashboard research](docs/security-dashboard-research.md) |

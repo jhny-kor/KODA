@@ -4,6 +4,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tarfile
@@ -24,8 +25,15 @@ def main():
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--tracker-repo', type=Path, required=True)
     parser.add_argument('--revision', default='20260914-ui-data1')
-    parser.add_argument('--image-tag', default='20260914-ui-data1')
+    parser.add_argument('--image-tag', '--source-image-tag', dest='image_tag', default='20260914-ui-data1', help='existing built-image tag; preserved unless output alias is explicit')
+    parser.add_argument('--output-image-tag', help='explicit package alias only; original build timestamp/labels stay unchanged')
     args = parser.parse_args()
+    for value in (args.image_tag, args.output_image_tag):
+        if value is not None and not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', value):
+            raise ValueError('invalid Docker tag')
+    cleanup_helper = args.tracker_repo / 'scripts/remove-retired-analysis.py'
+    if not cleanup_helper.is_file() or cleanup_helper.is_symlink():
+        raise ValueError('Tracker native release cleanup helper is missing or unsafe')
     repo = Path(__file__).resolve().parents[2]
     name = f'koda-scheduled-offline-patch-x86_64-{args.revision}'
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -41,6 +49,8 @@ def main():
                          ('platforms/linux/docker/koda-docker.sh', 'koda-docker')]:
         shutil.copy2(repo / source, launchers / dest)
         (launchers / dest).chmod(0o755)
+        relative = 'koda/koda-docker' if dest == 'koda-docker' else dest
+        shutil.copy2(repo / source, stage / 'contract' / relative)
     refs = [f'local/koda-scheduled:{args.image_tag}',
             f'local/koda-tracker-api-scheduled:{args.image_tag}',
             f'local/koda-tracker-web-scheduled:{args.image_tag}']
@@ -49,13 +59,26 @@ def main():
         item = json.loads(command('docker', 'image', 'inspect', ref))[0]
         if (item['Os'], item['Architecture']) != ('linux', 'amd64'):
             raise ValueError('release image must be linux/amd64: ' + ref)
-        inventory.append({'reference': ref, 'id': item['Id'], 'platform': 'linux/amd64', 'size': item['Size']})
+        output_ref = ref.rsplit(':', 1)[0] + ':' + args.output_image_tag if args.output_image_tag else ref
+        if output_ref != ref:
+            command('docker', 'tag', ref, output_ref)
+        labels = item.get('Config', {}).get('Labels') or {}
+        inventory.append({'reference': output_ref, 'source_reference': ref, 'id': item['Id'],
+                          'platform': 'linux/amd64', 'size': item['Size'],
+                          'image_created': labels.get('org.opencontainers.image.created') or item.get('Created'),
+                          'image_revision': labels.get('org.opencontainers.image.revision'),
+                          'image_version': labels.get('org.opencontainers.image.version'),
+                          'tag_is_package_alias': output_ref != ref})
+    refs = [item['reference'] for item in inventory]
     (stage / 'image-inventory.json').write_text(json.dumps(inventory, indent=2) + '\n')
     sources = stage / 'source'
     shutil.copytree(repo / 'platforms/shared/python/security_scanner', sources / 'koda/security_scanner',
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store', '._*', '.omc'))
     shutil.copytree(args.tracker_repo / 'apps/api/koda_tracker', sources / 'tracker/koda_tracker',
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store', '._*', '.omc'))
+    backend_hashes = {str(path.relative_to(sources / 'tracker/koda_tracker')): digest(path)
+                      for path in sorted((sources / 'tracker/koda_tracker').rglob('*.py'))}
+    (stage / 'contract/tracker-backend-sha256.json').write_text(json.dumps(backend_hashes, indent=2) + '\n')
     for directory in ('src', 'public'):
         shutil.copytree(args.tracker_repo / 'apps/web' / directory, sources / 'tracker/web' / directory,
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store', '._*', '.omc'))
@@ -63,21 +86,24 @@ def main():
         path = args.tracker_repo / 'apps/web' / file
         if path.is_file():
             shutil.copy2(path, sources / 'tracker/web' / file)
-    # The patch applies the reviewed Compose data-updater migration while
-    # retaining the installed .env and named volumes.
+    # Native-only contracts are generated from these exact source trees.
+    # Old external-analysis installations must use the full installer first.
     migration = stage / 'migration' / 'tracker'
     migration.mkdir(parents=True)
     for relative in ('compose.yaml', 'compose.airgap.yaml', 'compose.integration.yaml'):
         source = (repo / 'platforms/linux/suite/compose.integration.yaml') if relative == 'compose.integration.yaml' else args.tracker_repo / relative
         if source.is_file():
             shutil.copy2(source, migration / relative)
+            shutil.copy2(source, stage / 'contract/tracker' / relative)
     gateway = repo / 'platforms/linux/suite/gateway.conf.template'
     if gateway.is_file():
         (migration / 'gateway').mkdir()
         shutil.copy2(gateway, migration / 'gateway/gateway.conf.template')
+        shutil.copy2(gateway, stage / 'contract/tracker/gateway/gateway.conf.template')
     for source, relative in (
         (args.tracker_repo / 'scripts/build-data-update.py', 'scripts/build-data-update.py'),
         (args.tracker_repo / 'scripts/nvd-alias-index.py', 'scripts/nvd-alias-index.py'),
+        (cleanup_helper, 'tracker/scripts/remove-retired-analysis.py'),
         (repo / 'platforms/linux/package-offline.sh', 'koda/platforms/linux/package-offline.sh'),
     ):
         if source.is_file():
@@ -89,21 +115,17 @@ def main():
         for file in ('LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md'):
             if (directory / file).exists():
                 shutil.copy2(directory / file, stage / (project + '-' + file))
-    implementation_doc = repo / 'docs/schedule-implementation-2026-09-08.md'
-    if implementation_doc.is_file():
-        shutil.copy2(implementation_doc, stage / 'implementation-verification.ko.md')
-    delivery_doc = repo / 'docs/linux-update-2026-09-16.md'
-    if delivery_doc.is_file():
-        shutil.copy2(delivery_doc, stage / 'linux-update.ko.md')
-    verification = repo / '.build/linux-update/delivery-verification.json'
-    if verification.is_file():
-        shutil.copy2(verification, stage / 'verification.json')
+    # Host-local and historical verification assets are not evidence for a new
+    # package and must not be automatically republished with it.
+    (stage / 'source-image-check.json').write_text(json.dumps({
+        'status': 'not_verified', 'reason': 'source/image parity requires release-specific verification'
+    }, indent=2) + '\n')
     shutil.copy2(Path(__file__), stage / 'package-scheduled-patch.py')
-    provenance = {'built_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    provenance = {'packaged_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   'source_kind': 'working-tree-snapshot', 'target_platform': 'linux/amd64',
-                  'base_suite': '0.1.1-20260902 with compatible 20260906/07 patches',
-                  'vulnerability_data_refreshed': False, 'data_update_uploads': 'grype-db,vuln-data',
-                  'koda_grype_db_built': '2026-09-10T06:30:24Z',
+                  'base_suite': 'native-two-product-contract',
+                  'vulnerability_data_refreshed': False, 'source_image_tag': args.image_tag, 'output_image_tag': args.output_image_tag or args.image_tag,
+                  'image_build_dates_are_preserved': True, 'data_update_uploads': 'grype-db,vuln-data',
                   'tracker_web_vite_demo_mode': False,
                   'repositories': {key: {'head': command('git', '-C', str(path), 'rev-parse', 'HEAD'),
                                           'dirty': bool(command('git', '-C', str(path), 'status', '--porcelain'))}

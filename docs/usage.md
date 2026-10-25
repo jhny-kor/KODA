@@ -419,7 +419,6 @@ require `coverage.completed == coverage.required` in a stricter CI policy.
 | `web-scan` | Contacts an authorized URL. Crawling, rendering, and path probes widen the request scope. |
 | `net-scan` | Actively probes a host's exposed network services (ports/banners, TLS, default credentials). Requires `--authorize-active`. |
 | `zap-run` | Runs an authorized OWASP ZAP baseline through Docker. |
-| `upload-sbom` | Uploads an SBOM to Dependency-Track; store its API key in an environment variable. |
 
 `net-scan` covers the non-web network surface: a curated TCP port/banner sweep, active
 TLS tests (deprecated TLS 1.0/1.1, weak ciphers, certificate validity), and a small
@@ -431,7 +430,7 @@ python3 -m security_scanner net-scan --host 10.0.0.10 --tls --authorize-active
 python3 -m security_scanner net-scan --host 10.0.0.10 --default-creds-url https://10.0.0.10/admin --authorize-active
 ```
 
-`web-scan`, `net-scan`, and `zap-run` must only target systems you own or are explicitly authorized to test. The [ZAP guide](security/ZAP_BASELINE.md), [Dependency-Track guide](security/DEPENDENCY_TRACK.md), and [offline Java runbook](security/java-sbom-vulnerability-scan.en.md) contain the operating details.
+`web-scan`, `net-scan`, and `zap-run` must only target systems you own or are explicitly authorized to test. The [ZAP guide](security/ZAP_BASELINE.md) and [offline Java runbook](security/java-sbom-vulnerability-scan.en.md) contain the operating details.
 
 ## Limits
 

@@ -25,10 +25,9 @@ Usage:
   koda-suite stop [--prefix DIR]
 
 The install command verifies, installs, and starts both products. A production
-Tracker env file with real secrets and a least-privilege Dependency-Track API
-key is required and is never stored in the release archive.
+Tracker env file with real secrets is required and is never stored in the release archive.
 
-Patch groups: koda, gateway, portal-web, portal-api-worker, dependency-track.
+Patch groups: koda, gateway, portal-web, portal-api-worker.
 Patches preserve volumes and require the new release's Compose contracts to
 match the installed release. Incompatible data/schema changes require a full
 install; reset-install.sh is reserved for intentional data destruction.
@@ -51,7 +50,7 @@ verify_release() {
   [[ -f "$script_dir/compose.integration.yaml" && -f "$script_dir/gateway/gateway.conf.template" ]] \
     || fail "gateway integration files are missing."
   [[ -x "$script_dir/reset-install.sh" && -f "$script_dir/.env.example" \
-      && -f "$script_dir/koda-suite.env.example" ]] \
+      && -f "$script_dir/koda-suite.env.example" && -f "$script_dir/retired-analysis-cleanup.py" ]] \
     || fail "reset installer or split env examples are missing."
   for required in \
     'AUTHORITY=tracker' 'AUTH_CONTRACT_VERSION=1' \
@@ -326,8 +325,18 @@ runtime_values() {
   worker_stop_timeout="${KODA_WORKER_STOP_TIMEOUT_SECONDS:-$(env_value "$env_file" KODA_WORKER_STOP_TIMEOUT_SECONDS 20)}"
   report_timeout="${KODA_PORTAL_REPORT_TIMEOUT_SECONDS:-$(env_value "$env_file" KODA_PORTAL_REPORT_TIMEOUT_SECONDS 90)}"
   report_memory="${KODA_PORTAL_REPORT_MEMORY_BYTES:-$(env_value "$env_file" KODA_PORTAL_REPORT_MEMORY_BYTES 2147483648)}"
-  vuln_data_volume="${KODA_VULN_DATA_VOLUME:-$(env_value "$env_file" KODA_VULN_DATA_VOLUME "")}"
+  local tracker_vuln_volume
+  tracker_vuln_volume="${VULN_DATA_VOLUME_NAME:-$(env_value "$env_file" VULN_DATA_VOLUME_NAME koda-sbom-vuln-data)}"
+  vuln_data_volume="${KODA_VULN_DATA_VOLUME:-$(env_value "$env_file" KODA_VULN_DATA_VOLUME "$tracker_vuln_volume")}"
+  [ -n "$vuln_data_volume" ] || vuln_data_volume="$tracker_vuln_volume"
+  [ "$vuln_data_volume" = "$tracker_vuln_volume" ] || fail "KODA must use the Tracker approved vulnerability data volume."
+
   tracker_ca_file="${KODA_TRACKER_CA_FILE:-$(env_value "$env_file" KODA_TRACKER_CA_FILE "")}"
+  data_verify_key="${TRACKER_DATA_UPDATE_VERIFY_KEY_FILE:-$(env_value "$env_file" TRACKER_DATA_UPDATE_VERIFY_KEY_FILE "")}"
+  if [[ -n "$data_verify_key" && "$data_verify_key" != /* ]]; then
+    data_verify_key="$(dirname -- "$env_file")/$data_verify_key"
+  fi
+
   schedule_enabled="${KODA_SCHEDULE_ENABLED:-$(env_value "$env_file" KODA_SCHEDULE_ENABLED 0)}"
   schedule_ssh_dir="${KODA_SCHEDULE_SSH_DIR:-$(env_value "$env_file" KODA_SCHEDULE_SSH_DIR "")}"
   schedule_state="${KODA_SCHEDULE_STATE_DIR:-$(env_value "$env_file" KODA_SCHEDULE_STATE_DIR "")}"
@@ -369,7 +378,16 @@ suite_compose() {
   local prefix="$1"
   shift
   local proof="$(env_value "$prefix/tracker/.env" KODA_GATEWAY_PROOF "")"
-  KODA_GATEWAY_PROOF="$proof" docker compose --project-directory "$prefix/tracker" --env-file "$prefix/tracker/.env" \
+  local compose_key="${TRACKER_DATA_UPDATE_VERIFY_KEY_FILE:-$(env_value "$prefix/tracker/.env" TRACKER_DATA_UPDATE_VERIFY_KEY_FILE "")}"
+  if [[ -n "$compose_key" && "$compose_key" != /* ]]; then
+    compose_key="$prefix/tracker/$compose_key"
+  fi
+
+  PORTAL_IMAGE_TAG="$(env_value "$prefix/tracker/.env" PORTAL_IMAGE_TAG dev)" \
+  PORTAL_WEB_IMAGE="$(env_value "$prefix/tracker/.env" PORTAL_WEB_IMAGE "")" \
+  PORTAL_API_IMAGE="$(env_value "$prefix/tracker/.env" PORTAL_API_IMAGE "")" \
+  PORTAL_WORKER_IMAGE="$(env_value "$prefix/tracker/.env" PORTAL_WORKER_IMAGE "")" \
+  TRACKER_DATA_UPDATE_VERIFY_KEY_FILE="$compose_key" KODA_GATEWAY_PROOF="$proof" docker compose --project-directory "$prefix/tracker" --env-file "$prefix/tracker/.env" \
     -f "$prefix/tracker/compose.yaml" -f "$prefix/tracker/compose.airgap.yaml" \
     -f "$prefix/tracker/compose.integration.yaml" "$@"
 }
@@ -416,6 +434,7 @@ start_dashboard() {
   KODA_PORTAL_REPORT_MEMORY_BYTES="$report_memory" \
   KODA_TRACKER_CA_FILE="$tracker_ca_file" \
   KODA_VULN_DATA_VOLUME="$vuln_data_volume" \
+  KODA_DATA_UPDATE_VERIFY_KEY_FILE="$data_verify_key" \
   KODA_SCHEDULE_ENABLED="$schedule_enabled" \
   KODA_SCHEDULE_SSH_DIR="$schedule_ssh_dir" \
   KODA_SCHEDULE_STATE_DIR="$schedule_state" \
@@ -451,9 +470,6 @@ runtime_health() {
   wait_http "http://127.0.0.1:$public_port/koda/live" "" 30
   wait_portal_workers
   wait_http "http://127.0.0.1:$public_port/api/v1/healthz" "" 30
-  wait_http "http://127.0.0.1:$public_port/dependency-track/" "Dependency-Track" 60
-  wait_http "http://127.0.0.1:$public_port/dependency-track/static/config.json" "API_BASE_URL" 60
-  wait_http "http://127.0.0.1:$public_port/dependency-track/api/version" "version" 60
   masquerade="$(docker network inspect -f '{{index .Options "com.docker.network.bridge.enable_ip_masquerade"}}' koda-dashboard 2>/dev/null || true)"
   [[ "$masquerade" == false ]] || fail "KODA dashboard network egress guard is not disabled."
   if [[ -n "$gitlab_network" ]]; then
@@ -489,7 +505,8 @@ prepare_payloads() {
       && -f "$prepared_koda_root/manifest.sha256" ]] \
     || fail "invalid KODA payload."
   [[ -x "$install_tmp/tracker/scripts/install-airgap.sh" \
-      && -x "$install_tmp/tracker/scripts/preflight-airgap.sh" ]] \
+      && -x "$install_tmp/tracker/scripts/preflight-airgap.sh" \
+      && -f "$install_tmp/tracker/scripts/remove-retired-analysis.py" ]] \
     || fail "invalid Tracker payload."
   prepared_tracker_vuln_bundle="$(metadata_value "$install_tmp/tracker/metadata.env" VULNERABILITY_BUNDLE)"
   [[ "$prepared_tracker_vuln_bundle" == "$TRACKER_VULNERABILITY_BUNDLE" ]] \
@@ -498,8 +515,32 @@ prepare_payloads() {
     || fail "KODA inner bundle checksum verification failed."
 }
 
+verify_data_update_key() {
+  local env_file="$1" verify_key
+  verify_key="${TRACKER_DATA_UPDATE_VERIFY_KEY_FILE:-$(env_value "$env_file" TRACKER_DATA_UPDATE_VERIFY_KEY_FILE "")}"
+  if [[ -n "$verify_key" && "$verify_key" != /* ]]; then
+    verify_key="$(dirname -- "$env_file")/$verify_key"
+  fi
+  [[ -f "$verify_key" && -r "$verify_key" && ! -L "$verify_key" ]] \
+    || fail "Register TRACKER_DATA_UPDATE_VERIFY_KEY_FILE as a readable approved public-key file (relative to the .env directory or absolute) before installation or upgrade. Existing results are preserved."
+  grep -q -- '-----BEGIN PUBLIC KEY-----' "$verify_key" \
+    || fail "TRACKER_DATA_UPDATE_VERIFY_KEY_FILE must contain the approved public key; do not supply a private signing key."
+  python3 - "$verify_key" <<'PYKEY'
+import pathlib,sys
+if not pathlib.Path(sys.argv[1]).stat().st_mode & 0o004:
+    raise SystemExit("The verification public key must be readable by container UID 1000 (for example mode 0644).")
+PYKEY
+  ! grep -q -- 'PRIVATE KEY' "$verify_key" || fail "Only the verification public key may be mounted; private signing keys must stay outside."
+  openssl pkey -pubin -in "$verify_key" -noout >/dev/null 2>&1 \
+    || fail "The approved data-update public key is invalid."
+  verified_data_key="$(realpath "$verify_key")"
+  [[ "$verified_data_key" != *$'\n'* && "$verified_data_key" != *$'\r'* && "$verified_data_key" != *"'"* ]] \
+    || fail "The registered public-key path contains unsupported characters."
+}
+
 validate_preflight() {
   local env_file="$1" require_vulnerability_data="${2:-0}"
+  verify_data_update_key "$env_file"
   "$install_tmp/tracker/scripts/preflight-airgap.sh" "$env_file"
   runtime_values "$env_file"
   if [[ "$require_vulnerability_data" == 1 ]]; then
@@ -569,6 +610,19 @@ install_suite() {
 
   # Validate all secrets and Compose wiring before loading either product.
   validate_preflight "$env_file" 0
+  # Preserve source .env and keep a relative registration valid after relocation.
+  install -m 0600 "$env_file" "$install_tmp/approved-runtime.env"
+  python3 - "$install_tmp/approved-runtime.env" "$verified_data_key" <<'PYENV'
+from pathlib import Path
+import re
+import sys
+path = Path(sys.argv[1])
+lines = [line for line in path.read_text().splitlines() if not re.match(r"\s*(?:export\s+)?TRACKER_DATA_UPDATE_VERIFY_KEY_FILE\s*=", line)]
+lines.append("TRACKER_DATA_UPDATE_VERIFY_KEY_FILE='" + sys.argv[2] + "'")
+path.write_text("\n".join(lines) + "\n")
+PYENV
+  tracker_install_args[3]="$install_tmp/approved-runtime.env"
+
   "$prepared_koda_root/install.sh" --prefix "$prefix/koda"
   "$install_tmp/tracker/scripts/install-airgap.sh" "${tracker_install_args[@]}"
 
@@ -583,7 +637,7 @@ install_suite() {
   start_dashboard "$prefix"
   # Recreate only this Compose project's containers after loading the new
   # images. Named volumes and the KODA portal host directory stay attached.
-  suite_compose "$prefix" up -d --no-build --pull never --force-recreate
+  suite_compose "$prefix" up -d --no-build --pull never --force-recreate --remove-orphans
   runtime_health "$prefix"
   echo "installed and started: $prefix"
 }
@@ -626,17 +680,27 @@ tracker_image_ref() {
 }
 
 load_tracker_image() {
-  local prefix="$1" variable="$2" release_env archive_ref source_ref target_ref safe_name image output image_id
+  local prefix="$1" variable="$2" validate_only="${3:-0}" release_env archive_ref source_ref target_ref safe_name image output image_id
   release_env="$install_tmp/tracker/config/.env.example"
+  if [[ "$variable" == PORTAL_* && -f "$install_tmp/tracker/config/release-images.env" ]]; then
+    release_env="$install_tmp/tracker/config/release-images.env"
+  fi
   archive_ref="$(tracker_image_ref "$release_env" "$variable")"
   source_ref="${archive_ref%@*}"
   target_ref="$(tracker_image_ref "$prefix/tracker/.env" "$variable")"
   target_ref="${target_ref%@*}"
-  [[ "$source_ref" == "$target_ref" ]] \
-    || fail "$variable image reference changed; use a full install (reset only incompatible data)."
+  if [[ "$variable" == PORTAL_* ]]; then
+    [[ "${source_ref%:*}" == "${target_ref%:*}" ]] \
+      || fail "$variable image reference changed; use a full install (reset only incompatible data)."
+    target_ref="$source_ref"
+  else
+    [[ "$archive_ref" == "$(tracker_image_ref "$prefix/tracker/.env" "$variable")" ]] \
+      || fail "$variable image reference changed; use a full install (reset only incompatible data)."
+  fi
   safe_name="$(printf '%s' "$archive_ref" | tr '/:@' '___').tar"
   image="$install_tmp/tracker/images/$safe_name"
   [[ -f "$image" ]] || fail "patch image is missing: $safe_name"
+  [[ "$validate_only" != 1 ]] || return 0
   output="$(docker load -i "$image")"
   printf '%s\n' "$output"
   image_id="$(awk '/Loaded image ID:/ { print $4; exit }' <<<"$output")"
@@ -646,6 +710,50 @@ load_tracker_image() {
   docker tag "$image_id" "$target_ref"
   [[ "$(docker image inspect "$target_ref" --format '{{.Architecture}}')" == amd64 ]] \
     || fail "loaded patch image is not linux/amd64: $target_ref"
+}
+
+patch_tracker_application() {
+  local prefix="$1" group="$2" release_env="$install_tmp/tracker/config/.env.example" new_tag old_tag variable
+  [[ ! -f "$install_tmp/tracker/config/release-images.env" ]] || release_env="$install_tmp/tracker/config/release-images.env"
+  new_tag="$(env_value "$release_env" PORTAL_IMAGE_TAG dev)"
+  old_tag="$(env_value "$prefix/tracker/.env" PORTAL_IMAGE_TAG dev)"
+  if [[ "$new_tag" != "$old_tag" ]]; then
+    [[ -f "$install_tmp/tracker/scripts/release-images.sh" && -f "$install_tmp/tracker/config/release-images.env" ]] \
+      || fail "dated application patches require verified release image settings"
+    for variable in PORTAL_WEB_IMAGE PORTAL_API_IMAGE PORTAL_WORKER_IMAGE; do
+      load_tracker_image "$prefix" "$variable" 1
+    done
+    cp "$prefix/tracker/.env" "$install_tmp/validated-patch.env"
+    bash -c 'source "$1"; apply_release_images "$2" "$3"' _ \
+      "$install_tmp/tracker/scripts/release-images.sh" \
+      "$install_tmp/tracker/config/release-images.env" "$install_tmp/validated-patch.env"
+    # A shared tag requires one complete application release. Load all images
+    # before changing the installed settings; never relabel old application code.
+    for variable in PORTAL_WEB_IMAGE PORTAL_API_IMAGE PORTAL_WORKER_IMAGE; do
+      load_tracker_image "$prefix" "$variable"
+    done
+    bash -c 'source "$1"; apply_release_images "$2" "$3"' _ \
+      "$install_tmp/tracker/scripts/release-images.sh" \
+      "$install_tmp/tracker/config/release-images.env" "$prefix/tracker/.env"
+    mkdir -p "$prefix/tracker/config"
+    install -m 0644 "$install_tmp/tracker/config/release-images.env" "$prefix/tracker/config/release-images.env"
+    services=(portal-web portal-api portal-worker portal-data-updater portal-metadata-collector)
+  elif [[ "$group" == portal-web ]]; then
+    load_tracker_image "$prefix" PORTAL_WEB_IMAGE
+    services=(portal-web)
+  else
+    for variable in PORTAL_API_IMAGE PORTAL_WORKER_IMAGE; do load_tracker_image "$prefix" "$variable"; done
+    services=(portal-api portal-worker portal-data-updater portal-metadata-collector)
+  fi
+  python3 - "$prefix/metadata.env" "$new_tag" "$install_tmp/tracker/metadata.env" <<'PYTAG'
+from pathlib import Path
+import sys
+path, tag, source = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+values = dict(line.split('=', 1) for line in source.read_text().splitlines() if '=' in line)
+updates = {'TRACKER_IMAGE_TAG': tag, 'TRACKER_IMAGE_BUILT_AT': values.get('IMAGE_BUILT_AT', 'unknown'), 'TRACKER_IMAGE_REVISION': values.get('IMAGE_REVISION', 'unknown')}
+lines = [line for line in path.read_text().splitlines() if line.partition('=')[0] not in updates]
+path.write_text('\n'.join(lines + [key + '=' + value for key, value in updates.items()]) + '\n')
+PYTAG
 }
 
 patch_suite() {
@@ -659,7 +767,7 @@ patch_suite() {
     esac
   done
   case "$group" in
-    koda|gateway|portal-web|portal-api-worker|dependency-track) ;;
+    koda|gateway|portal-web|portal-api-worker) ;;
     postgres) fail "PostgreSQL is not patchable in place; use a full install; reset-install.sh is only for intentional data destruction." ;;
     *) fail "unknown patch group: ${group:-<empty>}" ;;
   esac
@@ -689,21 +797,8 @@ patch_suite() {
         "$prefix/tracker/gateway/gateway.conf.template"
       services=(gateway)
       ;;
-    portal-web)
-      load_tracker_image "$prefix" PORTAL_WEB_IMAGE
-      services=(portal-web)
-      ;;
-    portal-api-worker)
-      for variable in PORTAL_API_IMAGE PORTAL_WORKER_IMAGE; do
-        load_tracker_image "$prefix" "$variable"
-      done
-      services=(portal-api portal-worker)
-      ;;
-    dependency-track)
-      for variable in DTRACK_APISERVER_IMAGE DTRACK_FRONTEND_IMAGE; do
-        load_tracker_image "$prefix" "$variable"
-      done
-      services=(dtrack-apiserver dtrack-frontend)
+    portal-web|portal-api-worker)
+      patch_tracker_application "$prefix" "$group"
       ;;
   esac
   if [[ ${#services[@]} -gt 0 ]]; then
@@ -727,6 +822,7 @@ start_suite() {
     || fail "suite is not installed at $prefix."
   "$prefix/tracker/scripts/preflight-airgap.sh" "$prefix/tracker/.env"
   start_dashboard "$prefix"
+  verify_data_update_key "$prefix/tracker/.env"
   suite_compose "$prefix" up -d --no-build --pull never
   runtime_health "$prefix"
 }
@@ -737,6 +833,8 @@ status_suite() {
   [[ -f "$prefix/tracker/.env" && -x "$prefix/koda/koda-docker" ]] \
     || fail "suite is not installed at $prefix."
   "$prefix/koda/koda-docker" dashboard status
+  echo "koda_image=$(head -n1 "$prefix/koda/image-ref.txt")"
+  echo "tracker_image_tag=$(env_value "$prefix/tracker/.env" PORTAL_IMAGE_TAG dev)"
   suite_compose "$prefix" ps
   runtime_health "$prefix"
 }

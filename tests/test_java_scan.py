@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -220,6 +221,13 @@ class JavaInventoryTests(unittest.TestCase):
 
 
 class JavaScanTests(unittest.TestCase):
+    def setUp(self):
+        # Explicit local-file development fixtures; Linux production defaults
+        # are exercised independently by test_managed_data_current_only.
+        local_profile = patch("security_scanner.data_release.sys", SimpleNamespace(platform="darwin"))
+        local_profile.start()
+        self.addCleanup(local_profile.stop)
+
     def test_syft_process_output_is_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "large-output"
@@ -454,7 +462,7 @@ class JavaScanTests(unittest.TestCase):
         self.assertIn('id="main-vulnerability-kev"', main_html)
         self.assertIn('id="main-vulnerability-table"', main_html)
         self.assertIn("server-vulnerability-details.html", main_html)
-        self.assertIn(">KEV<span class=\"column-resizer\"", main_html)
+        self.assertIn(">KEV / EPSS<span class=\"column-resizer\"", main_html)
         self.assertIn(">CVSS<span class=\"column-resizer\"", main_html)
         self.assertIn(">조치<span class=\"column-resizer\"", main_html)
         self.assertIn("vulnerability-action-link", main_html)

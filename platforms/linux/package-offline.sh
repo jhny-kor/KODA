@@ -40,6 +40,8 @@ reuse the cache.
 
 Environment:
   KODA_OFFLINE_CACHE_DIR download cache, default .build/koda-offline-cache
+  KODA_EPSS_SNAPSHOT     approved local FIRST CSV(.gz); validated and bundled without HTTP lookup
+  KODA_INTELLIGENCE_SNAPSHOT approved local intelligence.json with original source sidecars
   KODA_LINUX_DIST_DIR    output directory, default dist/linux
   KODA_VULN_DATA_DIR     --vuln-data-only output directory, default dist/Windows
   KODA_SYFT_VERSION      default 1.46.0
@@ -272,6 +274,36 @@ for feed in recent modified; do
 done
 
 cisa_file="$asset_dir/vuln-data/known_exploited_vulnerabilities.json"
+if [[ -n "${KODA_INTELLIGENCE_SNAPSHOT:-}" ]]; then
+  python3 "$repo_root/scripts/stage-offline-intelligence.py" "$KODA_INTELLIGENCE_SNAPSHOT" "$asset_dir/vuln-data"
+else
+  rm -f "$asset_dir/vuln-data/intelligence.json"
+  rm -rf "$asset_dir/vuln-data/intelligence-sources"
+fi
+if [[ -n "${KODA_EPSS_SNAPSHOT:-}" ]]; then
+  [[ -f "$KODA_EPSS_SNAPSHOT" ]] || { echo "EPSS snapshot not found" >&2; exit 2; }
+  PYTHONPATH="$repo_root/platforms/shared/python${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 - "$KODA_EPSS_SNAPSHOT" <<'PY'
+import sys
+from security_scanner.offline_epss import load_snapshot
+load_snapshot(sys.argv[1], set())
+PY
+  # Normalize the local transfer to the stable bundled gzip filename.
+  python3 - "$KODA_EPSS_SNAPSHOT" "$asset_dir/vuln-data/epss.csv.gz" <<'PY'
+import gzip
+import pathlib
+import sys
+source, destination = map(pathlib.Path, sys.argv[1:])
+raw = source.read_bytes()
+if raw[:2] == b'\x1f\x8b':
+    destination.write_bytes(raw)
+else:
+    destination.write_bytes(gzip.compress(raw, mtime=0))
+PY
+else
+  # A cached optional snapshot must never silently enter a new bundle.
+  rm -f "$asset_dir/vuln-data/epss.csv.gz"
+fi
 invalidate "$cisa_file"
 download "$cisa_url" "$cisa_file"
 

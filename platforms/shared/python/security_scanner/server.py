@@ -177,6 +177,11 @@ def scan_directory_payload(
         raw_findings.extend(_grype_findings(grype_matches, components))
         library_vulnerabilities = _grype_vulnerability_payloads(grype_matches, components, binary)
         local_vulnerability["matched_vulnerabilities"] = len(grype_matches)
+        from .data_release import managed_data_required
+        if managed_data_required() and (grype.fatal or not local_vulnerability.get("available")):
+            local_vulnerability["matched_vulnerabilities"] = None
+            local_vulnerability["comparison_available"] = False
+
         local_vulnerability["status"] = "failed" if grype.fatal or not local_vulnerability.get("available") else ("warning" if grype.warning or local_vulnerability.get("warning") else "completed")
         for warning in (local_vulnerability.get("warning"), grype.warning):
             if warning and str(warning) not in scan_warnings:
@@ -210,6 +215,10 @@ def scan_directory_payload(
     payload["scan"]["enable_local_vulnerabilities"] = enable_local_vulnerabilities
     payload["scan"]["local_vulnerability"] = local_vulnerability
     payload["scan"]["scope"] = scan_scope or "all"
+    if enable_local_vulnerabilities:
+        from .intelligence_enrichment import enrich_records as enrich_intelligence, snapshot_summary
+        payload["components"] = enrich_intelligence(payload.get("components", []))
+        payload["offline_intelligence"] = snapshot_summary()
     if library_vulnerabilities:
         payload["vulnerabilities"] = library_vulnerabilities
     return _replace_upload_path(payload, str(target_path.resolve()), display_path) if display_path else payload
@@ -246,7 +255,7 @@ def _grype_findings(matches: tuple[GrypeMatch, ...], components) -> list[Finding
             target=component.target,
             line=component.line,
             evidence=f"{component.purl}: {', '.join(identifiers)}" + (f"; fixed in {fixed}" if fixed else ""),
-            description="The bundled local Grype database reports a vulnerability for this exact dependency version.",
+            description="The selected local Grype database reports a vulnerability for this exact dependency version.",
             recommendation=f"Upgrade to {fixed}." if fixed else "Review the vulnerability identifiers and upgrade, patch, replace, or document a compensating control.",
             issue_key=f"dependency.osv-known-vulnerability|{component.purl}|{','.join(sorted(identifiers))}",
         ))
@@ -304,6 +313,7 @@ def _grype_vulnerability_payloads(matches: tuple[GrypeMatch, ...], components, g
         records.append({
             "vulnerability_id": match.vulnerability_id, "vulnerability_ids": list(match.vulnerability_ids or (match.vulnerability_id,)), "cve_ids": list(match.cve_ids),
             "component_name": component.name, "installed_version": component.version, "fixed_versions": list(match.fixed_versions),
+            "purl": component.purl,
             "severity": match.severity, "cvss_score": cvss_score, "known_exploited": bool(kev), "nvd": nvd, "cisa_kev": kev,
             "locations": list(match.locations or (str(component.path),)), "identity_status": getattr(component, "identity_status", "resolved"),
             "recommendation": f"Upgrade to {', '.join(match.fixed_versions)}." if match.fixed_versions else "Review the advisory and remediate with the vendor-supported release.",
@@ -313,7 +323,9 @@ def _grype_vulnerability_payloads(matches: tuple[GrypeMatch, ...], components, g
             "final_status": final_status,
             "final_checked_versions": list(final_checked_versions),
         })
-    return records
+    from .offline_epss import enrich_records
+    from .intelligence_enrichment import enrich_records as enrich_intelligence
+    return enrich_intelligence(enrich_records(records), components=[{"purl": item.purl, "name": item.name, "version": item.version} for item in components])
 
 
 def _nvd_cvss(record: object) -> float | None:
@@ -632,6 +644,9 @@ def zap_scan_payload(
             payload["components"] = merge["components"]
         if isinstance(merge.get("sbom"), dict):
             payload["sbom"] = merge["sbom"]
+            if merge["sbom"].get("bomFormat") == "CycloneDX":
+                from .sbom import spdx_from_cyclonedx
+                payload["spdx_sbom"] = spdx_from_cyclonedx(merge["sbom"])
     else:
         payload = build_dashboard_payload(
             findings,
@@ -1088,16 +1103,22 @@ def _handler(language: str):
         def _handle_export(self) -> None:
             try:
                 request = self._read_json(max_bytes=4_194_304)
-                report_format = _choice_value(request, "format", {"md", "markdown", "xlsx", "hwpx", "pdf", "html"}, "md")
+                report_format = _choice_value(request, "format", {"md", "markdown", "xlsx", "hwpx", "pdf", "html", "spdx"}, "md")
                 lang = _choice_value(request, "language", {"en", "ko"}, language)
                 payload = request.get("payload")
                 if not isinstance(payload, dict):
                     raise ValueError("'payload' must be an object")
+                if report_format == "spdx":
+                    from .sbom import spdx_from_cyclonedx
+                    spdx = spdx_from_cyclonedx(payload.get("sbom"))
             except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
 
-            if report_format == "html":
+            if report_format == "spdx":
+                body = (json.dumps(spdx, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+                content_type, extension = "application/spdx+json; charset=utf-8", "spdx.json"
+            elif report_format == "html":
                 body = render_html_pair_zip_from_payload(payload, lang)
                 content_type, extension = "application/zip", "zip"
             elif report_format in {"md", "markdown"}:

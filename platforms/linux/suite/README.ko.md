@@ -1,701 +1,88 @@
 # KODA + KODA SBOM Tracker 폐쇄망 통합본
 
-> 현행화 기준: 2026-10-11 검증한 소스 checkout. 제품 소스·테스트·빌드
-> 스크립트는 이번 GitHub 게시에 포함되며 기존 배포 이미지의 업데이트는 아닙니다.
-> 아래 checkout 동작을 운영에 적용하기 전에 설치 버전과 대응 번들의
-> 재빌드·검증 여부를 확인해야 합니다.
+KODA와 KODA SBOM Tracker는 별도 저장소·배포물·데이터베이스로 유지합니다. 이 묶음은 두 전달물을 공통 gateway로 연결합니다. Tracker는 `/`, KODA는 `/koda/`에서 제공하며 PostgreSQL은 Tracker의 데이터를 보관합니다.
 
-이 압축파일 하나에 KODA Docker 오프라인 이미지와 KODA SBOM Tracker의
-Dependency-Track·PostgreSQL·포털 이미지를 함께 담았습니다. 실제 비밀번호와 API
-키는 포함하지 않습니다.
+분석은 반입한 Grype·NVD·KEV·선택적 EPSS 및 보강 자료를 사용합니다. OSV 온라인 조회는 사용하지 않습니다. Tracker가 로그인·세션을 관리하고 KODA는 자체 프로젝트 권한을 적용합니다.
 
-설치 중 오류가 발생하면 [폐쇄망 설치 장애 대응서](TROUBLESHOOTING.ko.md)의
-`증상 → 확인 → 조치 → 정상 기준` 순서로 확인합니다.
+## 설치 준비
 
-## 서버 조건
+Linux x86_64, Docker Engine, Compose v2, Python 3, Bash, sha256sum, flock이 필요합니다. 연결망 빌드 호스트에서 호환되는 KODA·Tracker 전달물과 취약점 데이터를 묶고, 전달물의 서명·manifest·체크섬을 검증합니다. 실제 비밀번호·키는 서버 전용 `.env`에 보관합니다.
 
-- Linux x86_64/amd64
-- Docker Engine과 `docker compose` 플러그인 선설치
-- Docker 권한이 있는 비루트 운영 계정으로 실행
-- `python3`, `tar`, `sha256sum`, `flock`, `realpath`
-- 압축 해제 공간과 Docker 이미지·DB 공간을 합쳐 최소 15GB 여유 권장
+운영 TLS는 gateway 앞의 HTTPS 종료 지점에서 처리합니다. 외부 reverse proxy는 HTTPS 오리진과 호스트를 보존해야 합니다. 운영 모드에는 Secure Cookie를 사용하며 KODA 내부 포트 8765는 외부에 공개하지 않습니다.
 
-## 최초 설치와 동시 기동
+## 설정과 설치
 
-반입 파일의 SHA-256을 먼저 확인합니다.
-
-```bash
-sha256sum -c koda-suite-offline-x86_64-@SUITE_VERSION@.tar.gz.sha256
-tar -xzf koda-suite-offline-x86_64-@SUITE_VERSION@.tar.gz
-cd koda-suite-offline-x86_64-@SUITE_VERSION@
-./koda-suite verify
-```
-
-운영 환경파일 `.env` 하나를 준비합니다. 통합 압축파일의
-`.env.example`은 Tracker 설정과 포트·게이트웨이·KODA 설정을 이미 합친
-파일입니다. 예시의 모든
-`change-me-*` 값을 실제 값으로 바꾸고,
-`DTRACK_API_BASE_URL`은 브라우저가 접근할 수 있는 Dependency-Track base 주소인
-`http://<서버주소>:8088/dependency-track` 형태로 지정합니다. 프론트엔드가 여기에
-`/api`를 자동으로 붙이므로 `/dependency-track/api`까지 입력하면 안 됩니다.
-관리자 자동화용 `DTRACK_ADMIN_API_BASE_URL`만 `/dependency-track/api`를 포함합니다.
-`TRACKER_DEPENDENCY_TRACK_API_KEY`에는 Dependency-Track의 BOM 업로드·프로젝트
-생성·조회에 필요한 최소 권한 전용 키를 넣습니다.
-
-```bash
-cp .env.example ./.env
-chmod 600 ./.env
-vi ./.env
-./koda-suite install --env-file ./.env
-```
-
-위 명령은 기존 named volume과 `$PREFIX/data/koda-portal`을 보존한 채 두 내부
-manifest·환경설정·취약점 bundle을 검증하고 모든 이미지를 `docker load`한 뒤
-Tracker와 KODA 대시보드를 함께 기동하고 HTTP 상태까지 확인합니다. 압축파일의
-`metadata.env`가 `TRACKER_VULNERABILITY_BUNDLE=included`이면 최초 설치에서 Tracker
-전용 Grype/NVD/KEV 데이터도 manifest 검증 후 자동 반입합니다. 이 단계는 Docker
-volume 반입까지이며, 최초 로그인 후 포털의 `취약점 데이터 → 반입 상태 동기화`를
-한 번 실행해야 감사 이력과 기준일이 등록됩니다. 기본 설치
-위치는 `$HOME/koda-suite`이며 다른 위치가 필요하면 최초 설치에
-`--prefix /원하는/경로`를 추가합니다.
-
-운영 게이트웨이는 반드시 HTTPS로 외부에 게시해야 합니다. 이 번들은 인증서
-종료기를 제공하지 않으므로, 앞단 TLS reverse proxy가 원래 Host와 HTTPS scheme을
-유지한 채 이 게이트웨이로 전달해야 합니다. `TRACKER_ENVIRONMENT=production`에서는
-`GATEWAY_PUBLIC_SCHEME=https`와 `TRACKER_SECURE_COOKIES=true`가 아니면 launcher가
-기동을 거부합니다. 개발용 예외는 loopback 전용에서만
-`TRACKER_ENVIRONMENT=development`로 명시할 수 있습니다. 최초 Tracker 로그인 후
-응답/사용자 관리 화면에서 계정 UUID를 확인하고 KODA 시스템 관리자를 한 번만
-bootstrap합니다.
-
-```bash
-PREFIX="$HOME/koda-suite"
-TRACKER_UUID='Tracker 화면에 표시된 UUID'
-"$PREFIX/koda/koda-docker" dashboard bootstrap --tracker-user-id "$TRACKER_UUID"
-```
-
-기본 주소:
-
-- Suite: `https://<서버주소>:8088/` (TLS reverse proxy 뒤)
-- KODA: `https://<서버주소>:8088/koda/`
-- SBOM Tracker: `https://<서버주소>:8088/`
-- Dependency-Track: `https://<서버주소>:8088/dependency-track/`
-
-화면 주소는 다음처럼 구분합니다.
-
-- `/`는 KODA-SBOM-Tracker입니다. Tracker에서 수정한 UI는 이 주소에서 확인합니다.
-- `/koda/`는 KODA 분석 포털입니다. Tracker에서 승인된 계정은 KODA에도 자동
-  활성화되며, KODA 관리자는 필요한 프로젝트 역할만 별도로 배정합니다.
-- `/dependency-track/`는 Dependency-Track 화면입니다. 정적 설정 파일 404가 나오면
-  새 압축파일의 `install`을 반복하기보다 `./koda-suite status`와
-  `docker compose ... logs gateway dtrack-frontend`를 먼저 확인합니다.
-
-Tracker SBOM 업로드 기본 한도는 500MiB이고, KODA 입력 파일은 `/koda/api/`에서
-2GiB까지 스트리밍 업로드합니다. 413이 계속되면 앞단 TLS reverse proxy의
-`client_max_body_size` 또는 요청 본문 제한도 `/koda/api/` 기준 2GiB 이상으로 맞춥니다.
-포털 입력 보관소의 누적 한도는 기본 10GiB이며, `.env`의
-`KODA_PORTAL_UPLOAD_QUOTA_BYTES`로 조정할 수 있습니다. 사용 중인 입력과 진행 중인
-업로드가 한도를 차지하며, 점검 후 원본을 삭제하면 용량을 다시 사용할 수 있습니다.
-일반 포털 JSON 요청은 1MiB로 제한하고, 스케줄 결과 API의 500MiB 한도는 유지합니다.
-대용량 업로드가 503으로 끝나지 않도록 통합 gateway에는 `/koda/api/` 전용
-1시간 body·proxy timeout과 요청 스트리밍 설정이 포함되어 있습니다. 외부 TLS
-reverse proxy도 같은 경로에 `client_body_timeout 1h`, `proxy_send_timeout 1h`,
-`proxy_read_timeout 1h`, `proxy_request_buffering off`를 적용해야 합니다.
-
-Tracker UI가 이전 화면으로 보이면 브라우저에서 `Ctrl+Shift+R`로 캐시를 비운 뒤
-`/`를 다시 엽니다.
-
-KODA 대시보드의 `SBOM Tracker 열기` 버튼은 기본적으로 same-origin `/`를 엽니다.
-별도 Tracker 주소를 사용할 때만 `.env`의
-`KODA_SSBOM_TRACKER_URL`을 해당 HTTPS 주소로 바꿉니다.
-KODA 컨테이너의 8765 포트는 호스트에 게시되지 않고 통합 게이트웨이 전용 Docker
-네트워크에서만 접근됩니다. 인증과 권한은 Tracker 계정 및 게이트웨이의
-`auth_request` 계약으로 처리됩니다. Suite가 `.env`에 생성하는
-`KODA_GATEWAY_PROOF`는 게이트웨이와 포털이 공유하며, 이 값이 없는 직접 포털 요청은
-인증된 사용자로 처리되지 않습니다. 이 비밀값을 브라우저나 다른 컨테이너에 전달하지 마세요.
-
-## 로그인·계정·권한 계약
-
-- 계정과 로그인 세션의 원본은 KODA SBOM Tracker입니다.
-- KODA와 Tracker는 같은 `__Host-koda_session` 쿠키를 사용하므로 한쪽에서
-  로그아웃하면 현재 브라우저의 중앙 세션이 폐기되어 양쪽 모두 로그아웃됩니다.
-- Tracker의 역할 정책과 KODA의 프로젝트 역할은 별도입니다. 같은 계정이라도
-  사이트별로 다른 화면·기능 권한을 가질 수 있습니다.
-- 사용자는 로그인 화면에서 가입을 신청합니다. Tracker 관리자가 역할을 확인하고
-  활성화하면 같은 계정으로 KODA에도 로그인되며, KODA 프로젝트 역할은 별도입니다.
-- KODA의 보안·품질 점검 규칙은 시스템 관리자만 변경합니다. 일반 사용자는
-  프로젝트 화면에서 검사 기준과 기준 범위만 선택합니다.
-- LDAP은 Tracker의 `설정 → LDAP 로그인`에서 서버·TLS·검색 기준 DN·속성·그룹
-  매핑을 입력해 활성화합니다. 통합 gateway는 Tracker가 발급한 검증 세션을 KODA에
-  전달하므로 KODA에서도 같은 LDAP 로그인과 로그아웃을 사용합니다. bind 비밀번호
-  암호화용 `TRACKER_LDAP_ENCRYPTION_KEY`는 운영 `.env`에만 설정합니다.
-- `/dependency-track/`는 Tracker의 서버 연동 API 키와 별도인 upstream UI 계정·권한을
-  사용합니다. Dependency-Track 자체 LDAP/OIDC는 설치된 upstream 버전의 공식 설정으로
-  별도 구성해야 하며 Tracker 세션을 자동으로 공유하지 않습니다.
-
-Tracker 장애 시 KODA 보호 화면과 API는 이전 인증 결과를 캐시해 우회하지 않고
-`503`으로 실패합니다. `/healthz`, `/api/v1/healthz`, `/koda/live` 같은 명시된
-상태 확인 경로만 인증 예외입니다.
-
-2026-10-11 checkout에서는 라이브러리·소스코드 실행 권한을 각각
-`scan.library.create`·`scan.source.create`로 검사하고 전체 점검은 두 권한을
-모두 요구합니다. 입력 등록, 결과 내보내기, 회차·프로젝트 삭제, Tracker/GitLab
-게시도 별도 실행 권한입니다. 화면 접근 권한만으로 기능을 실행할 수 없습니다.
-legacy `scan.create` 정책은 scope별 권한으로 마이그레이션합니다. 이 변경은
-로컬 소스에 구현되어 있으며 기존 설치본 반영은 확인되지 않았습니다.
-
-Suite의 proof 생성은 `.env`의 `[A-Za-z0-9_-]` 32–128자 값을 유지하고
-부적합한 값은 재생성하며 환경파일을 `0600`으로 기록합니다. 포털은 중복
-identity 헤더·잘못된 proof를 거부하고 미설정 proof에는 실패 폐쇄합니다.
-proof 관련 shell·Compose·nginx template와 포털 이미지가 같은 버전이어야
-하므로 문서 게시만으로 기존 설치본을 업데이트했다고 판단하지 않습니다.
-
-## 2026-10-11 실행 검증 범위
-
-현재 소스로 만든 `linux/amd64` 시험 이미지에서 설치·실행을 확인했습니다.
-Debian 12·Python 3.12.15 환경이며 Apple Silicon의 Docker LinuxKit VM에서
-amd64 사용자 공간을 에뮬레이션했습니다. 물리 x86_64 서버나 네이티브 x86_64
-커널의 성능·호환성을 검증한 결과는 아닙니다. Linux ARM64는 검증 대상이 아닙니다.
-
-- `platforms/linux/install.sh --no-link`로 소스 설치본을 실제 설치하고 CLI·미인증
-  API 거부를 확인했습니다. Docker 전달물의 `docker/install.sh` 전체 반입 절차를
-  실행한 결과는 아닙니다.
-- 실제 Docker 런처가 웹·분석·전송 컨테이너를 만들고 ZIP 업로드→점검→JSON/PDF
-  다운로드를 완료했습니다. PDF는 29,020바이트, 두 워커는 healthy, 잔여 작업 폴더는
-  0개였습니다. 시험 컨테이너는 종료·제거했습니다.
-- Syft 1.46.0·Grype 0.115.0을 네트워크 차단·4 GiB 제한에서 실행했습니다.
-  합성 `log4j-core 2.14.1` JAR에서 취약점 7건·경고 0건을 확인했으며
-  `--fail-on high`가 종료 코드 `1`로 차단했습니다.
-- 전체 회귀는 **768개 중 767개 통과·실패 0개·로컬 LLM 연동 1개 건너뜀**입니다.
-- 실제 Nginx gateway 로그인, 외부 Tracker/GitLab 전송, 강제 OOM 복구와 운영 Suite
-  업그레이드·롤백은 미검증입니다. 설치·롤백 unittest는 Docker test double을
-  사용하는 계약 검사이며 실제 운영 업그레이드를 뜻하지 않습니다.
-
-이번 GitHub 게시에는 실행 소스·테스트·빌드 스크립트와 문서를 포함하며 운영 이미지 배포는 포함하지 않습니다.
-[검증 요약](../../../docs/verification-2026-10-11.ko.md)을 확인하고 설치된 버전과
-대응 번들을 따로 확인하세요.
-
-## 다중 사용자·예약 점검 순차 실행
-
-Linux 설치본은 같은 KODA 이미지에서 웹 서버(`koda-dashboard`), 수동 분석
-(`koda-scan-worker`), Tracker/GitLab 전송(`koda-delivery-worker`)을 별도
-컨테이너로 실행합니다. 세 컨테이너가 `$PREFIX/data/koda-portal`의 DB와 입력을
-공유하며 워커는 호스트 포트를 게시하지 않습니다. 분석 워커의 네트워크는 `none`이고
-웹과 전송 워커가 Tracker 게이트웨이와 지정한 GitLab 통신망을 사용합니다.
-
-보고서 내보내기는 웹 컨테이너에서 별도 자식 프로세스로 한 번에 하나씩 수행하고
-시간 제한을 적용합니다. PDF 등의 렌더링은 웹 컨테이너의 메모리 한도에 포함되므로
-분석·전송 워커의 메모리 한도와 별도로 웹 자원 여유를 확보합니다.
-
-`koda-suite install`, `patch --group koda`, `start`, `stop`은 웹과 두 워커를 함께
-관리합니다. 이미지 버전이 다르거나 기존 웹 서버가 내부 분석 스레드를 사용하는
-버전이면 교체해 중복 실행을 방지합니다. 분석 워커를 먼저 중지해 분석 프로세스를
-종료하고, 영구 저장된 대기 작업은 재기동 후 복구합니다. `status`는 워커의 heartbeat와
-웹·워커 이미지 일치를 확인합니다. Docker의 `unhealthy` 표시는 자동 재시작을 의미하지
-않으므로 원인을 확인한 뒤 Suite를 재기동합니다.
-
-자원 제한은 `KODA_SCAN_CPUS=1`, `KODA_SCAN_MEMORY=4g`,
-`KODA_DELIVERY_CPUS=0.5`, `KODA_DELIVERY_MEMORY=512m`이 기본값입니다.
-분석 시간 제한은 `KODA_SCAN_TIMEOUT_SECONDS=21600`(6시간)입니다. 설정은 설치된
-`tracker/.env`에 적용하고 Suite를 재기동합니다. 컨테이너 메모리 한도는 합산되므로
-기본 웹·분석·전송 한도만 약 8.5GiB이며 Tracker·Dependency-Track·OS의 여유 공간은
-별도로 필요합니다. 서버 사양에 맞게 각 한도를 조정하세요.
-
-로컬 개발 소스는 수동·예약 점검의 실행권을 공유해 점검 엔진 동시 실행을 하나로
-제한합니다. 시작한 예약은 수집·분석·정리까지 완료하고, 수동 요청은 접수 순서대로
-대기·실행합니다. 다음 작업 선택은 기존 수동 우선 정책이며 예약 `concurrency=1`을
-유지합니다. 아카이브 슬롯을 제어 API와 분리해 다운로드 중 heartbeat가 막히지
-않도록 했습니다. [순차 실행 안내](../../../docs/linux-scan-queue.ko.md)의 검증·배포
-범위를 확인하세요. 이 소스 변경만으로 설치된 이미지가 업데이트되지는 않습니다.
-
-## KODA 화면·분석·보고서
-
-- `대시보드`: 점검 이력이 있는 프로젝트별 최신 상태와 심각도 분포를 확인합니다.
-- `라이브러리 취약점`: 입력을 CVE 기준으로 점검하고 CVE가 연결된 Grype 결과만 표시합니다.
-- `소스코드 취약점`: 입력을 `전체` 또는 지원 검사 기준·범위로 점검합니다.
-- `프로젝트`: 입력 파일과 회차를 프로젝트별로 관리합니다.
-- `점검 결과`: 결과와 실행 당시 정책·요청 계정 스냅샷을 회차별로 보존합니다.
-- `비교`: 같은 프로젝트의 회차 결과를 비교합니다.
-- `관리자 설정`: KODA 접근·시스템 관리자, 사용자별 프로젝트 역할, 전역 역할 정책,
-  보안·품질 규칙과 감사 기록을 관리합니다.
-- `사용 가이드`: 기능·보안 용어·지원 기준을 모든 활성 KODA 사용자에게 제공합니다.
-
-실제 결과 화면, 라이브러리·소스코드·품질 탭과 기능 흐름도는
-[KODA 웹 포털 화면과 기능](../../../docs/koda-web-portal.ko.md)에서 확인합니다.
-
-완료 회차의 보고서는 Windows/Linux 공통 CLI 렌더러를 그대로 사용합니다. 화면에서
-메인·상세 HTML 보기와 HTML ZIP, PDF, Excel, JSON, Markdown을 내려받을 수 있고,
-SBOM은 CycloneDX 1.6 JSON 또는 국정원 NIS-SBOM 1.0 CSV로 내려받습니다. 라이브러리
-회차의 HTML은 구성요소·버전·취약점 식별자 중심의 라이브러리 취약점 보고서입니다.
-
-현재 checkout의 NIS-SBOM·비교 CSV는 모든 셀을 인용하고 수식 시작 값 앞에
-tab을 붙입니다. CycloneDX/JSON 값은 변경하지 않습니다. Java 점검에는 기본
-깊이 8과 전체 대상 합산 엔트리·바이트 한도가 적용되며 자원 제한으로
-불완전하면 부분 보고서와 경고를 남기고 종료 코드 `2`를 반환합니다. 상세
-한도와 운영 해석은 [Java SBOM·취약점 점검](../../../docs/security/java-sbom-vulnerability-scan.md)을 확인합니다.
-
-웹 분석은 manifest/lockfile에서 정확한 이름·버전·PURL을 얻은 의존성을 번들된
-오프라인 Grype DB로 점검합니다. 결과에 라이브러리 취약점이 없으면 입력 파일이
-지원 manifest인지와 KODA 컨테이너의 `KODA_GRYPE_BIN`, `GRYPE_DB_CACHE_DIR`를
-[장애 대응서](TROUBLESHOOTING.ko.md#koda-웹에서-라이브러리-취약점이-0건)에서
-확인합니다. JAR/WAR/EAR 내부 라이브러리는 아래 `jar-scan` 경로를 사용합니다.
-
-## 재기동·상태·중지
-
-```bash
-PREFIX="$HOME/koda-suite" # 사용자 지정 설치 경로라면 같은 값으로 변경
-"$PREFIX/koda-suite" start
-"$PREFIX/koda-suite" status
-"$PREFIX/koda-suite" stop
-```
-
-`stop`은 컨테이너만 멈추며 PostgreSQL, Dependency-Track, SBOM 원본과 취약점
-데이터의 Docker named volume은 삭제하지 않습니다. `start`, `status`, `stop`은 모두
-같은 기본·폐쇄망·통합 Compose 파일 조합을 사용하므로 재기동 후에도 KODA는 호스트
-포트를 직접 게시하지 않고 통합 게이트웨이로만 접근됩니다.
-
-### 기존 설치를 최신 통합본으로 갱신할 때
-
-지난 릴리스 이후 Compose, 인증 또는 환경변수 전달이 바뀐 통합본은 부분 `patch`가
-아니라 같은 설치 경로에 `install`을 다시 실행합니다. 이 방식은 새 이미지를 검증·로드하고
-Suite 소유 컨테이너를 `--force-recreate`하지만 다음 데이터는 삭제하지 않습니다.
-
-- KODA 포털 DB와 입력: `$PREFIX/data/koda-portal`
-- Tracker 계정·서비스·회차: PostgreSQL `sbom_tracker` DB
-- Dependency-Track 프로젝트·정책: PostgreSQL `dtrack` DB와 `dtrack-data` volume
-- 업로드 SBOM: `tracker-artifacts` volume
-- 반입 취약점 자료: `vuln-data` volume
-
-`reset-install.sh --delete-all-koda-data`, `docker compose down -v`, `docker volume rm`,
-`docker system prune --volumes`는 이 갱신 절차에 사용하지 않습니다.
-
-1. 기존 설치와 저장공간을 확인합니다.
-
-```bash
-PREFIX="$HOME/koda-suite"
-ENV_FILE="$PREFIX/tracker/.env"
-
-test -x "$PREFIX/koda-suite"
-test -s "$ENV_FILE"
-"$PREFIX/koda-suite" status
-df -h "$PREFIX" "$(docker info --format '{{.DockerRootDir}}')"
-docker inspect koda-dashboard \
-  --format 'name={{.Name}} state={{.State.Status}} image={{.Config.Image}}'
-```
-
-정상 기대값은 `koda-dashboard`가 `state=running`, Tracker Compose 서비스가
-`running` 또는 `healthy`, 마지막 출력이 `Suite: https://<server>:<port>/`입니다.
-공간은 압축 해제 파일과 Docker image를 함께 적재할 수 있도록 최소 15GB를 권장합니다.
-
-2. 운영값을 노출하지 않고 환경 계약을 확인합니다.
-
-```bash
-chmod 600 "$ENV_FILE"
-grep -E \
-  '^(COMPOSE_PROJECT_NAME|PUBLIC_HTTP_PORT|TRACKER_ENVIRONMENT|TRACKER_PUBLIC_ORIGIN|TRACKER_SECURE_COOKIES|DTRACK_API_BASE_URL)=' \
-  "$ENV_FILE"
-```
-
-운영 환경이면 `TRACKER_ENVIRONMENT=production`, HTTPS origin,
-`TRACKER_SECURE_COOKIES=true`여야 합니다. DB 비밀번호와 API 키는 출력하지 않습니다.
-LDAP 로그인을 사용할 때만 `TRACKER_LDAP_ENCRYPTION_KEY`가 필요합니다. 기존 값이 없으면
-다음 명령으로 실제 키를 화면에 출력하지 않고 추가합니다.
-
-```bash
-python3 - "$ENV_FILE" <<'PY'
-import base64
-import pathlib
-import secrets
-import sys
-
-path = pathlib.Path(sys.argv[1])
-lines = path.read_text(encoding="utf-8").splitlines()
-key = "TRACKER_LDAP_ENCRYPTION_KEY"
-current = next((line.split("=", 1)[1] for line in lines if line.startswith(f"{key}=")), "")
-if not current or current.startswith("change-me"):
-    value = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
-    lines = [line for line in lines if not line.startswith(f"{key}=")]
-    lines.append(f"{key}={value}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-PY
-chmod 600 "$ENV_FILE"
-```
-
-3. 새 압축파일과 외부 SHA-256을 검증하고 별도 디렉터리에 풉니다.
-
-```bash
-RELEASE_DIR=/media/koda-release/latest
-cd "$RELEASE_DIR"
-sha256sum -c koda-suite-offline-x86_64-<버전>.tar.gz.sha256
-tar -xzf koda-suite-offline-x86_64-<버전>.tar.gz
-cd koda-suite-offline-x86_64-<버전>
-./koda-suite verify
-grep -E \
-  '^(TARGET_PLATFORM|KODA_GIT_REVISION|TRACKER_GIT_REVISION|KODA_TRACKED_WORKTREE_DIRTY|TRACKER_WORKTREE_DIRTY|TRACKER_VULNERABILITY_BUNDLE)=' \
-  metadata.env
-```
-
-기대값은 SHA 검사 `OK`, `KODA Suite release integrity OK`,
-`TARGET_PLATFORM=linux/amd64`, 두 `*_DIRTY=false`,
-`TRACKER_VULNERABILITY_BUNDLE=included`입니다. 하나라도 다르면 설치하지 않습니다.
-
-4. 삭제나 이미지 로드 전에 새 릴리스와 기존 환경의 호환성을 검사합니다.
-
-```bash
-./koda-suite preflight \
-  --env-file "$ENV_FILE" \
-  --prefix "$PREFIX" \
-  --require-vulnerability-data
-```
-
-기대 출력은 `Air-gap preflight OK`, `Vulnerability bundle verified`,
-`KODA Suite preflight OK`이며, 이 명령 자체는 컨테이너나 volume을
-삭제하지 않습니다.
-
-5. 운영 데이터가 필요한 서버는 갱신 전에 전체 백업을 만듭니다. 이미 별도 백업 정책을
-수행했다면 이 단계의 중복 백업은 생략할 수 있습니다.
-
-```bash
-BACKUP_DIR="/media/koda-backup/$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$BACKUP_DIR"
-
-"$PREFIX/koda-suite" stop
-tar -C "$PREFIX/data" -czf "$BACKUP_DIR/koda-portal.tar.gz" koda-portal
-ENV_FILE="$ENV_FILE" BACKUP_ROOT="$BACKUP_DIR/tracker" \
-  "$PREFIX/tracker/scripts/backup-system.sh"
-ENV_FILE="$ENV_FILE" \
-  "$PREFIX/tracker/scripts/verify-backup.sh" \
-  "$BACKUP_DIR/tracker/<백업-명령이-출력한-UTC-디렉터리>"
-```
-
-백업 및 검증 명령이 모두 종료코드 `0`이어야 합니다. Suite는 다음 설치 명령이 다시
-기동하므로 이 단계에서 별도로 `start`하지 않습니다.
-
-6. 같은 `PREFIX`에 최신 통합본을 설치합니다.
-
-```bash
-./koda-suite install --env-file "$ENV_FILE" --prefix "$PREFIX"
-```
-
-정상 완료 시 각 image의 `Loaded image` 또는 `Loaded image ID`, KODA
-`bundle integrity OK`, `smoke tests OK`, Tracker `Air-gap services are healthy`,
-마지막에 `installed and started: $PREFIX`가 출력됩니다. 기존 volume과
-`$PREFIX/data/koda-portal`은 그대로 유지됩니다.
-
-7. 기존 설치에도 새 취약점 자료를 적용합니다. `install`은 기존 `vuln-data` volume을
-보존하므로, 릴리스에 포함된 bundle을 명시적으로 검증·반입합니다.
-
-```bash
-"$PREFIX/tracker/scripts/verify-vuln-bundle.sh" \
-  "$PREFIX/tracker/vulnerability-data"
-ENV_FILE="$ENV_FILE" \
-  "$PREFIX/tracker/scripts/import-vuln-bundle.sh" \
-  "$PREFIX/tracker/vulnerability-data"
-```
-
-기대 출력은 `Vulnerability bundle verified`와
-`Imported vulnerability data bundle <version>`입니다. 이후 Tracker 관리 화면의
-`취약점 데이터 → 반입 상태 동기화`를 실행하고 새 분석 회차를 시작해야 새 기준일이
-분석 결과에 반영됩니다. 기존 완료 회차는 자동 재분석되지 않습니다.
-
-8. 컨테이너·image·HTTP·수정 포함 여부를 확인합니다.
-
-```bash
-"$PREFIX/koda-suite" status
-
-PORT="$(awk -F= '$1 == "PUBLIC_HTTP_PORT" {print $2; exit}' "$ENV_FILE")"
-curl -fsS "http://127.0.0.1:${PORT}/healthz"
-curl -fsS "http://127.0.0.1:${PORT}/api/v1/healthz"
-curl -fsS "http://127.0.0.1:${PORT}/koda/live"
-curl -fsS "http://127.0.0.1:${PORT}/dependency-track/api/version"
-curl -fsS "http://127.0.0.1:${PORT}/dependency-track/static/config.json" \
-  | python3 -m json.tool
-
-docker image inspect koda-offline:@SUITE_VERSION@ \
-  --format 'arch={{.Architecture}} revision={{index .Config.Labels "org.opencontainers.image.revision"}} offline={{index .Config.Labels "io.koda.offline"}}'
-docker exec koda-sbom-portal-api sh -c \
-  "grep -n 'input-format' /app/koda_tracker/main.py /app/koda_tracker/sbom.py"
-docker exec koda-sbom-portal-api python -c \
-  'import cryptography, ldap3; print("LDAP runtime OK")'
-```
-
-기대값은 HTTP 응답이 각각 `ok`, `{"status":"ok"}`, `{"status":"live"}`와
-Dependency-Track version JSON이고, image는 `arch=amd64`, `offline=true`입니다.
-CycloneDX 확인에는 `--input-format` 코드가 표시되고 마지막 명령은
-`LDAP runtime OK`를 출력해야 합니다. 외부 TLS 주소도 별도로 `/`, `/koda/`,
-`/dependency-track/`를 열어 로그인·SBOM 업로드·새 분석 회차를 확인합니다.
-
-### 테스트 설치를 완전히 초기화할 때
-
-새 압축파일을 별도 폴더에 풀고, 기존 설치 루트에 보관된 두 환경파일만 복사합니다.
-아래 명령은 백업 없이 계정·세션·프로젝트·SBOM·Dependency-Track DB·취약점
-volume과 KODA 포털 SQLite를 모두 삭제한 뒤 새 취약점 자료와 서비스를 설치합니다.
-플래그가 없거나 사전검사가 실패하면 삭제를 시작하지 않습니다.
-
-```bash
-PREFIX="$HOME/koda-suite"
-cp "$PREFIX/tracker/.env" ./.env
-cp "$PREFIX/tracker/.env" ./koda-suite.env
-chmod 600 ./.env ./koda-suite.env
-./reset-install.sh --delete-all-koda-data --prefix "$PREFIX"
-```
-
-스크립트는 `COMPOSE_PROJECT_NAME`이 `koda-sbom` 계열인지, container/network/volume의
-Compose 소유권 라벨이 일치하는지 확인합니다. `open-webui`, `chromadb` 같은 다른
-프로젝트와 Docker 이미지는 삭제하지 않으며 `docker system prune`도 실행하지 않습니다.
-
-## 폐쇄망 부분 교체·백업·복원
-
-검증된 새 통합 압축파일에서 호환 그룹만 패치할 수 있습니다. 패치는 KODA 포털
-디렉터리와 Tracker named volume·network를 보존하고 선택한 컨테이너만 재생성합니다.
-
-| 대상 | 실제 저장 위치 | 교체·백업 방법 |
-| --- | --- | --- |
-| KODA·Tracker·Dependency-Track 응용프로그램/이미지 | Docker 이미지와 `$PREFIX/koda`, `$PREFIX/tracker` | 새 통합 압축파일에서 아래 호환 그룹 `patch` 실행 |
-| KODA 사용자 승인·프로젝트 권한·점검 정책·회차 | `$PREFIX/data/koda-portal` | Suite를 중지하고 디렉터리 전체를 tar로 백업·복원 |
-| Tracker 계정·역할·세션·서비스·업로드 회차·감사 기록 | `sbom_tracker` DB와 `tracker-artifacts` volume | Tracker `backup-system.sh`/`restore-system.sh` 사용 |
-| Dependency-Track 프로젝트·정책·분석 데이터 | `dtrack` DB와 `dtrack-data` volume | 같은 Tracker 전체 백업에 포함 |
-| Tracker Grype/NVD/KEV | `vuln-data` volume | 취약점 bundle만 검증·반입·롤백하거나 Tracker 전체 백업 사용 |
-| 운영 비밀번호·API 키·TLS 인증서 | `$PREFIX/tracker/.env`와 외부 TLS 종료기 | 릴리스와 분리하여 접근 제한된 암호화 매체에 백업 |
-| 원본 소스·SBOM·CLI 보고서 | 운영자가 지정한 호스트 경로 | Suite 백업 대상이 아니므로 해당 디렉터리를 별도 백업 |
-
-### 전체 운영 백업
-
-SQLite와 volume tar의 시점을 맞추려면 유지보수 창에 Suite를 중지한 뒤 백업합니다.
-Tracker 백업 스크립트는 필요한 동안 PostgreSQL만 기동합니다. 운영 `.env`는 기본
-백업에 포함되지 않으므로 릴리스 압축파일·SHA-256 파일과 함께 별도 암호화 매체에
-보관합니다.
-
-```bash
-PREFIX="$HOME/koda-suite"
-BACKUP_DIR="/media/koda-backup/$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$BACKUP_DIR"
-
-"$PREFIX/koda-suite" stop
-tar -C "$PREFIX/data" -czf "$BACKUP_DIR/koda-portal.tar.gz" koda-portal
-cp "$PREFIX/metadata.env" "$BACKUP_DIR/suite-metadata.env"
-(cd "$BACKUP_DIR" && \
-  sha256sum koda-portal.tar.gz suite-metadata.env > local-files.sha256)
-
-ENV_FILE="$PREFIX/tracker/.env" BACKUP_ROOT="$BACKUP_DIR/tracker" \
-  "$PREFIX/tracker/scripts/backup-system.sh"
-ENV_FILE="$PREFIX/tracker/.env" \
-  "$PREFIX/tracker/scripts/verify-backup.sh" \
-  "$BACKUP_DIR/tracker/<출력된-UTC-시각>"
-
-"$PREFIX/koda-suite" start
-"$PREFIX/koda-suite" status
-```
-
-Tracker 백업에는 두 PostgreSQL DB와 Tracker 첨부파일, Dependency-Track 데이터,
-Tracker 취약점 volume이 포함됩니다. KODA 포털 디렉터리, 운영 `.env`, TLS 인증서,
-호스트의 원본/보고서는 포함되지 않으므로 위처럼 각각 보관해야 전체 복원이
-가능합니다.
-
-### 응용프로그램·이미지 부분 교체
-
-새 통합 압축파일을 별도 디렉터리에 풀고 무결성을 확인한 뒤 필요한 그룹만 패치합니다.
-Compose·인증·포털 스키마 계약이 달라진 릴리스는 부분 패치를 거부하므로 같은
-`PREFIX`에 전체 `install`을 사용합니다. PostgreSQL도 부분 패치 대상이 아닙니다.
-
-```bash
-PREFIX="$HOME/koda-suite"
-cd /media/koda-release
-sha256sum -c koda-suite-offline-x86_64-<새버전>.tar.gz.sha256
-cd koda-suite-offline-x86_64-<새버전>
-./koda-suite verify
-GROUP=portal-api-worker # koda, gateway, portal-web, portal-api-worker, dependency-track 중 하나
-./koda-suite patch --group "$GROUP" --prefix "$PREFIX"
-./koda-suite status
-```
-
-`portal-api`와 `portal-worker`, Dependency-Track API와 frontend는 호환 그룹으로 함께
-교체됩니다. 부분 패치는 취약점 volume을 변경하지 않습니다. 취약점 DB까지 새로
-설치하려면 별도의 취약점 bundle 검증·반입 명령을 사용합니다. 데이터가 호환되지 않아
-의도적으로 전체 초기화해야 하는 테스트 환경에서만 `reset-install.sh
---delete-all-koda-data`를 사용합니다.
-
-### 데이터만 복원
-
-KODA 포털 데이터만 되돌릴 때는 백업 해시를 확인하고 현재 디렉터리를 즉시 삭제하지
-말고 옆으로 이동해 둡니다.
-
-```bash
-PREFIX="$HOME/koda-suite"
-BACKUP_DIR=/media/koda-backup/<UTC-시각>
-(cd "$BACKUP_DIR" && sha256sum -c local-files.sha256)
-
-"$PREFIX/koda-suite" stop
-mv "$PREFIX/data/koda-portal" \
-  "$PREFIX/data/koda-portal.before-restore.$(date -u +%Y%m%dT%H%M%SZ)"
-tar -C "$PREFIX/data" -xzf "$BACKUP_DIR/koda-portal.tar.gz"
-"$PREFIX/koda-suite" start
-"$PREFIX/koda-suite" status
-```
-
-Tracker·Dependency-Track 데이터를 되돌릴 때는 백업 당시와 호환되는 릴리스와
-`.env`를 먼저 준비합니다. 복원 스크립트는 현재 DB와 named volume을 교체하고
-PostgreSQL만 기동한 상태로 끝나므로 Suite를 다시 시작해야 합니다.
-
-```bash
-PREFIX="$HOME/koda-suite"
-TRACKER_BACKUP=/media/koda-backup/<UTC-시각>/tracker/<UTC-시각>
-
-"$PREFIX/koda-suite" stop
-ENV_FILE="$PREFIX/tracker/.env" \
-  "$PREFIX/tracker/scripts/verify-backup.sh" "$TRACKER_BACKUP"
-ENV_FILE="$PREFIX/tracker/.env" \
-  "$PREFIX/tracker/scripts/restore-system.sh" "$TRACKER_BACKUP"
-"$PREFIX/koda-suite" start
-"$PREFIX/koda-suite" status
-```
-
-백업과 현재 `.env`의 `COMPOSE_PROJECT_NAME`, DB 이름, volume 이름이 다르면 임의로
-복원하지 않습니다. 계정·권한·점검 정책을 관리자 화면에서 대량 변경하기 전에도
-Tracker DB와 KODA 포털 디렉터리 중 해당 저장소를 먼저 백업합니다.
-
-## GitLab 폐쇄망 연결
-
-GitLab에 접근하는 구성요소는 KODA dashboard와 전송 워커입니다. Tracker와
-Dependency-Track 컨테이너를 GitLab egress 네트워크에 연결하지 않습니다. 운영
-방화벽에서 해당 네트워크의 목적지를 GitLab HTTPS 주소로 제한합니다.
-
-```bash
-PREFIX="${KODA_SUITE_PREFIX:-$HOME/koda-suite}"
-docker network inspect koda-gitlab-egress >/dev/null 2>&1 || \
-  docker network create koda-gitlab-egress
-vi "$PREFIX/tracker/.env"
-# KODA_GITLAB_NETWORK=koda-gitlab-egress
-```
-
-Docker Engine 27 이하에서도 GitLab egress가 유일한 외부 기본 경로가 되도록
-`koda-dashboard` 통신망은 `internal=true`여야 합니다. 기존 설치에서 이 값이
-`false`이면 다음과 같이 Compose 컨테이너만 제거하고 네트워크를 한 번 재생성합니다.
-`down -v`는 사용하지 않으므로 named volume과 KODA 포털 데이터는 보존됩니다.
-
-```bash
-PREFIX="${KODA_SUITE_PREFIX:-$HOME/koda-suite}"
-ENV_FILE="$PREFIX/tracker/.env"
-
-"$PREFIX/koda-suite" stop --prefix "$PREFIX"
-docker compose --project-directory "$PREFIX/tracker" --env-file "$ENV_FILE" \
-  -f "$PREFIX/tracker/compose.yaml" \
-  -f "$PREFIX/tracker/compose.airgap.yaml" \
-  -f "$PREFIX/tracker/compose.integration.yaml" \
-  down --remove-orphans
-
-docker network rm koda-dashboard
-docker network create --internal \
-  -o com.docker.network.bridge.enable_ip_masquerade=false \
-  koda-dashboard
-
-"$PREFIX/koda-suite" start --prefix "$PREFIX"
-docker network inspect koda-dashboard \
-  --format 'internal={{.Internal}} masquerade={{index .Options "com.docker.network.bridge.enable_ip_masquerade"}}'
-```
-
-마지막 출력은 `internal=true masquerade=false`여야 합니다.
-
-GitLab URL·조회 토큰·쓰기 토큰·사설 CA는 압축파일이나 `.env`에 넣지 않고 KODA
-관리자 화면 `설정 > 연동 설정`에 입력합니다. 조회 토큰은 `read_api`, 쓰기 토큰은
-`api` 범위이며 Developer 이상 계정을 사용합니다. 연결 시험을 통과한 뒤 저장소를
-매핑하고 branch 또는 tag를 선택하면 KODA가 commit SHA로 고정해 점검합니다.
-소스 취약점은 항목별 confidential Issue로, Tracker 분석 결과는 commit별 confidential
-요약 Issue와 유지되는 결과 branch/MR로 등록됩니다. Tracker 전송 또는 GitLab 등록이
-실패해도 점검 결과는 보존되며 결과 화면에서 각각 재시도합니다.
-
-```bash
-docker inspect koda-dashboard --format '{{json .NetworkSettings.Networks}}'
-docker inspect koda-delivery-worker --format '{{json .NetworkSettings.Networks}}'
-docker inspect koda-scan-worker --format '{{json .NetworkSettings.Networks}}'
-docker inspect koda-sbom-portal-api --format '{{json .NetworkSettings.Networks}}'
-```
-
-웹과 전송 워커의 출력에만 `koda-gitlab-egress`가 있고 분석 워커와 Tracker API에는
-없어야 합니다. 분석 워커는 `none` 네트워크로 실행합니다.
-
-## 스캔과 SBOM 전달
-
-KODA CLI는 기존 명령을 그대로 사용합니다.
-
-```bash
-PREFIX="$HOME/koda-suite" # 사용자 지정 설치 경로라면 같은 값으로 변경
-"$PREFIX/koda/koda-docker" list-categories
-"$PREFIX/koda/koda-docker" jar-scan \
-  --target /srv/app/app.jar --output-dir /srv/koda-reports
-```
-
-파일 업로드로 만든 회차는 자동 전송하지 않습니다. GitLab 저장소 연결로 만든 회차는
-연결 시 Tracker 서비스·`gitlab-source` 환경·전송 토큰을 자동 준비합니다. 완료
-CycloneDX를 Tracker로 전송해 분석 결과를 받은 뒤 GitLab 결과 브랜치·Merge Request와
-비공개 CVE 요약 Issue를 생성하며, 실패 시 KODA 결과 화면에서 재시도할 수 있습니다.
-KODA가 확정한 라이브러리·소스 보안 취약점은 별도의 항목별 비공개 Issue로 생성하고,
-열린 동일 Issue에는 새 회차 댓글을 추가합니다. GitLab 쓰기 실패는 KODA 점검 결과와
-Tracker 전송을 실패로 변경하지 않습니다.
-통합 Suite는 Tracker·KODA 공유 프로비저닝 토큰과 저장소별 토큰 디렉터리를 최초 시작
-시 자동 생성합니다. 설정과 네트워크 제한은
-[GitLab 저장소 연동](../../../docs/gitlab-integration-ko.md)을 따릅니다.
-호스트의 `$PREFIX/config`은 `0700`으로 잠기며, 두 비루트 컨테이너에 직접 마운트되는
-공유 토큰만 읽기 전용 `0444`, KODA 전용 token 디렉터리만 `0733`입니다. 저장소별
-token 파일 자체는 KODA가 `0600`으로 생성합니다. 사용자 지정 경로를 쓰면 그 상위
-디렉터리도 미리 `0700`으로 제한해야 Suite가 기동합니다.
-
-기존 파일 기반 회차를 수동으로 올릴 때는 Tracker가 발급한 서비스 토큰과 업로드
-스크립트를 사용합니다.
-
-```bash
-KODA_TRACKER_URL=http://127.0.0.1:8088 \
-KODA_TRACKER_TOKEN='<서비스 토큰>' \
-  "$PREFIX/tracker/scripts/upload-sbom.sh" \
-  <service-id> <environment-id> <release> ./bom.cdx.json <build-id>
-```
-
-## Tracker 취약점 데이터 저장과 갱신
-
-KODA에 포함된 Grype DB는 버전이 달라 Tracker와 공유하지 않습니다. Tracker 전용
-데이터는 기본 Docker named volume `koda-sbom-vuln-data`에 저장되고, API와 worker
-컨테이너에는 `/var/lib/sbom-tracker/vuln-data:ro`로 보입니다. 반입 스크립트는
-`releases/<버전>/`을 만든 뒤 `current` 링크를 원자적으로 바꾸고 기존 버전은
-`previous`로 보존합니다. 현재 bundle의 실제 파일 배치는 다음과 같습니다.
+`.env.example`을 서버 전용 `.env`로 복사하고 DB 비밀번호·관리자 초기 비밀번호·LDAP 암호화 키·공개 HTTPS 오리진을 설정합니다. `koda-suite.env.example`은 gateway와 KODA worker 자원 한도의 예시입니다. 예시 파일에 비밀값을 넣어 다시 배포하지 않습니다.
 
 ```text
-current/
-├── grype-db/<schema>/vulnerability.db
-├── nvd.json
-├── alias-index.json       # 제공한 경우
-├── kev.json
-├── metadata.env
-└── manifest.sha256
+TRACKER_OFFLINE_MODE=true
+TRACKER_PACKAGE_METADATA_ENABLED=false
+TRACKER_EPSS_POLICY_MAX_AGE_DAYS=7
 ```
 
-Tracker의 Grype 실행은 자동 다운로드와 DB 연령 거부를 끄고 이 `current` 데이터만
-사용합니다. 포털에 표시되는 기준일을 보고 조직의 갱신 주기에 맞춰 교체합니다.
-
-갱신 bundle은 인터넷 연결 구역에서 Tracker 저장소의
-`scripts/build-vuln-bundle.sh`로 생성하고 manifest와 별도 SHA-256을 확인한 뒤
-승인된 매체로 반입합니다. 폐쇄망 서버에서는 다음처럼 검증·반입합니다.
+반입 파일을 푼 디렉터리에서 실행합니다.
 
 ```bash
-PREFIX="$HOME/koda-suite" # 사용자 지정 설치 경로라면 같은 값으로 변경
-BUNDLE=/media/koda-vuln/20260809
-"$PREFIX/tracker/scripts/verify-vuln-bundle.sh" "$BUNDLE"
-ENV_FILE="$PREFIX/tracker/.env" \
-  "$PREFIX/tracker/scripts/import-vuln-bundle.sh" "$BUNDLE"
+./koda-suite verify
+./koda-suite preflight --env-file .env --prefix /opt/koda-suite --require-vulnerability-data
+./koda-suite install --env-file .env --prefix /opt/koda-suite
+./koda-suite status --prefix /opt/koda-suite
 ```
 
-그 다음 포털 관리자 화면의 `취약점 데이터 → 반입 상태 동기화`를 실행합니다.
-기존 분석은 자동 재계산되지 않으므로 필요한 SBOM 회차에서 `새 분석 리비전`을
-실행하거나 다시 업로드합니다. 이전 데이터로 되돌릴 때는 아래 명령 후 같은
-동기화를 다시 실행합니다.
+`install`은 전달물을 검증하고 두 제품을 설치한 뒤 기동합니다. 같은 설치 경로의 갱신도 새 전달물의 설치 절차를 사용하며, 설치 전 백업과 호환성 확인이 필요합니다. 호환되는 개별 이미지 패치에는 `patch --group`을 사용합니다.
+
+앱과 수집 프로세스는 기본적으로 내부 Docker 네트워크를 사용합니다. 내부 GitLab·LDAP·스캔 대상의 추가 연결은 조직 방화벽과 통합 목적지 설정으로 제한합니다.
+
+## 점검과 자료 반입
+
+- Tracker는 CycloneDX·SPDX SBOM 회차, Grype 취약점·정책, VEX·SSVC·대응 이력을 관리합니다.
+- 명시된 CPE는 로컬 NVD 적용 조건으로 보완하고 미지원 조건·범위 누락을 표시합니다. 과거 문자열 목록만 있는 NVD 자료는 판정 조건을 보존하는 생성기로 다시 준비합니다.
+- EPSS CSV(.gz)와 보강 자료를 승인·검증 후 반입하고 영향 회차를 재분석합니다. 원본 기준일·출처·해시와 과거 분석은 보존합니다.
+- KODA Java·라이브러리 결과에서도 로컬 EPSS 상태와 보강 근거를 표시합니다. 취약점 데이터는 분석 동안 하나의 활성 릴리스로 고정합니다.
+- 공급자 VEX와 SSVC 참고 자료는 담당자의 검토 근거입니다. 반입만으로 취약점을 자동 억제하거나 조직 대응 결정을 확정하지 않습니다.
+
+자료 갱신은 manifest·서명 검증과 원자적 활성화 절차를 따릅니다. 반입 시각을 원본 기준일로 바꾸지 않으며 자료 없음·오래됨·불완전 판정은 안전을 뜻하지 않습니다.
+
+## 유지보수와 자원
+
+지원 패치 그룹은 `koda`, `gateway`, `portal-web`, `portal-api-worker`입니다. Compose 계약이 다르면 패치를 중단하고 전체 설치 절차로 전환합니다. `stop`은 데이터를 보존합니다.
 
 ```bash
-ENV_FILE="$PREFIX/tracker/.env" \
-  "$PREFIX/tracker/scripts/rollback-vuln-bundle.sh"
+/opt/koda-suite/koda-suite stop --prefix /opt/koda-suite
+/opt/koda-suite/koda-suite start --prefix /opt/koda-suite
+/opt/koda-suite/koda-suite status --prefix /opt/koda-suite
 ```
 
-상세 생성 옵션과 NVD 전체 feed 준비 절차는
-`$PREFIX/tracker/docs/offline-bundle-ko.md`를 따릅니다.
+KODA 웹·수동 분석·전달 worker는 분리합니다. `KODA_CPUS`·`KODA_MEMORY`, `KODA_SCAN_CPUS`·`KODA_SCAN_MEMORY`, `KODA_DELIVERY_CPUS`·`KODA_DELIVERY_MEMORY`로 각 한도를 설정합니다. 예약 작업은 `KODA_SCHEDULE_*` 한도를 사용합니다. 한도 변경 뒤에는 현행 설치·기동 절차로 해당 컨테이너를 다시 만들고 실제 한도를 확인합니다.
 
-이 통합본은 `DISTRIBUTION_SCOPE=internal-only`인 KODA 내부 폐쇄망 반입용입니다.
-외부 고객·협력사·공개 배포 전에는 포함 이미지와 대응 소스 제공 범위를 별도로
-검토해야 합니다.
+백업은 KODA 이력·입력, Tracker DB·SBOM artifact, 취약점 릴리스와 운영 설정을 포함합니다. 복원은 격리된 대상에서 먼저 검증합니다. `reset-install.sh --delete-all-koda-data`는 전체 데이터 파기를 위한 명시적 명령입니다.
+
+## 이전 설치의 폐기 서비스 정리
+
+Dependency-Track은 제품에서 제거되었습니다. 설치·갱신 과정은 소유권이 확인된 기존 전용 컨테이너·볼륨·DB/role·이미지 태그·구형 설정·전용 파일을 정리합니다. Tracker의 SBOM 원본과 자체 운영 데이터는 보존합니다. 다른 프로젝트와 공유하는 자원이거나 소유권을 확인할 수 없으면 중단합니다. 이전 서비스를 되살리거나 임의로 전체 볼륨을 삭제해 중단을 우회하지 않습니다.
+
+이 안내와 로컬 코드 검증은 현재 Mac의 기존 Docker 자원을 실제 정리했다는 뜻이 아닙니다. 운영 설치 전에는 백업과 정리 대상 확인이 필요합니다.
+
+## 상세 안내
+
+- [설치·로그인·분석 장애 대응](TROUBLESHOOTING.ko.md)
+- [폐쇄망 운영](../../../docs/security/OFFLINE-OPERATIONS.ko.md)
+- [반입 보강 자료](../../../docs/security/OFFLINE-DATASETS.ko.md)
+- [Docker 날짜 태그·부분 패치 정책](../../../docs/install/linux-image-tags.ko.md)
+- [SPDX 2.3 내보내기](../../../docs/security/SPDX-2.3.ko.md)
+
+Tracker 전달물의 `docs/ssvc-offline-ko.md`, `docs/offline-cpe-ko.md`, `docs/offline-intelligence-ko.md`, `docs/operations-ko.md`도 함께 참고합니다.
+
+## 승인 데이터만 사용하는 Linux 실행 계약
+
+KODA와 Tracker는 `.env`의 `VULN_DATA_VOLUME_NAME`(기본 `koda-sbom-vuln-data`)을 공유합니다. Suite는 이 이름을 KODA에 자동 전달하고 다른 데이터 볼륨으로 지정하면 중단합니다. KODA 웹·분석·예약 프로세스는 `/var/lib/koda-vuln-data`에 읽기 전용으로 연결하고 승인된 `current`만 읽습니다. 직접 Docker CLI도 같은 기본 볼륨이 존재하면 읽기 전용으로 연결합니다. Linux 네이티브 설치는 `KODA_VULN_DATA_ROOT`에 같은 승인 데이터 루트를 지정해야 합니다.
+
+Linux는 직접 Python 모듈을 실행할 때도 관리 데이터 필수 모드가 기본이며, 런처와 이미지에도 동일하게 적용됩니다. 승인 데이터가 없거나 삭제되면 과거 이미지·설치 폴더·Grype 캐시·환경변수의 개별 NVD/EPSS 경로로 돌아가지 않습니다. 새 이미지에서는 내장 DB·취약점 자료도 제거합니다. 기존 보관 산출물과 사용자 DB·점검 결과는 삭제하지 않습니다. macOS 개발 환경에서 공통 관리 루트를 지정하지 않은 명시적 로컬 파일 작업은 유지합니다.
+
+공통 루트의 `.managed.json`은 `koda-managed-vulnerability-data-v1` 형식, `active`/`purging`/`purged` 상태를 보존합니다. KODA는 활성 버전과 `current` 폴더명이 같은지 확인합니다. `.release.lock` 파일을 읽기 전용으로 열어 전체 분석 동안 공유 잠금을 유지합니다. Tracker의 적용·삭제는 배타 잠금을 요구하므로 진행 중인 읽기가 있으면 재시도해야 합니다. 잠금 중이거나 승인 자료가 없으면 CVE 비교는 `unavailable`/오류이며 0건으로 성공 처리하지 않습니다. Java 보고서의 CVE 통계는 JSON `null`, 화면 “점검 불가”로 표시하고 종료 코드는 2입니다. SBOM과 비CVE 분석은 계속 만들 수 있습니다. 기존 분석 시점의 저장 결과와 사용자 정보는 유지합니다.
+
+서명 검증 공개키는 설치 전에 `TRACKER_DATA_UPDATE_VERIFY_KEY_FILE`에 등록합니다. 절대경로 또는 `.env` 디렉터리를 기준으로 한 상대경로이며, API와 데이터 갱신 프로세스에 `/run/secrets/tracker-data-update-verify.pub:ro`로 연결합니다. 승인된 PEM 공개키만 지정하고 개인 서명키는 폐쇄망 서버에 복사하지 않습니다. 키가 없거나 잘못되면 설치·갱신을 명확한 오류로 중단하며 임의 키를 생성하지 않습니다. 기존 실행 인스턴스와 저장된 결과를 삭제하지 않습니다. 공개키와 `.managed.json`·`.release.lock`, 릴리스 디렉터리는 KODA 컨테이너 사용자(UID 1000 및 실행 UID)가 읽을 수 있어야 합니다. 잠금 파일의 기본 권한은 0644입니다.
+
+이 계약은 로컬 회귀 테스트와 Docker 실행 인자/설치 계약으로 검증합니다. 실제 Linux 서버의 UID·공유 볼륨 파일 시스템에서 `flock`과 읽기 권한이 동작하는지, 최종 서명 이미지로 반입→분석→잠금 충돌→삭제→재반입이 되는지는 운영 인수 점검에 포함해야 합니다.
+
+승인 파일의 원본 증거 `approved-metadata.env`·`approved-manifest.sha256`·서명은 활성 릴리스에 보존됩니다. KODA도 같은 공개키를 읽기 전용으로 연결하여 원본 서명과 파일 해시, 런타임 데이터 선택 메타데이터를 확인합니다. 삭제 상태나 승인 근거 누락·변조, 등록 키 누락은 모두 `unavailable`입니다. 새 원본은 최초 분석 때 전체 해시를 확인하며 이후에는 읽기 전용·불변 릴리스의 파일 장치/파일번호·크기·mtime·ctime·권한과 검증키·승인 증거의 동일성을 검사해 같은 결과를 제한된 캐시에 재사용합니다. 변경이 하나라도 있으면 캐시를 사용하지 않습니다. 이 캐시는 데이터 삭제 뒤 과거 자료를 선택하는 경로가 아닙니다. 직접 Docker CLI는 `KODA_DATA_UPDATE_VERIFY_KEY_FILE`, 네이티브 Linux는 `KODA_DATA_UPDATE_VERIFY_KEY`에 승인 공개키 경로를 지정합니다. Suite는 등록된 Tracker 키를 자동 연결하며 개인키는 연결하지 않습니다.

@@ -232,6 +232,6 @@ Apple Silicon의 Docker LinuxKit VM에서 amd64 사용자 공간을 에뮬레이
 - tar를 지운 설치 트리는 완전한 배포 번들이 아니다. 해당 파일이 manifest에 포함되어 있으므로 설치 트리 자체의 전체 checksum 검증/재반입에 사용할 때는 원본을 복원해야 한다. 원본 릴리스·manifest·서명은 함께 외부 보관한다. 폐쇄망 Docker 저장소 손상·이미지 삭제·서버 재설치 때 반입 원본이 필요하다.
 - `backups/scheduled-release/<UTC>`는 업데이트 전 SQLite·PostgreSQL dump·설정/환경 파일·launcher·이전 이미지 참조를 보관한다 (`scheduled-release/apply.sh:102,110–116,198–214,249–259`). 일반 실행에는 필요 없지만 배포 성공만으로 복구 가치가 없어지는 것은 아니다.
 - `$PREFIX/.koda-scheduled-last-backup`이 가리키는 최신 디렉터리를 삭제하면 기본 rollback은 실패한다 (`scheduled-release/rollback.sh:8–15`). 최신 복구 세트와 독립적인 검증된 전체 백업을 유지하고, 보존 기한이 지난 구형 세트부터 정리한다. 이동 시 pointer의 절대 경로와 롤백 이미지 태그도 함께 확인한다.
-- 예약 릴리스 백업은 업로드 artifact·Dependency-Track 데이터까지 포함한 전체 백업과 다르다. 전체 복구는 suite 운영 문서의 별도 backup/restore 절차를 따른다.
+- 예약 릴리스 백업은 업로드 artifact·데이터베이스까지 포함한 전체 백업과 다르다. 전체 복구는 suite 운영 문서의 별도 backup/restore 절차를 따른다.
 - host `koda-suite/backups`와 Docker named volume `koda-sbom-backups`는 별개다. `data/koda-portal`, PostgreSQL·artifact·취약점 DB 등 실행 데이터 볼륨을 정리 대상으로 섞지 않는다.
 - 파일 정리는 저장 공간을 회수한다. 점검·페이지 이동 속도 개선은 디스크 부족이 병목인 경우에만 기대할 수 있다. 이 판단은 현재 로컬 스크립트 기준이며 실제 서버의 파일 종류·마운트·이미지·백업 완전성은 확인하지 않았다. 삭제는 수행하지 않았다.

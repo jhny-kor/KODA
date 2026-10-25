@@ -23,7 +23,6 @@ def security_template_files(project_name: str = "KODA Project") -> dict[str, str
         "docs/security/PRE_COMMIT.md": render_pre_commit_guide(),
         "docs/security/GITHUB_REPOSITORY_SECURITY.md": render_repository_security_checklist(clean_name),
         "docs/security/ZAP_BASELINE.md": _zap_baseline_guide(),
-        "docs/security/DEPENDENCY_TRACK.md": _dependency_track_guide(clean_name),
         "docs/security/VEX.md": _vex_guide(),
         "docs/security/SLSA_SIGSTORE.md": _slsa_sigstore_guide(),
         "docs/security/NIST_SSDF_WORKFLOW.md": render_ssdf_workflow_plan(clean_name),
@@ -869,33 +868,12 @@ The generated command uses the official ZAP Docker baseline image and performs p
 """
 
 
-def _dependency_track_guide(project_name: str) -> str:
-    return f"""# Dependency-Track SBOM Upload
-
-Generate a CycloneDX SBOM:
-
-```bash
-python3 -m security_scanner scan --target . --format cyclonedx --output reports/sbom.cdx.json
-```
-
-Upload it to Dependency-Track:
-
-```bash
-python3 -m security_scanner upload-sbom \\
-  --server-url https://dependency-track.example.com \\
-  --api-key-env DEPENDENCY_TRACK_API_KEY \\
-  --project-name "{project_name}" \\
-  --project-version main \\
-  --sbom reports/sbom.cdx.json \\
-  --auto-create
-```
-"""
 
 
 def _vex_guide() -> str:
     return """# VEX Tracking
 
-Use VEX to record reviewed dependency vulnerabilities after OSV, Dependency-Track, or another advisory source reports a CVE.
+Use VEX to record reviewed dependency vulnerabilities after Grype, NVD, or another advisory source reports a CVE.
 
 Create `docs/security/vex.cdx.json` or another CycloneDX/OpenVEX document with:
 

@@ -2,11 +2,12 @@
 """Accept the specifically reviewed LDAP Compose variant without changing the Suite."""
 import argparse
 import hashlib
+import ipaddress
+import re
 from pathlib import Path
 import shutil
 
-BASE = '8197b98b892a4a3bb2fd90210b3f14e94c49343a1a4a3e5dd4fda39e273202bb'
-LDAP = '15d8984d641aa385873c9fbd26fd0d8ec11617c03b8d87decd71d4bfc4765b78'
+BASE = '5c47b9b866040c4a90fda059002646f53ccea2c54ee736b1bdb8863b0777e6e4'
 REL = 'contract/tracker/compose.yaml'
 
 
@@ -18,15 +19,40 @@ def digest(path):
     return h.hexdigest()
 
 
-def reviewed_variants(baseline):
+def configured_dns(text):
+    """Extract literal IP settings from portal-api only; full-text checks follow."""
+    section = re.search(r"^  portal-api:\n(.*?)(?=^  [A-Za-z][\w-]*:|^networks:|\Z)", text, re.M | re.S)
+    if section is None:
+        return ()
+    match = re.search(r"^    dns:\n((?:[ ]{6,8}- [^\n]+\n)+)", section[1], re.M)
+    if match is None:
+        return ()
+    values = tuple(line.strip()[2:] for line in match[1].splitlines())
+    if not 1 <= len(values) <= 4:
+        return ()
+    try:
+        for value in values:
+            ipaddress.ip_address(value)
+    except ValueError:
+        return ()
+    return values
+
+
+def reviewed_variants(baseline, dns_servers):
     """Return the exact LDAP additions reviewed for the supported release."""
+    if not 1 <= len(dns_servers) <= 4:
+        return set()
+    for server in dns_servers:
+        ipaddress.ip_address(server)
+    if baseline.count('    restart: unless-stopped\n\n  portal-worker:') != 1 or baseline.count('\nvolumes:\n') != 1:
+        raise ValueError('native Compose layout does not support the configured LDAP additions')
     variants = set()
     for indent in ('      ', '        '):
         for before, after in (('', '\n'), ('\n', '')):
             candidate = baseline.replace(
                 '    restart: unless-stopped\n\n  portal-worker:',
                 '      - ldap-egress\n    restart: unless-stopped\n    dns:\n'
-                + indent + '- 10.95.58.206\n' + indent + '- 10.95.58.207\n\n  portal-worker:', 1)
+                + ''.join(indent + '- ' + str(server) + '\n' for server in dns_servers) + '\n  portal-worker:', 1)
             candidate = candidate.replace('\nvolumes:\n', before
                 + '  ldap-egress:\n    name: ${COMPOSE_PROJECT_NAME:-koda-sbom}-ldap-egress\n'
                 + after + 'volumes:\n', 1)
@@ -54,7 +80,7 @@ def apply(release, prefix):
     reviewed = installed.read_bytes()
     # Permit only the pictured additions, with the two valid DNS list indents
     # and a blank line on either side of the added network definition.
-    if reviewed not in reviewed_variants(baseline):
+    if reviewed not in reviewed_variants(baseline, configured_dns(reviewed.decode())):
         raise ValueError('installed compose.yaml has changes outside the reviewed LDAP additions; no files changed')
     backup = release / 'ldap-compat-backup'
     backup.mkdir()  # Never overwrite a previous backup.

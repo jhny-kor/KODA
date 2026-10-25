@@ -86,6 +86,8 @@ Path arguments (--target/--sbom/--baseline-sbom read-only, --output-dir/--output
 read-write) are bind-mounted automatically at the same absolute path.
 
 Environment:
+  KODA_DATA_UPDATE_VERIFY_KEY_FILE approved public verification key (read-only mount)
+  KODA_VULN_DATA_VOLUME approved Tracker data volume (default koda-sbom-vuln-data), read-only
   KODA_IMAGE            image reference, default from image-ref.txt
   KODA_CPUS             default 2
   KODA_SCAN_CPUS        portal scan worker CPU limit, default 1
@@ -136,6 +138,18 @@ if [ -n "${KODA_DOCKER_EXTRA_ARGS:-}" ]; then
   read -r -a extra_args <<<"$KODA_DOCKER_EXTRA_ARGS"
 fi
 
+approved_key_opts() {
+  local key="${KODA_DATA_UPDATE_VERIFY_KEY_FILE:-${TRACKER_DATA_UPDATE_VERIFY_KEY_FILE:-}}"
+  [ -n "$key" ] || return 0
+  if [ ! -f "$key" ] || [ -L "$key" ] || ! grep -q -- '-----BEGIN PUBLIC KEY-----' "$key" || grep -q -- 'PRIVATE KEY' "$key"; then
+    echo "warning: approved public verification key is missing or invalid; CVE data will be unavailable" >&2
+    return 0
+  fi
+  key="$(realpath "$key")"
+  printf '%s\n' -v "$key:/run/secrets/tracker-data-update-verify.pub:ro" \
+    -e KODA_DATA_UPDATE_VERIFY_KEY=/run/secrets/tracker-data-update-verify.pub
+}
+
 base_run_opts() {
   printf '%s\n' \
     --rm \
@@ -152,6 +166,7 @@ base_run_opts() {
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp/koda-home \
     -e XDG_CACHE_HOME=/tmp/koda-cache
+  approved_key_opts
 }
 
 mount_paths=()
@@ -231,6 +246,12 @@ run_cli() {
   local run_opts=() path index
   while IFS= read -r line; do run_opts+=("$line"); done < <(base_run_opts)
   run_opts+=(--network none)
+  local approved_volume="${KODA_VULN_DATA_VOLUME:-${VULN_DATA_VOLUME_NAME:-koda-sbom-vuln-data}}"
+  [[ "$approved_volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "error: invalid vulnerability data volume" >&2; exit 2; }
+  if docker volume inspect "$approved_volume" >/dev/null 2>&1; then
+    run_opts+=(-v "$approved_volume:/var/lib/koda-vuln-data:ro" -e KODA_VULN_DATA_ROOT=/var/lib/koda-vuln-data)
+  fi
+
   for index in "${!mount_paths[@]}"; do
     path="${mount_paths[$index]}"
     run_opts+=(-v "$path:$path:${mount_modes[$index]}")
@@ -534,6 +555,7 @@ dashboard_start() {
     if [ -n "$data_volume" ]; then
       worker_opts+=(-v "$data_volume:/var/lib/koda-vuln-data:ro" -e KODA_VULN_DATA_ROOT=/var/lib/koda-vuln-data)
     fi
+    while IFS= read -r opt; do worker_opts+=("$opt"); done < <(approved_key_opts)
     if ! docker run "${worker_opts[@]}" "$image" schedule-worker >/dev/null; then
       docker rm -f "$schedule_worker_name" >/dev/null 2>&1 || true
       echo "error: could not start $schedule_worker_name" >&2

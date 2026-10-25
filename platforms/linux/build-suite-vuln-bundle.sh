@@ -16,6 +16,8 @@ Usage: build-suite-vuln-bundle.sh OUTPUT_DIR
 Environment:
   KODA_LINUX_BUNDLE  KODA Linux offline bundle containing Grype/NVD/KEV data
   KODA_TRACKER_REPO  adjacent KODA SBOM Tracker repository
+  KODA_EPSS_SNAPSHOT optional approved local FIRST CSV(.gz), overrides bundled file
+  KODA_INTELLIGENCE_SNAPSHOT optional approved supplemental index, overrides bundled file
 EOF
 }
 
@@ -44,11 +46,14 @@ import tarfile
 archive_path, selection_path = map(pathlib.Path, sys.argv[1:])
 with tarfile.open(archive_path, "r:gz") as archive:
     names = []
+    regular = set()
     for member in archive.getmembers():
         normalized = posixpath.normpath(member.name)
         if member.name.startswith("/") or normalized == ".." or normalized.startswith("../"):
             raise SystemExit(f"unsafe KODA archive path: {member.name}")
         names.append(normalized)
+        if member.isfile():
+            regular.add(normalized)
 roots = {name.split("/", 1)[0] for name in names if name not in {"", "."}}
 if len(roots) != 1:
     raise SystemExit(f"KODA archive must have one root: {sorted(roots)}")
@@ -60,6 +65,11 @@ versions = f"{root}/versions.txt"
 if not grype or not feeds or kev not in names or versions not in names:
     raise SystemExit("KODA bundle is missing Grype, NVD, KEV, or versions metadata")
 selection_path.write_text("\n".join([root, versions, grype[-1], kev, *feeds]) + "\n", encoding="utf-8")
+extras = [name for name in names if name in {f"{root}/vuln-data/epss.csv.gz", f"{root}/vuln-data/intelligence.json"}
+          or name.startswith(f"{root}/vuln-data/intelligence-sources/") and name in regular]
+if any(name not in regular for name in [versions, grype[-1], kev, *feeds, *extras]):
+    raise SystemExit("selected KODA data must be regular files")
+selection_path.with_name("supplemental.txt").write_text("\n".join(extras), encoding="utf-8")
 PY
 
 versions_member="$(sed -n '2p' "$temp/selection.txt")"
@@ -70,6 +80,10 @@ while IFS= read -r feed; do
   [[ -n "$feed" ]] || continue
   tar -xzf "$koda_bundle" -C "$temp" "$feed"
 done < <(sed -n '5,$p' "$temp/selection.txt")
+while IFS= read -r extra || [[ -n "$extra" ]]; do
+  [[ -n "$extra" ]] || continue
+  tar -xzf "$koda_bundle" -C "$temp" "$extra"
+done < "$temp/supplemental.txt"
 
 versions="$temp/$versions_member"
 grype_archive="$temp/$grype_member"
@@ -93,6 +107,17 @@ kev_date="$(awk -F= '$1 == "cisa_kev_date_released" { print substr($2, 1, 10); e
 
 args=("$output" --grype-db "$temp/grype" --data-date "$data_date" \
   --nvd-date "$data_date" --kev "$temp/$kev_member" --kev-date "$kev_date")
+bundle_root="$(sed -n '1p' "$temp/selection.txt")"
+epss_snapshot="${KODA_EPSS_SNAPSHOT:-$temp/$bundle_root/vuln-data/epss.csv.gz}"
+intelligence_snapshot="${KODA_INTELLIGENCE_SNAPSHOT:-$temp/$bundle_root/vuln-data/intelligence.json}"
+if [[ -n "${KODA_EPSS_SNAPSHOT:-}" || -f "$epss_snapshot" ]]; then
+  [[ -f "$epss_snapshot" ]] || fail "EPSS snapshot not found: $epss_snapshot"
+  args+=(--epss "$epss_snapshot")
+fi
+if [[ -n "${KODA_INTELLIGENCE_SNAPSHOT:-}" || -f "$intelligence_snapshot" ]]; then
+  [[ -f "$intelligence_snapshot" ]] || fail "supplemental snapshot not found: $intelligence_snapshot"
+  args+=(--intelligence-index "$intelligence_snapshot")
+fi
 while IFS= read -r feed; do
   [[ -n "$feed" ]] && args+=(--nvd-feed "$temp/$feed")
 done < <(sed -n '5,$p' "$temp/selection.txt")

@@ -20,6 +20,10 @@ def query_osv_findings(
     timeout_seconds: float = 12.0,
     enable_vuln_intel: bool = False,
 ) -> tuple[list[Finding], list[str]]:
+    from .network_policy import osv_disabled
+
+    if osv_disabled():
+        return [], ["OSV 조회는 폐쇄망 배포에서 제외되었습니다. 로컬 Grype DB 분석을 사용하세요."]
     findings: list[Finding] = []
     warnings: list[str] = []
     seen: set[tuple[str, str, str, str, str]] = set()
@@ -69,6 +73,10 @@ def query_osv_findings(
 
 
 def _post_querybatch(components: tuple[DependencyComponent, ...], timeout_seconds: float) -> dict[str, object]:
+    from .network_policy import osv_disabled, OfflineNetworkError
+
+    if osv_disabled():
+        raise OfflineNetworkError("OSV 조회는 비활성화되어 있습니다")
     body = json.dumps(
         {
             "queries": [

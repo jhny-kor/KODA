@@ -1,6 +1,6 @@
 # VEX 취약점 상태 추적
 
-OSV·Dependency-Track 또는 다른 권고문이 CVE를 보고한 뒤 CycloneDX/OpenVEX
+Grype·NVD 또는 다른 권고문이 CVE를 보고한 뒤 CycloneDX/OpenVEX
 문서에 다음을 기록합니다.
 
 KODA의 exact-version OSV 결과로 CycloneDX VEX 초안을 생성할 수 있습니다.

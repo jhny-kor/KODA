@@ -6,6 +6,8 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -19,6 +21,13 @@ from security_scanner.reporting import _render_html_main, _source_main_filter_ma
 
 
 class CliReportTests(unittest.TestCase):
+    def setUp(self):
+        # Explicit local-file development fixtures; Linux production defaults
+        # are exercised independently by test_managed_data_current_only.
+        local_profile = patch("security_scanner.data_release.sys", SimpleNamespace(platform="darwin"))
+        local_profile.start()
+        self.addCleanup(local_profile.stop)
+
     def test_missing_scan_target_returns_error_without_clean_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -71,7 +80,7 @@ class CliReportTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         help_text = output.getvalue()
         self.assertIn("usage:", help_text)
-        self.assertIn("{scan,jar-scan", help_text)
+        self.assertIn("{cpe-scan,scan,jar-scan", help_text)
         self.assertIn("scan                scan configured local project folders", help_text)
 
     def test_source_summary_groups_same_severity_and_rule_and_collapses_locations(self) -> None:
@@ -218,7 +227,9 @@ class CliReportTests(unittest.TestCase):
             self.assertIn("<b>분석 언어</b> Python", main_html)
             self.assertIn("max-width:1560px", main_html)
             self.assertIn('class="source-summary-table"', main_html)
-            self.assertIn(".source-summary-wrap{overflow:auto;padding:0 20px 20px}", main_html)
+            wrapper_style = main_html.rsplit(".source-summary-wrap{", 1)[1].split("}", 1)[0]
+            self.assertIn("overflow-x:auto", wrapper_style)
+            self.assertIn("max-width:100%", wrapper_style)
             self.assertIn(".source-summary-table{border-left:1px solid #dce4ee;border-right:1px solid #dce4ee}", main_html)
             self.assertIn('class="column-resizer"', main_html)
             self.assertIn('data-column-index="4"', main_html)
