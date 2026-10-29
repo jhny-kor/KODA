@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 from .data_release import approved_data_read
+from .streaming_nvd import read_json_sections
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +67,7 @@ def load_offline_data(
 
 def _load_nvd(
     source: Path | None,
-    requested: set[str],
+    requested: set[str] | None,
     warnings: list[str],
     *,
     cpe_products: set[tuple[str, str, str]] | None = None,
@@ -82,38 +83,78 @@ def _load_nvd(
     applicability_records = details_only = 0
     try:
         for path in files:
-            payload = _read_json(path)
-            dates.extend(_date_values(payload, ("lastModifiedDate", "lastModified", "timestamp")))
-            vulnerabilities = payload.get("vulnerabilities", payload.get("CVE_Items", []))
-            if isinstance(vulnerabilities, dict):
-                # Tracker's compact offline index stores CVE records by ID.
-                vulnerabilities = [dict(value, id=str(key)) for key, value in vulnerabilities.items() if isinstance(value, dict)]
-            if not isinstance(vulnerabilities, list):
-                continue
-            for entry in vulnerabilities:
-                cve = entry.get("cve") if isinstance(entry, dict) and isinstance(entry.get("cve"), dict) else entry
-                if not isinstance(cve, dict):
-                    continue
-                cve = _normalize_nvd_record(cve)
-                if cve.get("configurations"):
-                    applicability_records += 1
-                else:
-                    details_only += 1
-                metadata = cve.get("CVE_data_meta")
-                legacy_id = metadata.get("ID", "") if isinstance(metadata, dict) else ""
-                cve_id = str(cve.get("id", legacy_id)).upper()
-                is_candidate = False
-                if cpe_products:
-                    from .offline_cpe import GLOBAL_PRODUCT, candidate_index
-                    products = candidate_index({cve_id: cve})
-                    is_candidate = GLOBAL_PRODUCT in products or bool(cpe_products.intersection(products))
-                if cve_id in requested or is_candidate:
-                    records[cve_id] = cve
+            selected, counts, date_values = _read_nvd_subset(path, requested, cpe_products)
+            records.update(selected)
+            applicability_records += counts[0]
+            details_only += counts[1]
+            dates.extend(date_values)
     except (OSError, EOFError, json.JSONDecodeError, UnicodeDecodeError, AttributeError, TypeError, ValueError) as exc:
         warnings.append(f"Could not load NVD data {source}: {exc}")
         return records, _source_info(source, "invalid", {"name": "nvd"}), tuple(dates), True
     return records, _source_info(source, "loaded", {"name": "nvd", "applicabilityRecords": applicability_records,
                                                    "legacyDetailsOnly": details_only}), tuple(dates), False
+
+
+def _read_nvd_subset(path, requested, cpe_products):
+    """Keep matching records while preserving JSON object last-value semantics.
+
+    Per-key flags retain source counts and first insertion order without keeping
+    unrelated record trees. ``None`` requests every record; an empty set does not.
+    """
+    sections = {}
+    dates = {}
+    date_names = {"lastModifiedDate", "lastModified", "timestamp"}
+
+    def section(name, kind):
+        if name in {"vulnerabilities", "CVE_Items"}:
+            sections[name] = {"kind": kind, "flags": {}, "selected": {}}
+        if name in date_names:
+            dates.pop(name, None)
+
+    def field(name, value):
+        if name in date_names and isinstance(value, str) and value:
+            dates[name] = value
+
+    def entry(name, key, value):
+        if name not in {"vulnerabilities", "CVE_Items"}:
+            return
+        state = sections[name]
+        state["flags"][key] = None
+        state["selected"].pop(key, None)
+        if not isinstance(value, dict):
+            return
+        if state["kind"] == "dict":
+            # The original compact loader overrides the outer id with its key.
+            value = dict(value, id=str(key))
+        cve = value.get("cve") if isinstance(value.get("cve"), dict) else value
+        cve = _normalize_nvd_record(cve)
+        state["flags"][key] = bool(cve.get("configurations"))
+        metadata = cve.get("CVE_data_meta")
+        legacy_id = metadata.get("ID", "") if isinstance(metadata, dict) else ""
+        cve_id = str(cve.get("id", legacy_id)).upper()
+        is_candidate = False
+        if cpe_products:
+            from .offline_cpe import GLOBAL_PRODUCT, candidate_index
+            products = candidate_index({cve_id: cve})
+            is_candidate = GLOBAL_PRODUCT in products or bool(cpe_products.intersection(products))
+        if requested is None or cve_id in requested or is_candidate:
+            state["selected"][key] = (cve_id, cve)
+
+    read_json_sections(path, section_names={"vulnerabilities", "CVE_Items", "aliases", "items"},
+                       on_section=section, on_entry=entry, on_field=field,
+                       field_names=date_names, allow_gzip=True)
+    state = sections.get("vulnerabilities", sections.get("CVE_Items"))
+    records = {}
+    applicable = details = 0
+    if state and state["kind"] in {"dict", "list"}:
+        for key, flag in state["flags"].items():
+            if flag is not None:
+                applicable += int(flag)
+                details += int(not flag)
+            if key in state["selected"]:
+                identifier, record = state["selected"][key]
+                records[identifier] = record
+    return records, (applicable, details), tuple(dates[name] for name in ("lastModifiedDate", "lastModified", "timestamp") if name in dates)
 
 
 @approved_data_read
