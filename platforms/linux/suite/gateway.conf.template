@@ -167,6 +167,19 @@ server {
         proxy_pass http://${PORTAL_API_UPSTREAM}/api/v1/vulnerability-intelligence/import-csv;
     }
 
+    location /api/v1/cve-catalog {
+        # A cold offline catalog can take longer than the default 60 seconds.
+        proxy_read_timeout 600s;
+        proxy_set_header Host $host;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_pass http://${PORTAL_API_UPSTREAM}/api/v1/cve-catalog;
+    }
+
     location /api/ {
         proxy_set_header Host $host;
         proxy_set_header Forwarded "";

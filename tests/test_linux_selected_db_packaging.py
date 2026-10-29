@@ -121,6 +121,19 @@ else:
                     expected, relative = line.split(maxsplit=1)
                     self.assertEqual(hashlib.sha256(archive.extractfile(base + relative).read()).hexdigest(), expected)
 
+    def test_official_timestamp_filename_is_supported_with_or_without_metadata(self):
+        filename = "vulnerability-db_v6.1.10_2026-10-29T00:24:34Z_1793255014.tar.zst"
+        for declared in (True, False):
+            with self.subTest(declared=declared), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                versions = f"grype_db={filename}\ngrype_db_checksum=sha256:{hashlib.sha256(NEW_BYTES).hexdigest()}\n" if declared else None
+                script, assets, env = self.fixture(root, databases={filename: NEW_BYTES}, versions=versions)
+                result = self.package(script, env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual((assets / "grype-db/incoming" / filename).read_bytes(), NEW_BYTES)
+                with tarfile.open(root / "dist/koda-linux-x86_64-0.1.0.tar.gz") as archive:
+                    self.assertEqual(archive.extractfile("koda-linux-x86_64-0.1.0/grype-db/incoming/" + filename).read(), NEW_BYTES)
+
     def test_declared_checksum_mismatch_is_rejected_before_archive_creation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -89,7 +89,7 @@ if selection:
     if set(selection) != {"grype_db", "grype_db_checksum"}:
         raise SystemExit("error: incomplete Grype DB selection metadata in versions.txt")
     filename = selection["grype_db"]
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.zst", filename):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*\.tar\.zst", filename):
         raise SystemExit("error: unsafe Grype DB filename in versions.txt")
     expected = selection["grype_db_checksum"].lower().removeprefix("sha256:")
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
@@ -105,7 +105,7 @@ else:
         raise SystemExit("error: ambiguous Grype DB archives; record grype_db and grype_db_checksum in versions.txt")
     selected = candidates[0]
 
-if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.zst", selected.name):
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*\.tar\.zst", selected.name):
     raise SystemExit("error: unsafe Grype DB filename")
 if selected.is_symlink() or not selected.is_file():
     raise SystemExit("error: unsafe Grype DB archive; expected a regular file")
