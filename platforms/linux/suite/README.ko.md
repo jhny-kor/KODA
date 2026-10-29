@@ -14,6 +14,20 @@ Linux x86_64, Docker Engine, Compose v2, Python 3, Bash, sha256sum, flock이 필
 
 `.env.example`을 서버 전용 `.env`로 복사하고 DB 비밀번호·관리자 초기 비밀번호·LDAP 암호화 키·공개 HTTPS 오리진을 설정합니다. `koda-suite.env.example`은 gateway와 KODA worker 자원 한도의 예시입니다. 예시 파일에 비밀값을 넣어 다시 배포하지 않습니다.
 
+새 서버에는 초기 통합 자료의 서명을 검증하는 **데이터 갱신용 공개키**를 별도로 등록합니다.
+`TRACKER_DATA_UPDATE_VERIFY_KEY_FILE`은 이 공개키의 서버 경로이며, 설치본 자체의 서명을 검증하는
+릴리스 공개키와 구분합니다. 빌드 담당자는 `KODA_DATA_UPDATE_SIGNING_KEY`에 수집 원본·출력 디렉터리
+밖에 둔 개인키를 지정하고 `build-suite-vuln-bundle.sh`로 초기 자료를 만듭니다.
+승인한 `KODA_EPSS_SNAPSHOT` 또는 이미 묶인 공식 FIRST EPSS 원본이 필요합니다.
+개인키는 자료·설치본·운영 서버에 포함하지 않습니다.
+
+초기 자료는 원본 날짜를 기록한 `metadata.env`, 서명된 `unified-update.tar.gz`,
+전체 파일의 `manifest.sha256`로 구성합니다. 원본 DB·NVD를 중복 보관하지 않습니다.
+새 설치는 기존 통합 파일 검증·적용 엔진과 DB 참조자료 동기화를 거쳐 활성화합니다.
+서명된 초기 파일이 없는 통합 설치본은 빌드에서 거절합니다.
+기존 설치의 같은 경로 갱신은 새 초기 자료를 자동 반입하지 않으며, 기존 활성 자료와 삭제·삭제 진행
+상태를 유지합니다. 자료를 바꾸려면 관리자가 별도로 검증·적용합니다.
+
 ```text
 TRACKER_OFFLINE_MODE=true
 TRACKER_PACKAGE_METADATA_ENABLED=false

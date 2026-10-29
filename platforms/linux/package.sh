@@ -63,11 +63,81 @@ if [ -n "$offline_asset_dir" ]; then
     exit 1
   fi
   cp -R "$offline_asset_dir/tools" "$stage/tools"
-  cp -R "$offline_asset_dir/grype-db" "$stage/grype-db"
   cp -R "$offline_asset_dir/vuln-data" "$stage/vuln-data"
-  if [ -f "$offline_asset_dir/manifest.sha256" ]; then
-    cp "$offline_asset_dir/manifest.sha256" "$stage/manifest.sha256"
-  fi
+  # The download cache can retain several DB releases. The native installer
+  # imports the first incoming archive, so ship only the declared selection.
+  python3 - "$offline_asset_dir" "$stage" <<'PY'
+import hashlib
+from pathlib import Path
+import re
+import sys
+
+assets, stage = map(Path, sys.argv[1:])
+incoming = assets / "grype-db/incoming"
+versions = assets / "versions.txt"
+selection = {}
+if versions.is_file():
+    for line in versions.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in {"grype_db", "grype_db_checksum"}:
+            if key in selection:
+                raise SystemExit("error: duplicate Grype DB selection metadata in versions.txt")
+            selection[key] = value
+
+expected = None
+if selection:
+    if set(selection) != {"grype_db", "grype_db_checksum"}:
+        raise SystemExit("error: incomplete Grype DB selection metadata in versions.txt")
+    filename = selection["grype_db"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.zst", filename):
+        raise SystemExit("error: unsafe Grype DB filename in versions.txt")
+    expected = selection["grype_db_checksum"].lower().removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise SystemExit("error: invalid Grype DB checksum in versions.txt")
+    selected = incoming / filename
+    if not selected.is_file():
+        raise SystemExit(f"error: selected Grype DB archive is missing: {filename}")
+else:
+    # Preserve manually supplied assets without allowing cache order to choose
+    # between multiple releases.
+    candidates = list(incoming.glob("*.tar.zst"))
+    if len(candidates) != 1:
+        raise SystemExit("error: ambiguous Grype DB archives; record grype_db and grype_db_checksum in versions.txt")
+    selected = candidates[0]
+
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.zst", selected.name):
+    raise SystemExit("error: unsafe Grype DB filename")
+if selected.is_symlink() or not selected.is_file():
+    raise SystemExit("error: unsafe Grype DB archive; expected a regular file")
+relative = "grype-db/incoming/" + selected.name
+target = stage / relative
+target.parent.mkdir(parents=True, exist_ok=True)
+digest = hashlib.sha256()
+with selected.open("rb") as source, target.open("wb") as output:
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(chunk)
+        output.write(chunk)
+actual = digest.hexdigest()
+if expected is not None and actual != expected:
+    raise SystemExit(f"error: Grype DB checksum mismatch: {selected.name}")
+
+manifest = assets / "manifest.sha256"
+if manifest.is_file():
+    lines = []
+    selected_listed = False
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        checksum, name = line.split(maxsplit=1)
+        if name.startswith("grype-db/"):
+            if name != relative:
+                continue
+            if checksum.lower() != actual:
+                raise SystemExit("error: Grype DB manifest checksum mismatch")
+            selected_listed = True
+        lines.append(line)
+    if not selected_listed:
+        lines.append(f"{actual}  {relative}")
+    (stage / "manifest.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
   if [ -f "$offline_asset_dir/versions.txt" ]; then
     cp "$offline_asset_dir/versions.txt" "$stage/versions.txt"
   fi

@@ -714,9 +714,32 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
                 f'TRACKER_GIT_REVISION={tracker_revision}\n'
                 'TRACKER_WORKTREE_DIRTY=false\nVULNERABILITY_BUNDLE=included\nANALYSIS_BACKEND=koda-native\n'
             )
+            # This fixture tests the flat layout and packaging contract. The
+            # sibling verifier above is stubbed, so proof bytes are structural
+            # fixtures rather than signatures approved for operational use.
+            unified = work / 'structural-unified'
+            unified.mkdir()
+            for name, value in {
+                'metadata.env': 'DATASET_TYPE=unified\n',
+                'manifest.sha256': 'fixture signed manifest\n',
+                'manifest.sha256.sig': 'fixture signature proof\n',
+            }.items():
+                (unified / name).write_text(value)
+            seed = work / 'vulnerability-data'
+            seed.mkdir()
+            bootstrap = seed / 'unified-update.tar.gz'
+            with tarfile.open(bootstrap, 'w:gz') as archive:
+                for path in unified.iterdir():
+                    archive.add(path, arcname=path.name)
+            (seed / 'metadata.env').write_text('UNIFIED_BOOTSTRAP_FILE=unified-update.tar.gz\n')
+            (seed / 'manifest.sha256').write_text(''.join(
+                hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name + '\n'
+                for path in sorted(seed.iterdir())
+            ))
             tracker_bundle = work / 'tracker.tar.gz'
             with tarfile.open(tracker_bundle, 'w:gz') as archive:
                 archive.add(tracker_metadata, arcname='./metadata.env')
+                archive.add(seed, arcname='./vulnerability-data')
             output = work / 'suite.tar.gz'
             result = subprocess.run(
                 ['bash', str(ROOT / 'platforms/linux/package-suite-offline.sh'), str(output)],

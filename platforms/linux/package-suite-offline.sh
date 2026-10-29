@@ -47,6 +47,8 @@ esac
 python3 - "$koda_bundle" "$tracker_bundle" <<'PY'
 import pathlib
 import posixpath
+import hashlib
+import re
 import sys
 import tarfile
 
@@ -83,6 +85,49 @@ with tarfile.open(sys.argv[2], "r:gz") as archive:
             raise SystemExit(f"unsafe Tracker archive path: {name}")
         if pathlib.PurePosixPath(name).name.startswith("._"):
             raise SystemExit(f"Tracker archive contains AppleDouble metadata: {name}")
+    members = {posixpath.normpath(item.name): item for item in archive.getmembers()}
+    bootstrap_name = "vulnerability-data/unified-update.tar.gz"
+    bootstrap = members.get(bootstrap_name)
+    seed_metadata = members.get("vulnerability-data/metadata.env")
+    seed_manifest = members.get("vulnerability-data/manifest.sha256")
+    if values.get("VULNERABILITY_BUNDLE") != "included" or any(item is None or not item.isfile() for item in (bootstrap, seed_metadata, seed_manifest)):
+        raise SystemExit("Tracker release must include a signed unified first-install bootstrap")
+    if seed_metadata.size > 65536 or seed_manifest.size > 16 * 1024 * 1024 or bootstrap.size <= 0:
+        raise SystemExit("invalid first-install bootstrap metadata or manifest size")
+    seed_values = dict(line.split("=", 1) for line in archive.extractfile(seed_metadata).read().decode().splitlines() if "=" in line)
+    if seed_values.get("UNIFIED_BOOTSTRAP_FILE") != "unified-update.tar.gz":
+        raise SystemExit("Tracker seed must declare UNIFIED_BOOTSTRAP_FILE=unified-update.tar.gz")
+    hashes = []
+    for line in archive.extractfile(seed_manifest).read().decode().splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1].removeprefix("./") == "unified-update.tar.gz":
+            hashes.append(fields[0])
+    if len(hashes) != 1 or not re.fullmatch(r"[0-9a-fA-F]{64}", hashes[0]):
+        raise SystemExit("Tracker seed manifest must cover unified-update.tar.gz exactly once")
+    checksum = hashlib.sha256()
+    with archive.extractfile(bootstrap) as incoming:
+        for chunk in iter(lambda: incoming.read(1024 * 1024), b""):
+            checksum.update(chunk)
+    if checksum.hexdigest() != hashes[0].lower():
+        raise SystemExit("Tracker signed bootstrap checksum mismatch")
+    with archive.extractfile(bootstrap) as incoming, tarfile.open(fileobj=incoming, mode="r|gz") as unified:
+        proof = {}
+        expanded = 0
+        for count, member in enumerate(unified, 1):
+            expanded += member.size
+            if count > 100_000 or member.size > 4 * 1024 ** 3 or expanded > 12 * 1024 ** 3:
+                raise SystemExit("unified bootstrap exceeds data-update limits")
+            name = posixpath.normpath(member.name)
+            if member.name.startswith("/") or name == ".." or name.startswith("../") or member.issym() or member.islnk():
+                raise SystemExit("unsafe unified bootstrap member")
+            if name not in {"metadata.env", "manifest.sha256", "manifest.sha256.sig"}:
+                continue
+            limit = 16 * 1024 * 1024 if name == "manifest.sha256" else 65536
+            if name in proof or not member.isfile() or not 0 < member.size <= limit:
+                raise SystemExit("invalid unified bootstrap signature proof")
+            proof[name] = unified.extractfile(member).read()
+        if set(proof) != {"metadata.env", "manifest.sha256", "manifest.sha256.sig"} or b"DATASET_TYPE=unified\n" not in proof["metadata.env"]:
+            raise SystemExit("Tracker bootstrap must carry a unified dataset and original signed manifest")
 PY
 
 tracker_repo="${KODA_TRACKER_REPO:-$repo_root/../security-sbom-dependecy}"
@@ -152,6 +197,10 @@ export COPYFILE_DISABLE=1
 mkdir -p "$stage/bundles" "$stage/gateway"
 cp "$koda_bundle" "$stage/bundles/$(basename -- "$koda_bundle")"
 cp "$tracker_bundle" "$stage/bundles/$(basename -- "$tracker_bundle")"
+for sidecar in .sig .sha256; do
+  [[ ! -f "$tracker_bundle$sidecar" ]] \
+    || cp "$tracker_bundle$sidecar" "$stage/bundles/$(basename -- "$tracker_bundle")$sidecar"
+done
 install -m 0755 "$script_dir/suite/koda-suite" "$stage/koda-suite"
 install -m 0755 "$script_dir/suite/reset-install.sh" "$stage/reset-install.sh"
 install -m 0755 "$script_dir/suite/retired-analysis-cleanup.py" "$stage/retired-analysis-cleanup.py"
