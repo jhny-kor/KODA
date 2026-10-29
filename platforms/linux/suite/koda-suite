@@ -379,6 +379,8 @@ suite_compose() {
   shift
   local proof="$(env_value "$prefix/tracker/.env" KODA_GATEWAY_PROOF "")"
   local compose_key="${TRACKER_DATA_UPDATE_VERIFY_KEY_FILE:-$(env_value "$prefix/tracker/.env" TRACKER_DATA_UPDATE_VERIFY_KEY_FILE "")}"
+  local provisioning_file="${KODA_TRACKER_PROVISIONING_TOKEN_FILE:-$(env_value "$prefix/tracker/.env" KODA_TRACKER_PROVISIONING_TOKEN_FILE "")}"
+  local token_dir="${KODA_TRACKER_TOKEN_DIR:-$(env_value "$prefix/tracker/.env" KODA_TRACKER_TOKEN_DIR "")}"
   if [[ -n "$compose_key" && "$compose_key" != /* ]]; then
     compose_key="$prefix/tracker/$compose_key"
   fi
@@ -387,6 +389,7 @@ suite_compose() {
   PORTAL_WEB_IMAGE="$(env_value "$prefix/tracker/.env" PORTAL_WEB_IMAGE "")" \
   PORTAL_API_IMAGE="$(env_value "$prefix/tracker/.env" PORTAL_API_IMAGE "")" \
   PORTAL_WORKER_IMAGE="$(env_value "$prefix/tracker/.env" PORTAL_WORKER_IMAGE "")" \
+  KODA_TRACKER_PROVISIONING_TOKEN_FILE="$provisioning_file" KODA_TRACKER_TOKEN_DIR="$token_dir" \
   TRACKER_DATA_UPDATE_VERIFY_KEY_FILE="$compose_key" KODA_GATEWAY_PROOF="$proof" docker compose --project-directory "$prefix/tracker" --env-file "$prefix/tracker/.env" \
     -f "$prefix/tracker/compose.yaml" -f "$prefix/tracker/compose.airgap.yaml" \
     -f "$prefix/tracker/compose.integration.yaml" "$@"
