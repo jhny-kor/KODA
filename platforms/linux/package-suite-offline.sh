@@ -23,6 +23,8 @@ Optional environment:
   KODA_DOCKER_BUNDLE   verified KODA Docker air-gap tar.gz
   KODA_LINUX_DIST_DIR  output directory, default dist/linux
   KODA_SUITE_VERSION   suite archive version, default KODA version
+  KODA_DOCKER_SOURCE_REVISION  clean ancestor used to build the Docker payload,
+                         allowed only when subsequent changes are Suite-only
   KODA_SUITE_ALLOW_DIRTY=1 explicitly permits a development snapshot build;
                          metadata records both worktrees as dirty
 EOF
@@ -147,7 +149,21 @@ if [[ "$koda_dirty" == true || "$tracker_dirty" == true ]]; then
     || fail "production suite archives require clean KODA and Tracker worktrees; set KODA_SUITE_ALLOW_DIRTY=1 for an explicit snapshot."
 fi
 
-python3 - "$koda_bundle" "$tracker_bundle" "$koda_revision" "$tracker_revision" "$koda_dirty" "$tracker_dirty" <<'PY'
+koda_docker_revision="${KODA_DOCKER_SOURCE_REVISION:-$koda_revision}"
+if [[ "$koda_docker_revision" != "$koda_revision" ]]; then
+  [[ "$koda_dirty" == false && "$koda_docker_revision" =~ ^[0-9a-f]{40}$ ]] \
+    || fail "reusing a KODA Docker payload requires a clean Suite tree and a full source revision."
+  git -C "$repo_root" merge-base --is-ancestor "$koda_docker_revision" "$koda_revision" \
+    || fail "KODA Docker source revision must be an ancestor of the Suite source."
+  git -C "$repo_root" diff --quiet "$koda_docker_revision" "$koda_revision" -- . \
+    ':(exclude)platforms/linux/package-suite-offline.sh' \
+    ':(exclude)platforms/linux/suite' \
+    ':(exclude)tests/test_linux_suite_contract.py' \
+    ':(exclude)tests/test_linux_suite_seed_bootstrap.py' \
+    || fail "KODA Docker inputs changed since the selected source revision."
+fi
+
+python3 - "$koda_bundle" "$tracker_bundle" "$koda_docker_revision" "$tracker_revision" "$koda_dirty" "$tracker_dirty" <<'PY'
 import pathlib
 import posixpath
 import sys
@@ -157,14 +173,20 @@ koda, tracker, expected_koda, expected_tracker, dirty_koda, dirty_tracker = sys.
 
 def metadata(archive, root=None):
     with tarfile.open(archive, "r:gz") as stream:
-        names = [posixpath.normpath(item.name) for item in stream.getmembers()]
+        members = stream.getmembers()
+        names = [posixpath.normpath(item.name) for item in members]
+        if archive == tracker and not any(
+            name == "deploy/nginx/http-error.html" and item.isfile() and item.size > 0
+            for name, item in zip(names, members)
+        ):
+            raise SystemExit("Tracker release is missing the gateway HTTP error page")
         if root is None:
             roots = {name.split("/", 1)[0] for name in names if name not in {"", "."}}
             if len(roots) != 1:
                 raise SystemExit(f"archive must have one root: {archive}")
             root = next(iter(roots))
         target = f"{root}/versions.txt" if archive == koda else "metadata.env"
-        member = next((item for item in stream.getmembers() if posixpath.normpath(item.name) == target), None)
+        member = next((item for name, item in zip(names, members) if name == target), None)
         if member is None:
             raise SystemExit(f"provenance metadata is missing: {archive}: {target}")
         handle = stream.extractfile(member)
@@ -259,7 +281,8 @@ DISTRIBUTION_SCOPE=internal-only
 BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 KODA_BUNDLE=bundles/$(basename -- "$koda_bundle")
 TRACKER_BUNDLE=bundles/$(basename -- "$tracker_bundle")
-KODA_GIT_REVISION=$koda_revision
+KODA_GIT_REVISION=$koda_docker_revision
+KODA_SUITE_SOURCE_REVISION=$koda_revision
 KODA_TRACKED_WORKTREE_DIRTY=$koda_dirty
 KODA_WORKTREE_DIRTY=$koda_dirty
 TRACKER_GIT_REVISION=$tracker_revision

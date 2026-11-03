@@ -2,6 +2,14 @@ server {
     listen 8080;
     server_name ${GATEWAY_SERVER_NAME};
     client_max_body_size 501m;
+    error_page 400 401 402 403 404 405 406 413 500 501 502 503 504 505 /__tracker_http_error.html;
+
+    # The base Tracker Compose file mounts this signed release asset.
+    location = /__tracker_http_error.html {
+        internal;
+        alias /etc/nginx/tracker-http-error.html;
+        add_header Cache-Control "no-store" always;
+    }
 
     # Large offline datasets stream to the bounded API upload spool.
     location = /api/v1/vulnerability-data-bundles/upload {
@@ -191,6 +199,7 @@ server {
         proxy_pass http://${PORTAL_API_UPSTREAM}/api/;
     }
     location / {
+        proxy_intercept_errors on;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_pass http://${PORTAL_WEB_UPSTREAM}/;

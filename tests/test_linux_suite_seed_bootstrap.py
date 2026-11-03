@@ -222,6 +222,7 @@ class SuiteSeedGuardTests(unittest.TestCase):
         seed_manifest = (hashlib.sha256(payload).hexdigest() + "  unified-update.tar.gz\n").encode() if covered else b""
         tracker = self.root / "tracker.tar.gz"
         members = {"./metadata.env": ('ANALYSIS_BACKEND=koda-native\nVULNERABILITY_BUNDLE=included\nTRACKER_WORKTREE_DIRTY=false\nTRACKER_GIT_REVISION=' + self.tracker_revision + '\n').encode(),
+                   "deploy/nginx/http-error.html": b"<!doctype html><title>Error page fixture</title>",
                    "vulnerability-data/metadata.env": seed_metadata,
                    "vulnerability-data/manifest.sha256": seed_manifest}
         if bootstrap:

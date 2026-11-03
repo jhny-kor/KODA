@@ -737,9 +737,12 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
                 for path in sorted(seed.iterdir())
             ))
             tracker_bundle = work / 'tracker.tar.gz'
+            error_page = work / 'http-error.html'
+            error_page.write_text('<!doctype html><title>Error page fixture</title>\n')
             with tarfile.open(tracker_bundle, 'w:gz') as archive:
                 archive.add(tracker_metadata, arcname='./metadata.env')
                 archive.add(seed, arcname='./vulnerability-data')
+                archive.add(error_page, arcname='./deploy/nginx/http-error.html')
             output = work / 'suite.tar.gz'
             result = subprocess.run(
                 ['bash', str(ROOT / 'platforms/linux/package-suite-offline.sh'), str(output)],
