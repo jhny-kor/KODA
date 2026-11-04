@@ -91,8 +91,10 @@ smoke "$image_ref" list-categories >/dev/null \
   || fail "smoke test failed: list-categories"
 smoke --entrypoint /opt/koda/tools/syft "$image_ref" version >/dev/null \
   || fail "smoke test failed: syft version"
-smoke --entrypoint /opt/koda/tools/grype "$image_ref" db status -o json >/dev/null \
-  || fail "smoke test failed: grype db status"
+# Approved managed data is mounted separately at runtime. This image has no
+# embedded database, so installation checks the executable without DB access.
+smoke --entrypoint /opt/koda/tools/grype "$image_ref" version >/dev/null \
+  || fail "smoke test failed: grype version"
 echo "smoke tests OK"
 
 # 10. install wrapper + references (idempotent; keeps existing reports and

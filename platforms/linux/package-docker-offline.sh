@@ -139,7 +139,10 @@ smoke() {
 echo "running offline smoke tests ..."
 smoke "$image_ref" list-categories >/dev/null || fail "smoke test failed: list-categories"
 smoke --entrypoint /opt/koda/tools/syft "$image_ref" version >/dev/null || fail "smoke test failed: syft version"
-smoke --entrypoint /opt/koda/tools/grype "$image_ref" db status -o json >/dev/null || fail "smoke test failed: grype db status"
+# The runtime image deliberately contains no vulnerability database. Approved
+# managed data is checked when it is mounted for analysis; packaging checks the
+# executable itself without requiring or downloading a database.
+smoke --entrypoint /opt/koda/tools/grype "$image_ref" version >/dev/null || fail "smoke test failed: grype version"
 echo "smoke tests OK"
 
 # 10-11. save + stage

@@ -53,6 +53,7 @@ a=sys.argv[1:]
 with open(os.environ['IMAGE_TEST_LOG'],'a') as f:f.write(json.dumps(a)+'\\n')
 if a[:2]==['image','inspect']:print('python@sha256:'+'a'*64)
 if a[:2]==['image','save']:Path(a[a.index('--output')+1]).write_bytes(b'mocked-built-image')
+if a and a[0]=='run' and '/opt/koda/tools/grype' in a and 'db' in a:raise SystemExit(23)
 ''');docker.chmod(0o755)
             env=os.environ | {'PATH':str(binary)+os.pathsep+os.environ['PATH'],'IMAGE_TEST_LOG':str(log),'KODA_LINUX_DIST_DIR':str(dist),'KODA_SUITE_ALLOW_DIRTY':'1'}
             for key in ('KODA_IMAGE','KODA_DOCKER_IMAGE','KODA_DOCKER_IMAGE_TAG'):env.pop(key,None)
@@ -72,6 +73,58 @@ if a[:2]==['image','save']:Path(a[a.index('--output')+1]).write_bytes(b'mocked-b
                 self.assertEqual(versions['docker_image_tag'],labels['org.opencontainers.image.version'])
                 self.assertEqual(versions['git_revision'],labels['org.opencontainers.image.revision'])
             self.assertTrue(any(call[:2]==['image','save'] and call[-1]==image for call in calls))
+            grype_smokes=[call for call in calls if call[0]=='run' and '/opt/koda/tools/grype' in call]
+            self.assertEqual(len(grype_smokes),1)
+            self.assertEqual(grype_smokes[0][-1],'version')
+            self.assertIn('--read-only',grype_smokes[0])
+            self.assertEqual(grype_smokes[0][grype_smokes[0].index('--network')+1],'none')
+
+
+class ManagedDataInstallerSmokeTests(unittest.TestCase):
+    def exercise(self, fail_version=False):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); binary=root/'bin'; binary.mkdir(); bundle=root/'bundle'; bundle.mkdir(); prefix=root/'installed'
+            (bundle/'image').mkdir()
+            files={'install.sh':(ROOT/'platforms/linux/docker/install.sh').read_bytes(),
+                   'koda-docker.sh':b'#!/bin/sh\nexit 0\n','image-ref.txt':b'local/koda:test\n',
+                   'versions.txt':b'product=fixture\n','README.md':b'fixture\n','image/koda-offline-amd64.tar':b'fixture-image'}
+            for name,content in files.items():(bundle/name).write_bytes(content)
+            (bundle/'manifest.sha256').write_text(''.join(hashlib.sha256(content).hexdigest()+'  '+name+'\n' for name,content in files.items()))
+            log=root/'docker.jsonl'
+            (binary/'uname').write_text('#!/bin/sh\nprintf "x86_64\\n"\n'); (binary/'uname').chmod(0o755)
+            docker=binary/'docker'
+            docker.write_text('''#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+with open(os.environ['IMAGE_TEST_LOG'],'a') as f:f.write(json.dumps(a)+'\\n')
+if a and a[0]=='info' and '--format' in a:print(os.environ['IMAGE_TEST_ROOT'])
+if a[:2]==['image','inspect'] and '--format' in a:
+    fmt=a[a.index('--format')+1]
+    print('amd64' if '.Architecture' in fmt else 'true' if 'io.koda.offline' in fmt else 'fixture')
+if a and a[0]=='run' and '/opt/koda/tools/grype' in a:
+    if a[-1]!='version' or os.environ.get('FAIL_GRYPE_VERSION')=='1':raise SystemExit(23)
+'''); docker.chmod(0o755)
+            env=os.environ | {'PATH':str(binary)+os.pathsep+os.environ['PATH'],'IMAGE_TEST_LOG':str(log),'IMAGE_TEST_ROOT':str(root),'FAIL_GRYPE_VERSION':'1' if fail_version else '0'}
+            result=subprocess.run(['bash',str(bundle/'install.sh'),'--prefix',str(prefix)],env=env,text=True,capture_output=True)
+            calls=[json.loads(line) for line in log.read_text().splitlines()]
+            return result,calls,(prefix/'koda-docker').is_file()
+
+    def test_install_accepts_binary_without_embedded_database_and_keeps_offline_sandbox(self):
+        result,calls,installed=self.exercise()
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertTrue(installed)
+        grype=next(call for call in calls if call[0]=='run' and '/opt/koda/tools/grype' in call)
+        self.assertEqual(grype[-1],'version')
+        self.assertEqual(grype[grype.index('--network')+1],'none')
+        self.assertIn('--read-only',grype)
+        self.assertIn('no-new-privileges',grype)
+
+    def test_install_stops_before_wrapper_install_when_binary_version_fails(self):
+        result,_,installed=self.exercise(True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('smoke test failed: grype version',result.stderr)
+        self.assertFalse(installed)
 
 class SuiteDatedPatchTests(unittest.TestCase):
     def exercise(self, changed_repository=False):
