@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
-from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 from .schedule_api import configured_json_bytes
 
@@ -479,8 +479,9 @@ def download_gitlab_archive(project_id: int, commit_sha: str, target: Path, *, m
         raise
 
 
-def _tracker_request_json(path: str, token: str, *, method: str = "GET", payload: dict | None = None, timeout: float = 60) -> dict:
-    base = (os.environ.get("KODA_TRACKER_URL") or os.environ.get("KODA_SSBOM_TRACKER_URL") or "").strip().rstrip("/")
+def _tracker_request_json(path: str, token: str, *, method: str = "GET", payload: dict | None = None, timeout: float = 60, direct: bool = False) -> dict:
+    base = os.environ.get("KODA_TRACKER_URL") or ("" if direct else os.environ.get("KODA_SSBOM_TRACKER_URL", ""))
+    base = base.strip().rstrip("/")
     parsed = urlparse(base)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise IntegrationError("Tracker URL이 올바르지 않습니다")
@@ -490,10 +491,13 @@ def _tracker_request_json(path: str, token: str, *, method: str = "GET", payload
         headers["Content-Type"] = "application/json"
     request = Request(base + path, data=raw, method=method, headers=headers)
     context = _ssl_context(os.environ.get("KODA_TRACKER_CA_FILE", "").strip()) if parsed.scheme == "https" else None
-    opener = build_opener(_NoRedirect(), *([HTTPSHandler(context=context)] if context else []))
+    handlers = [ProxyHandler({})] if direct else []
+    if context:
+        handlers.append(HTTPSHandler(context=context))
+    opener = build_opener(_NoRedirect(), *handlers)
     try:
         with opener.open(request, timeout=timeout) as response:
-            json_limit = configured_json_bytes()
+            json_limit = 65536 if direct else configured_json_bytes()
             body = response.read(json_limit + 1)
             if len(body) > json_limit:
                 raise IntegrationError("Tracker 응답이 너무 큽니다")
@@ -505,6 +509,33 @@ def _tracker_request_json(path: str, token: str, *, method: str = "GET", payload
         raise IntegrationError(f"Tracker 요청 실패 ({exc.code})", status=exc.code) from exc
     except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         raise IntegrationError(f"Tracker 연결 실패: {exc}") from exc
+
+
+def shared_ai_available() -> bool:
+    return all(os.environ.get(name, "").strip() for name in (
+        "KODA_TRACKER_URL", "KODA_TRACKER_PROVISIONING_TOKEN_FILE",
+    ))
+
+
+def summarize_koda_run(summary: dict, findings: list[dict]) -> dict:
+    if not shared_ai_available():
+        raise IntegrationError("공통 AI 연동 설정이 없습니다", status=503)
+    try:
+        token = _secret(os.environ["KODA_TRACKER_PROVISIONING_TOKEN_FILE"].strip())
+    except (OSError, UnicodeError) as exc:
+        raise IntegrationError("공통 AI 연동 토큰을 읽을 수 없습니다", status=503) from exc
+    counts = summary.get("severity_counts") or {}
+    rule_ids = sorted({item["rule_id"] for item in findings if isinstance(item.get("rule_id"), str)
+                       and re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", item["rule_id"])})[:25]
+    response = _tracker_request_json("/api/v1/integrations/koda/ai-summary", token, method="POST", direct=True,
+                                     timeout=22, payload={
+        "severityCounts": {key: int(counts.get(key, 0)) for key in ("critical", "high", "medium", "low", "info")},
+        "ruleIds": rule_ids,
+    })
+    summary_text = response.get("summary")
+    if not isinstance(summary_text, str) or not summary_text or len(summary_text) > 8000:
+        raise IntegrationError("공통 AI 응답 형식이 올바르지 않습니다")
+    return {"summary": summary_text, "advisory": True}
 
 
 def provision_tracker_repository(gitlab_url: str, project: dict) -> dict[str, str]:

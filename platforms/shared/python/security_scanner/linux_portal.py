@@ -44,6 +44,8 @@ from .portal_integrations import (
     resolve_gitlab_ref,
     save_gitlab_configuration,
     send_tracker_sbom,
+    shared_ai_available,
+    summarize_koda_run,
     test_gitlab_configuration,
     test_gitlab_write_configuration,
 )
@@ -1004,6 +1006,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     gitlab_issues=store.gitlab_issue_delivery(run["run_id"]),
                     schedule_run=(store.schedule_run(run["snapshot"]["schedule_run_id"]) if run.get("snapshot", {}).get("source_type") == "scheduled_server" and run.get("snapshot", {}).get("schedule_run_id") else None),
                     feature_permissions=feature_permissions, finding_page=finding_page, finding_filters=finding_filters,
+                    ai_enabled=shared_ai_available(),
                     publication_pending=store.run_status(run["run_id"]).get("publication_pending", False), admin=admin, nav_permissions=nav_permissions,
                 ))
             if path == "/koda/compare":
@@ -1588,6 +1591,31 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                         run = store.create_scan(identity.subject_id, **payload)
                     self.server.portal_worker.enqueue(run["run_id"])
                     return self._json(202, run)
+                match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/ai-summary", path)
+                if match:
+                    if not self._exact(payload, set()):
+                        return
+                    if self.headers.get("Sec-Fetch-Site") == "cross-site":
+                        return self._json(403, {"code": "forbidden"})
+                    run = store.run_status(match.group(1))
+                    if not self._project(identity, run["project_id"], "runs.view"):
+                        return self._json(404, {"code": "not_found"})
+                    if run["status"] != "completed":
+                        return self._json(409, {"code": "analysis_incomplete", "detail": "완료된 점검을 선택하세요"})
+                    if not shared_ai_available():
+                        return self._json(503, {"code": "ai_unavailable", "detail": "공통 AI 연동 설정이 없습니다"})
+                    run = store.run_summary(run["run_id"])
+                    if run["result"] is None:
+                        return self._json(409, {"code": "analysis_incomplete", "detail": "요약할 점검결과가 없습니다"})
+                    findings = store.run_findings(run["run_id"], page=1, page_size=25)["items"]
+                    try:
+                        return self._json(200, summarize_koda_run(run["result"], findings))
+                    except IntegrationError as exc:
+                        if exc.status == 429:
+                            return self._json(429, {"code": "ai_busy", "detail": "AI 요청이 처리 중입니다. 잠시 후 다시 시도하세요"})
+                        if exc.status == 503:
+                            return self._json(503, {"code": "ai_unavailable", "detail": "Tracker 공통 AI 설정을 확인하세요"})
+                        return self._json(502, {"code": "ai_unavailable", "detail": "Tracker와 사내 AI 서버의 연결을 확인하세요"})
                 match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/tracker/retry", path)
                 if match:
                     if not self._exact(payload, set()):

@@ -5,6 +5,7 @@ from collections import Counter
 import csv
 import hashlib
 import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import multiprocessing
@@ -1104,6 +1105,64 @@ class LinuxPortalHttpTests(unittest.TestCase):
         forged["X-KODA-Gateway-Proof"] = "wrong" * 10
         self.assertEqual(self.request("/koda/api/v1/me", headers=forged)[0], 401)
         self.assertEqual(self.request("/koda/api/v1/me", headers=self.headers())[0], 200)
+
+    def test_shared_ai_sends_only_bounded_facts_for_authorized_completed_run(self):
+        calls = []
+
+        class Tracker(BaseHTTPRequestHandler):
+            def do_POST(self):
+                calls.append((self.path, self.headers.get("Authorization"), json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"summary": "<b>검토 참고</b>", "advisory": True}).encode())
+
+            def log_message(self, *args):
+                pass
+
+        tracker = ThreadingHTTPServer(("127.0.0.1", 0), Tracker)
+        thread = threading.Thread(target=tracker.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.server.portal_worker.close()
+            store = self.server.portal_store
+            project = store.create_project("AI 검증", self.admin)
+            source = Path(self.tmp.name) / "ai-test.py"
+            source.write_text("print('ok')\n", encoding="utf-8")
+            input_id = store.add_input(project, source.name, source, self.admin)
+            run = store.create_scan(self.admin, project, input_id, "local", "all")
+            token_file = Path(self.tmp.name) / "provisioning.token"
+            token_file.write_text("fixture-portal-token\n", encoding="utf-8")
+            run_url = f"/koda/api/v1/runs/{run['run_id']}/ai-summary"
+            with patch.dict(os.environ, {
+                "KODA_TRACKER_URL": f"http://127.0.0.1:{tracker.server_port}",
+                "KODA_TRACKER_PROVISIONING_TOKEN_FILE": str(token_file),
+            }):
+                self.assertEqual(self.request(run_url, method="POST", payload={}, headers=self.headers())[0], 409)
+                store.complete_run(run["run_id"], {"findings": [
+                    {"severity": "high", "rule_id": "JAVA.SAFE_ID", "path": "/private/source", "evidence": "secret evidence"},
+                    {"severity": "low", "rule_id": "/private/path"},
+                ]})
+                outsider = str(uuid.uuid4())
+                store.ensure_subject(outsider, "viewer")
+                self.assertEqual(self.request(run_url, method="POST", payload={}, headers=self.headers(outsider))[0], 404)
+                self.assertEqual(self.request(run_url, method="POST", payload={"prompt": "arbitrary"}, headers=self.headers())[0], 422)
+                self.assertEqual(self.request(run_url, method="POST", payload={}, headers={**self.headers(), "Sec-Fetch-Site": "cross-site"})[0], 403)
+                self.assertEqual(calls, [])
+                status, body = self.request(f"/koda/runs/{run['run_id']}", headers=self.headers())
+                self.assertEqual(status, 200)
+                self.assertIn("공통 AI 점검 요약", body)
+                self.assertIn("output.textContent=result.summary", body)
+                status, body = self.request(run_url, method="POST", payload={}, headers=self.headers())
+                self.assertEqual(status, 200)
+                self.assertEqual(body, {"summary": "<b>검토 참고</b>", "advisory": True})
+                self.assertEqual(calls, [("/api/v1/integrations/koda/ai-summary", "Bearer fixture-portal-token", {
+                    "severityCounts": {"critical": 0, "high": 1, "medium": 0, "low": 1, "info": 0}, "ruleIds": ["JAVA.SAFE_ID"],
+                })])
+        finally:
+            tracker.shutdown()
+            tracker.server_close()
+            thread.join(timeout=2)
 
     def test_readiness_checks_gateway_proof(self):
         self.assertEqual(self.request("/koda/ready")[0], 503)
