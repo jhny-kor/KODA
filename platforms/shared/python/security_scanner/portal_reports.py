@@ -203,6 +203,8 @@ def _render(args) -> bytes:
     scan.setdefault("scope", snapshot.get("scan_scope") or "all")
     scan.setdefault("standard", row["standard"] or snapshot.get("standard"))
     scan.setdefault("standard_category", row["standard_category"] or snapshot.get("standard_category"))
+    if isinstance(snapshot.get("file_scope"), dict):
+        scan.setdefault("file_scope", snapshot["file_scope"])
     result["scan"] = scan
     if args.format.endswith(".html"):
         with zipfile.ZipFile(io.BytesIO(render_html_pair_zip_from_payload(result, args.language))) as archive:

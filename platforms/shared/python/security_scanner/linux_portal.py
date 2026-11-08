@@ -144,6 +144,21 @@ def _run_scan(store: PortalStore, run_id: str, *, claimed: bool = False, deliver
                 max_files=min(MAX_ARCHIVE_FILES, int(snapshot.get("schedule_max_files", MAX_ARCHIVE_FILES))),
                 max_bytes=min(MAX_EXTRACTED_BYTES, int(snapshot.get("schedule_max_bytes", MAX_EXTRACTED_BYTES))),
             )
+            file_scope = None
+            scan_options = {}
+            manifest = None
+            if snapshot.get("source_type") == "manual_gitlab":
+                from .manual_gitlab import select_manual_files
+                archive_root = str(snapshot.get("gitlab_archive_root") or "")
+                repository_root = (target / archive_root).resolve()
+                if not archive_root or not repository_root.is_dir() or target.resolve() not in repository_root.parents:
+                    raise ValueError("GitLab 저장소 압축파일의 루트가 올바르지 않습니다")
+                manifest, selection, file_scope = select_manual_files(
+                    repository_root, run, store.baseline_manual_gitlab_run(run),
+                )
+                target = repository_root
+                scan_options["file_selection"] = selection
+                scan_options["discover_projects"] = False
             if not store.set_run_progress(run_id, "scanning", 35):
                 return store.complete_run(run_id)
             scan_scope = str(snapshot.get("scan_scope") or "all")
@@ -154,10 +169,18 @@ def _run_scan(store: PortalStore, run_id: str, *, claimed: bool = False, deliver
                 display_path=source["name"], scan_scope=scan_scope,
                 enable_local_vulnerabilities=scan_scope in {"all", "library"},
                 cve_only=scan_scope == "library",
+                **scan_options,
             )
+            if file_scope is not None:
+                result["scan"]["file_scope"] = file_scope
+                snapshot["file_scope"] = file_scope
+                store.save_manual_gitlab_scope(run_id, manifest, file_scope)
             result["data_release"] = release_metadata()
             result["findings"] = result.get("findings_by_language", {}).get("ko", [])
             result["analysis_stages"] = _analysis_stages(result, scan_scope)
+            if file_scope is not None and file_scope["effective_mode"] == "changed" and file_scope["scanned_files"] == 0:
+                for stage in result["analysis_stages"].values():
+                    stage.update(status="skipped", detail="신규·변경 파일이 없어 검사를 생략했습니다.")
             result["analysis_overall"] = "partial" if any(
                 stage["status"] in {"failed", "warning"} for stage in result["analysis_stages"].values()
             ) else "completed"
@@ -336,6 +359,10 @@ def _gitlab_issue_description(run: dict, finding: dict, stable_marker: str, deli
             f"- Commit SHA: `{_markdown(snapshot.get('gitlab_commit_sha'), 80)}`",
         )
     )
+    if isinstance(snapshot.get("file_scope"), dict):
+        from .reporting import file_scope_rows
+        provenance += tuple(f"- {_markdown(label, 100)}: {_markdown(value, 1000)}"
+                            for label, value in file_scope_rows(snapshot["file_scope"]))
     return "\n".join((
         stable_marker, delivery_marker,
         "KODA가 확정한 보안 취약점입니다.", "",
@@ -927,12 +954,15 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 query = parse_qs(parsed.query)
                 filters = {key: query.get(key, [default])[0] for key, default in (
                     ("source", "manual"), ("project", ""), ("scope", ""), ("status", ""),
+                    ("mine", ""), ("sort_by", ""), ("sort_order", "desc"),
                 )}
                 selected = [p["project_id"] for p in visible if not filters["project"] or p["name"] == filters["project"]]
                 try:
                     if filters["source"] not in {"manual", "scheduled_server"}:
                         raise ValueError("invalid run source")
-                    parameters = {**_page_parameters(query, 10), "status": filters["status"], "scan_scope": filters["scope"]}
+                    parameters = {**_page_parameters(query, 10), "status": filters["status"], "scan_scope": filters["scope"],
+                                  "requested_by": identity.subject_id if filters["mine"] == "1" else "",
+                                  "sort_by": filters["sort_by"], "sort_order": filters["sort_order"]}
                     listing = (store.paginate_schedule_runs(selected, **parameters) if filters["source"] == "scheduled_server"
                                else store.paginate_runs(selected, source="manual", **parameters))
                 except ValueError as exc:
@@ -1113,7 +1143,9 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 try:
                     return self._json(200, store.paginate_runs([p["project_id"] for p in visible], **_page_parameters(query),
                         search=query.get("search", [""])[0], status=query.get("status", [""])[0],
-                        scan_scope=query.get("scope", [""])[0], source=query.get("source", [""])[0]))
+                        scan_scope=query.get("scope", [""])[0], source=query.get("source", [""])[0],
+                        requested_by=identity.subject_id if query.get("mine", [""])[0] == "1" else "",
+                        sort_by=query.get("sort_by", [""])[0], sort_order=query.get("sort_order", ["desc"])[0]))
                 except ValueError as exc:
                     return self._json(422, {"code": "invalid_request", "detail": str(exc)})
             match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/(status|findings)(?:/(\d+))?", path)
@@ -1486,8 +1518,14 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     file_fields = common | {"input_id"}
                     gitlab_fields = common | {"gitlab_repository_id", "ref_type", "ref_name"}
                     fields = gitlab_fields if "gitlab_repository_id" in payload else file_fields
+                    if "gitlab_repository_id" in payload and "gitlab_scan_mode" in payload:
+                        fields |= {"gitlab_scan_mode"}
                     if not self._exact(payload, fields | ({"scan_scope"} if "scan_scope" in payload else set())):
                         return
+                    if "gitlab_repository_id" in payload:
+                        mode = payload.setdefault("gitlab_scan_mode", "full")
+                        if not isinstance(mode, str) or mode not in {"full", "changed"}:
+                            return self._json(422, {"code": "invalid_gitlab_scan_mode"})
                     payload.setdefault("scan_scope", "all")
                     screen_permissions = {
                         "library": ("scan.library.view",),
@@ -1533,6 +1571,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                             "gitlab_path_with_namespace": mapping["path_with_namespace"],
                             "gitlab_ref_type": ref_type, "gitlab_ref_name": ref_name,
                             "gitlab_commit_sha": commit_sha, "gitlab_archive_sha256": digest,
+                            "gitlab_instance_url": str(gitlab_configuration(gitlab_settings_dir).get("url") or "").rstrip("/"),
                             "gitlab_archive_root": archive_root,
                             "gitlab_default_branch": mapping["default_branch"],
                             "gitlab_fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -1908,7 +1947,7 @@ def _compare_page(store: PortalStore, subject_id: str, left: str, right: str, ad
         return page("회차 비교", form + "<p class='error'>비교할 회차를 찾을 수 없습니다.</p>", admin=admin, nav_permissions=nav_permissions)
     counts = comparison["counts"]
     rows = "".join(
-        f"<tr data-page-item><td><span class='status status-{esc(item['status'])}'>{esc({'new':'신규','resolved':'해결','persistent':'유지'}[item['status']])}</span></td><td class='sev sev-{esc(item['severity'])}'>{esc(item['severity'])}</td><td><code>{esc(item['rule_id'])}</code></td><td>{esc(item['path'])}</td><td>{esc(item['line'])}</td><td>{esc(item['title'])}</td></tr>"
+        f"<tr data-page-item><td><span class='status status-{esc(item['status'])}'>{esc({'new':'신규','resolved':'해결','persistent':'유지','unassessed':'미점검'}[item['status']])}</span></td><td class='sev sev-{esc(item['severity'])}'>{esc(item['severity'])}</td><td><code>{esc(item['rule_id'])}</code></td><td>{esc(item['path'])}</td><td>{esc(item['line'])}</td><td>{esc(item['title'])}</td></tr>"
         for item in comparison["findings"]
     ) or "<tr><td colspan='6' class='empty'>변경된 항목이 없습니다.</td></tr>"
     query = f"left={left}&right={right}"
@@ -1918,7 +1957,7 @@ def _compare_page(store: PortalStore, subject_id: str, left: str, right: str, ad
         f"<a class='button' href='/koda/api/v1/compare?{query}&format=json'>JSON</a>"
         if export_allowed else ""
     )
-    body = f"""{form}<div class='compare-layout'><section class='panel summary-strip compare-wide'><div><small>신규</small><strong>{counts['new']}</strong></div><div><small>해결</small><strong>{counts['resolved']}</strong></div><div><small>유지</small><strong>{counts['persistent']}</strong></div></section><section class='panel compare-wide'><div class='panel-head'><h2>{esc(comparison['project_name'])} 항목별 비교</h2><div class='toolbar'><input id='comparison-search' type='search' placeholder='규칙, 파일, 제목 검색'><select id='comparison-status'><option value=''>모든 상태</option><option value='new'>신규</option><option value='resolved'>해결</option><option value='persistent'>유지</option></select>{export_links}</div></div><div class='table-wrap' data-pager data-page-size='10'><table id='comparison-table'><thead><tr><th>상태</th><th>심각도</th><th>규칙</th><th>파일</th><th>위치</th><th>제목</th></tr></thead><tbody>{rows}</tbody></table></div></section></div><script>function filterComparison(){{const q=document.querySelector('#comparison-search').value.toLowerCase(),s=document.querySelector('#comparison-status').value;document.querySelectorAll('#comparison-table tbody tr').forEach(r=>r.dataset.filtered=String((q&&!r.textContent.toLowerCase().includes(q))||(s&&!r.querySelector('.status')?.classList.contains('status-'+s))));document.querySelector('#comparison-table').closest('[data-pager]')?._paginate()}}document.querySelector('#comparison-search').addEventListener('input',filterComparison);document.querySelector('#comparison-status').addEventListener('change',filterComparison)</script>"""
+    body = f"""{form}<div class='compare-layout'><section class='panel summary-strip compare-wide'><div><small>신규</small><strong>{counts['new']}</strong></div><div><small>해결</small><strong>{counts['resolved']}</strong></div><div><small>유지</small><strong>{counts['persistent']}</strong></div><div><small>미점검</small><strong>{counts.get('unassessed', 0)}</strong></div></section><section class='panel compare-wide'><div class='panel-head'><h2>{esc(comparison['project_name'])} 항목별 비교</h2><div class='toolbar'><input id='comparison-search' type='search' placeholder='규칙, 파일, 제목 검색'><select id='comparison-status'><option value=''>모든 상태</option><option value='new'>신규</option><option value='resolved'>해결</option><option value='persistent'>유지</option><option value='unassessed'>미점검</option></select>{export_links}</div></div><div class='table-wrap' data-pager data-page-size='10'><table id='comparison-table'><thead><tr><th>상태</th><th>심각도</th><th>규칙</th><th>파일</th><th>위치</th><th>제목</th></tr></thead><tbody>{rows}</tbody></table></div></section></div><script>function filterComparison(){{const q=document.querySelector('#comparison-search').value.toLowerCase(),s=document.querySelector('#comparison-status').value;document.querySelectorAll('#comparison-table tbody tr').forEach(r=>r.dataset.filtered=String((q&&!r.textContent.toLowerCase().includes(q))||(s&&!r.querySelector('.status')?.classList.contains('status-'+s))));document.querySelector('#comparison-table').closest('[data-pager]')?._paginate()}}document.querySelector('#comparison-search').addEventListener('input',filterComparison);document.querySelector('#comparison-status').addEventListener('change',filterComparison)</script>"""
     return page("회차 비교", body, admin=admin, nav_permissions=nav_permissions)
 
 
@@ -1946,6 +1985,10 @@ def _comparison_data(store: PortalStore, subject_id: str, left: str, right: str)
     after_repository = gitlab_source_identity(after)
     if (before_repository != (None, None) or after_repository != (None, None)) and before_repository != after_repository:
         raise ValueError("GitLab runs must belong to the same repository")
+    before_instance = (before.get("snapshot") or {}).get("gitlab_instance_url")
+    after_instance = (after.get("snapshot") or {}).get("gitlab_instance_url")
+    if before_repository != (None, None) and before_instance and after_instance and before_instance != after_instance:
+        raise ValueError("GitLab runs must belong to the same server")
     if before["status"] != "completed" or after["status"] != "completed":
         raise ValueError("completed runs are required")
     def repository_relative_path(run, value):
@@ -1993,10 +2036,27 @@ def _comparison_data(store: PortalStore, subject_id: str, left: str, right: str)
             normalized.append(copy)
         return {(item.get("rule_id"), item.get("path"), item.get("line")): item for item in normalized}
     old, new = mapped(before), mapped(after)
+    previous_manifest = (store.manual_gitlab_manifest(before["run_id"])
+                         if ((before.get("snapshot") or {}).get("file_scope") or {}).get("effective_mode") == "changed"
+                         else None)
+    assessed_paths = {}
+    for candidate in (before, after):
+        scope = (candidate.get("snapshot") or {}).get("file_scope") or {}
+        assessed_paths[id(candidate)] = set(scope.get("selected_paths") or ()) | set(scope.get("deleted_paths") or ())
+    def was_assessed(run, path):
+        scope = (run.get("snapshot") or {}).get("file_scope") or {}
+        if scope.get("effective_mode") != "changed":
+            return True
+        return path in assessed_paths[id(run)]
     rows = []
     for key in sorted(set(old) | set(new), key=lambda value: tuple(str(item or "") for item in value)):
         status = "new" if key not in old else ("resolved" if key not in new else "persistent")
         item = new.get(key) or old.get(key) or {}
+        if (status == "resolved" and not was_assessed(after, item.get("path"))) or (
+            status == "new" and not was_assessed(before, item.get("path"))
+            and (previous_manifest is None or item.get("path") in previous_manifest)
+        ):
+            status = "unassessed"
         rows.append({
             "status": status,
             "severity": str(item.get("severity", "info")),
@@ -2006,12 +2066,15 @@ def _comparison_data(store: PortalStore, subject_id: str, left: str, right: str)
             "line": item.get("line", ""),
             "title": str(item.get("title", "")),
         })
+    statuses = ("new", "resolved", "persistent")
+    if any(item["status"] == "unassessed" for item in rows):
+        statuses += ("unassessed",)
     return {
         "project_id": before["project_id"],
         "project_name": (store.project(before["project_id"]) or {}).get("name", ""),
         "left": left,
         "right": right,
-        "counts": {status: sum(item["status"] == status for item in rows) for status in ("new", "resolved", "persistent")},
+        "counts": {status: sum(item["status"] == status for item in rows) for status in statuses},
         "findings": rows,
     }
 

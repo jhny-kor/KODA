@@ -8,11 +8,46 @@ struct KODAApp: App {
     @NSApplicationDelegateAdaptor(KODAAppDelegate.self) private var appDelegate
 
     init() {
+        runHeadlessWebAuditIfRequested()
         runHeadlessJavaScanIfRequested()
         runHeadlessScanIfRequested()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             KODAWindowCoordinator.shared.ensureMainWindowVisibleAfterLaunch()
         }
+    }
+
+    /// The same compiled app can reproduce an audit in CI without automating its windows.
+    private func runHeadlessWebAuditIfRequested() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let path = environment["KODA_WEB_AUDIT_PROFILE"], !path.isEmpty else { return }
+        Task.detached(priority: .userInitiated) {
+            do {
+                let profileURL = URL(fileURLWithPath: path)
+                guard (try profileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 2_097_152 else {
+                    throw WebAuditError.invalidProfile("profile too large")
+                }
+                let profile = try WebAuditProfile.load(data: Data(contentsOf: profileURL))
+                let output = URL(fileURLWithPath: environment["KODA_WEB_AUDIT_OUTPUT_DIR"] ?? NSTemporaryDirectory())
+                    .appendingPathComponent("KODA-web-audit", isDirectory: true)
+                var spec: Data?
+                if let input = environment["KODA_WEB_AUDIT_API_SPEC"] ?? profile.apiSpecPath {
+                    let file = URL(fileURLWithPath: input, relativeTo: profileURL.deletingLastPathComponent())
+                    guard (try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 2_097_152 else {
+                        throw WebAuditError.invalidProfile("API specification too large")
+                    }
+                    spec = try Data(contentsOf: file)
+                }
+                let report = try await NativeWebAuditor.run(profile: profile, apiSpecData: spec)
+                let destination = try WebAuditReportWriter.write(report: report, to: output)
+                print(destination.path)
+                exit(!report.completed ? 2 : (report.controls.contains { $0.status == .vulnerable } ? 1 : 0))
+            } catch {
+                // Profile/parser errors contain no credentials; request errors are already sanitized.
+                fputs("웹 정밀 점검을 완료하지 못했습니다. 프로필·권한·입력 파일을 확인하세요.\n", stderr)
+                exit(2)
+            }
+        }
+        dispatchMain()
     }
 
     var body: some Scene {

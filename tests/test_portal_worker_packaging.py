@@ -248,11 +248,9 @@ class PortalWorkerPackagingTests(unittest.TestCase):
         self.invoke()
         self.assertEqual(len(json.loads(self.state_file.read_text())["containers"]), 3)
 
-    def test_contract_copies_match_and_launchers_parse(self):
-        pairs = ((WRAPPER, ROOT / "platforms/linux/scheduled-release/contract/koda/koda-docker"),
-                 (ROOT / "platforms/linux/suite/koda-suite", ROOT / "platforms/linux/scheduled-release/contract/koda-suite"))
-        for source, contract in pairs:
-            self.assertEqual(source.read_bytes(), contract.read_bytes())
+    def test_worker_contract_matches_and_launchers_parse(self):
+        contract = ROOT / "platforms/linux/scheduled-release/contract/koda/koda-docker"
+        self.assertEqual(WRAPPER.read_bytes(), contract.read_bytes())
         for source in (WRAPPER, ROOT / "platforms/linux/suite/koda-suite", ROOT / "platforms/linux/suite/reset-install.sh",
                        ROOT / "platforms/linux/scheduled-release/rollback.sh"):
             result = subprocess.run(["bash", "-n", str(source)], capture_output=True, text=True)

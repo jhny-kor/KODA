@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import unittest
@@ -42,8 +43,14 @@ class ScheduledReleasePreflightTests(unittest.TestCase):
         self.assertNotIn("dtrack.py", hashes)
         self.assertNotIn("migration.py", hashes)
         self.assertFalse((contract / "tracker-backend-baselines.json").exists())
-        self.assertEqual((contract / "koda-suite").read_bytes(), (ROOT / "platforms/linux/suite/koda-suite").read_bytes())
-        self.assertEqual((contract / "tracker/compose.integration.yaml").read_bytes(), (ROOT / "platforms/linux/suite/compose.integration.yaml").read_bytes())
+        # These files describe the installed October patch baseline.
+        # Updating the full Suite installer must not rewrite that baseline.
+        expected = {
+            "koda-suite": "989540c814a9e75dee8a91562e4511afa2ae636d238a9906a0b69228769ef282",
+            "tracker/compose.integration.yaml": "86517fd6cd7f7badfbf648f7c7e31a6a08be0530d587c7bde8a25733ea0d8aef",
+        }
+        for name, digest in expected.items():
+            self.assertEqual(hashlib.sha256((contract / name).read_bytes()).hexdigest(), digest, name)
 
     def test_chunked_digest_contract_is_normalized(self):
         self.assertEqual(

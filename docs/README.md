@@ -77,6 +77,7 @@ Linux 포털을 운영할 때는 8765 포트를 직접 공개하지 말고 통�
 | [GITHUB_REPOSITORY_SECURITY.ko.md](security/GITHUB_REPOSITORY_SECURITY.ko.md) | GitHub 저장소 보안 설정 체크리스트 |
 | [ZAP_BASELINE.ko.md](security/ZAP_BASELINE.ko.md) | OWASP ZAP baseline DAST 실행 |
 | [WEB_AUDIT.ko.md](security/WEB_AUDIT.ko.md) | 승인·프로필·oracle 기반 21개 웹취약점 자동 점검 |
+| [MACOS-WEB-AUDIT.ko.md](security/MACOS-WEB-AUDIT.ko.md) | macOS Swift 웹 정밀 점검·API·권한 시나리오·보고서 |
 | [VEX.ko.md](security/VEX.ko.md) | CycloneDX VEX 취약점 상태 추적 |
 | [SLSA_SIGSTORE.ko.md](security/SLSA_SIGSTORE.ko.md) | SLSA·Sigstore 릴리스 출처 증명 |
 | [NIST_SSDF_WORKFLOW.ko.md](security/NIST_SSDF_WORKFLOW.ko.md) | NIST SSDF 워크플로 증적 |

@@ -1739,6 +1739,53 @@ def _payload_report_context(
     return target_names, target_paths, tuple(components), scan
 
 
+def file_scope_rows(scope: object, language: str = "ko") -> list[tuple[str, str]]:
+    """Human-readable immutable manual GitLab coverage for every export."""
+    if not isinstance(scope, dict) or not scope:
+        return []
+    ko = language == "ko"
+    modes = {"full": "전체 점검" if ko else "Full scan", "changed": "신규·변경 파일만 점검" if ko else "New and changed files only"}
+    reasons = {
+        "no_baseline": "성공한 전체 점검 기준 없음", "first_scan": "최초 점검으로 비교 기준 없음",
+        "policy_changed": "점검 기준·정책 변경", "settings_changed": "점검 조건·정책 변경", "baseline_incompatible": "이전 점검 조건과 불일치",
+        "configured_full": "실행 시 선택한 전체 점검", "changed_files": "이전 성공 점검과 파일 내용 비교",
+        "no_changes": "신규·변경 파일 없음",
+        "unchanged": "신규·변경 파일 없음",
+    }
+    fields = (
+        ("requested_mode", "선택 점검 범위", "Selected file scope"),
+        ("effective_mode", "실제 점검 범위", "Actual file scope"),
+        ("reason", "점검 범위 적용 사유", "Scope reason"),
+        ("baseline_run_id", "비교 기준 점검 ID", "Baseline run ID"),
+        ("baseline_commit", "비교 기준 커밋", "Baseline commit"),
+        ("current_commit", "현재 커밋", "Current commit"),
+        ("files_total", "대상 파일 수", "Total files"),
+        ("scanned_files", "선택 파일 수", "Selected files"),
+        ("new_files", "신규 파일 수", "New files"),
+        ("changed_files", "변경 파일 수", "Changed files"),
+        ("deleted_files", "삭제 파일 수", "Deleted files"),
+        ("dependency_context_files", "추가 의존성 명세 파일 수", "Additional dependency context files"),
+    )
+    rows = []
+    for key, korean, english in fields:
+        raw = scope.get(key)
+        value = str(raw) if raw is not None and raw != "" else "—"
+        if key in {"requested_mode", "effective_mode"}:
+            value = modes.get(value, value)
+        elif key == "reason" and ko:
+            value = reasons.get(value, value)
+        rows.append((korean if ko else english, value))
+    if scope.get("effective_mode") == "changed":
+        if scope.get("scanned_files") == 0:
+            rows.append(("점검 상태" if ko else "Scan coverage", "신규·변경 파일 없음 — 검사 생략" if ko else "No new or changed files — scanning skipped"))
+        rows.append(("해석 주의" if ko else "Coverage note", "검사하지 않은 파일의 기존 취약점이 해결되었음을 의미하지 않습니다." if ko else "This result does not establish that existing findings in unscanned files are resolved."))
+    if scope.get("context_note"):
+        rows.append(("전체 프로젝트 분석 문맥" if ko else "Whole project analysis context", str(scope["context_note"])))
+    if scope.get("context_files") is not None:
+        rows.append(("분석 문맥 파일 수" if ko else "Analysis context files", str(scope["context_files"])))
+    return rows
+
+
 def render_markdown_from_payload(payload: dict[str, object], language: str = "ko") -> str:
     findings = [_finding_from_payload(item) for item in _payload_findings(payload, language)]
     target_names, target_paths, _, scan = _payload_report_context(payload, findings)
@@ -1753,6 +1800,12 @@ def render_markdown_from_payload(payload: dict[str, object], language: str = "ko
         standard_mappings=mappings,
         source_analysis=payload.get("source_analysis"),
     )
+    scope_rows = file_scope_rows(scan.get("file_scope"), language)
+    if scope_rows:
+        title = "파일 점검 범위" if language == "ko" else "File scan scope"
+        report += "\n## " + title + "\n\n" + "\n".join(
+            f"- {label}: {_web_audit_markdown_escape(value)}" for label, value in scope_rows
+        ) + "\n"
     if standard == "sw-dev-security-49":
         sw49 = _payload_sw49(payload) or sw49_payload(
             findings,
@@ -1833,6 +1886,15 @@ def render_html_pair_zip_from_payload(payload: dict[str, object], language: str 
     if vulnerability_html:
         from .java_vulnerability_reporting import render_main_html
         main_html = render_main_html(_java_library_payload(payload), "ko", "report-detail.html", vulnerability_detail_href="report-vulnerabilities.html")
+    scope_rows = file_scope_rows(scan.get("file_scope"), "ko")
+    if scope_rows:
+        scope_html = '<section aria-label="파일 점검 범위"><h2>파일 점검 범위</h2><dl>' + "".join(
+            f"<dt>{html.escape(label)}</dt><dd>{html.escape(value)}</dd>" for label, value in scope_rows
+        ) + "</dl></section>"
+        main_html = main_html.replace("</main>", scope_html + "</main>", 1)
+        detail_html = detail_html.replace("</main>", scope_html + "</main>", 1)
+        if vulnerability_html:
+            vulnerability_html = vulnerability_html.replace("</main>", scope_html + "</main>", 1)
     web_audit = payload.get("web_audit")
     if isinstance(web_audit, dict):
         audit_html = _web_audit_html(web_audit, language)
@@ -2086,6 +2148,9 @@ def render_xlsx(payload: dict[str, object], language: str = "ko") -> bytes:
         )
 
     sheets: list[tuple[str, list[list[object]]]] = [("Findings", rows)]
+    scope_rows = file_scope_rows((payload.get("scan") or {}).get("file_scope"), language)
+    if scope_rows:
+        sheets.append(("FileScope", [["항목", "값"] if language == "ko" else ["Field", "Value"], *[list(row) for row in scope_rows]]))
 
     web_audit = payload.get("web_audit")
     if isinstance(web_audit, dict):
@@ -2273,6 +2338,9 @@ def render_hwpx(payload: dict[str, object], language: str = "ko") -> bytes:
     paragraphs.append(_hwpx_paragraph(f"{labels.get('generated', 'Generated')}: {generated_display}", "16", "25", para_id))
     para_id += 1
     paragraphs.append(_hwpx_paragraph(f"{labels.get('total_findings', 'Findings')}: {len(findings)}", "16", "25", para_id))
+    for label, value in file_scope_rows((payload.get("scan") or {}).get("file_scope"), language):
+        para_id += 1
+        paragraphs.append(_hwpx_paragraph(f"{label}: {value}", "16", "25", para_id))
 
     grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
     for item in findings:

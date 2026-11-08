@@ -64,7 +64,10 @@ SCHEDULE_RUN_METADATA_COLUMNS = (
 )
 RUN_LIST_SNAPSHOT_SQL = (
     "json_object('scan_scope',COALESCE(json_extract(r.snapshot_json,'$.scan_scope'),'all'),"
-    "'source_type',json_extract(r.snapshot_json,'$.source_type')) AS snapshot_json"
+    "'source_type',json_extract(r.snapshot_json,'$.source_type'),"
+    "'requested_scan_mode',json_extract(r.snapshot_json,'$.requested_scan_mode'),"
+    "'file_scope',json_remove(json_extract(r.snapshot_json,'$.file_scope'),"
+    "'$.selected_paths','$.deleted_paths','$.scanner_fingerprint')) AS snapshot_json"
 )
 
 
@@ -133,6 +136,9 @@ class PortalStore:
                   revision_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
                   snapshot_json TEXT NOT NULL, result_json TEXT, created_at TEXT NOT NULL,
                   UNIQUE(run_id,sequence));
+                CREATE TABLE IF NOT EXISTS manual_gitlab_manifests(
+                  run_id TEXT PRIMARY KEY, manifest_json TEXT NOT NULL,
+                  FOREIGN KEY(run_id) REFERENCES scan_runs(run_id) ON DELETE CASCADE);
                 CREATE TABLE IF NOT EXISTS audit_events(
                   id INTEGER PRIMARY KEY AUTOINCREMENT, subject_id TEXT, action TEXT NOT NULL,
                   project_id TEXT, detail_json TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -1089,7 +1095,8 @@ class PortalStore:
             raise KeyError("schedule run not found")
         return self._schedule_run_dict(row)
 
-    def paginate_schedule_runs(self, project_ids: list[str], *, page=1, page_size=50, search="", status="", scan_scope="") -> dict:
+    def paginate_schedule_runs(self, project_ids: list[str], *, page=1, page_size=50, search="", status="", scan_scope="", requested_by="", sort_by="", sort_order="desc") -> dict:
+        order = self._runs_order(sort_by, sort_order, scheduled=True)
         page, page_size = self._page_values(page, page_size)
         result = {"items": [], "total": 0, "page": page, "page_size": page_size}
         ids = list(dict.fromkeys(str(value) for value in project_ids))
@@ -1097,6 +1104,9 @@ class PortalStore:
             return result
         clauses = ["t.project_id IN (" + ",".join("?" for _ in ids) + ")", "(r.run_id IS NULL OR r.deleted_at IS NULL)"]
         values = list(ids)
+        if requested_by:
+            clauses.append("r.requested_by=?")
+            values.append(str(requested_by))
         if status:
             clauses.append("sr.status=?")
             values.append(str(status))
@@ -1113,7 +1123,7 @@ class PortalStore:
             result["total"] = db.execute(f"SELECT count(*) {joins}WHERE {where}", values).fetchone()[0]
             rows = db.execute(
                 "SELECT sr.schedule_run_id,t.project_id,p.name AS project_name,t.name,t.scan_scope,t.standard "
-                f"{joins}WHERE {where} ORDER BY sr.scheduled_for DESC,sr.created_at DESC,sr.schedule_run_id LIMIT ? OFFSET ?",
+                f"{joins}WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
                 (*values, page_size, (page - 1) * page_size),
             ).fetchall()
         result["items"] = [{**self.schedule_run(row["schedule_run_id"], include_metadata=False), **dict(row)} for row in rows]
@@ -1645,6 +1655,7 @@ class PortalStore:
         standard_category: str,
         scan_scope: str = "all",
         source_snapshot: dict | None = None,
+        gitlab_scan_mode: str | None = None,
         **unsafe,
     ) -> dict:
         if scan_scope == "library":
@@ -1656,6 +1667,11 @@ class PortalStore:
             or scan_scope not in SCAN_SCOPE_CATEGORIES
         ):
             raise ValueError("unsupported scan options")
+        if gitlab_scan_mode is not None and (
+            not isinstance(gitlab_scan_mode, str) or gitlab_scan_mode not in {"full", "changed"}
+            or not isinstance(source_snapshot, dict) or not source_snapshot.get("gitlab_mapping_id")
+        ):
+            raise ValueError("invalid manual GitLab scan mode")
         required_scan_permission = {
             "library": "scan.library.create",
             "source": "scan.source.create",
@@ -1699,6 +1715,7 @@ class PortalStore:
                     "gitlab_ref_type", "gitlab_ref_name", "gitlab_commit_sha",
                     "gitlab_archive_sha256", "gitlab_default_branch", "gitlab_fetched_at",
                     "gitlab_archive_root",
+                    "gitlab_instance_url",
                     "tracker_service_id", "tracker_environment_id", "tracker_token_ref",
                 }
                 if not isinstance(source_snapshot, dict) or not set(source_snapshot) <= allowed:
@@ -1706,6 +1723,13 @@ class PortalStore:
                 snapshot.update(source_snapshot)
             run_id, revision_id, now = str(uuid.uuid4()), str(uuid.uuid4()), self._now()
             if snapshot.get("gitlab_mapping_id"):
+                mapping = db.execute(
+                    "SELECT * FROM gitlab_repositories WHERE mapping_id=? AND project_id=? AND enabled=1",
+                    (str(snapshot["gitlab_mapping_id"]), str(project_id)),
+                ).fetchone()
+                if not mapping or snapshot.get("gitlab_project_id") != mapping["gitlab_project_id"]:
+                    raise ValueError("invalid GitLab repository mapping for scan")
+                snapshot.update(source_type="manual_gitlab", requested_scan_mode=gitlab_scan_mode or "full")
                 # Allocate under BEGIN IMMEDIATE; tombstoned runs still reserve
                 # their version so deletion/restart cannot reuse a result branch.
                 day = dt.datetime.fromisoformat(now).astimezone(dt.timezone(dt.timedelta(hours=9))).date()
@@ -1737,6 +1761,100 @@ class PortalStore:
             self._audit_db(db, subject_id, "scan.created", project_id, {"run_id": run_id, "round_number": round_number})
             db.execute("COMMIT")
         return self.run(run_id)
+
+    def save_manual_gitlab_scope(self, run_id: str, manifest: dict[str, str], file_scope: dict) -> None:
+        """Stage immutable scope evidence; only successful runs become baselines."""
+        if not isinstance(manifest, dict) or not isinstance(file_scope, dict):
+            raise ValueError("invalid manual GitLab scope")
+        for path, digest in manifest.items():
+            if (not isinstance(path, str) or not path or path.startswith("/")
+                    or ".." in path.split("/") or "\\" in path or "\x00" in path
+                    or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                raise ValueError("invalid manual GitLab manifest")
+        encoded_manifest, encoded_scope = self._json(manifest), self._json(file_scope)
+        with self._lock, self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM scan_runs WHERE run_id=?", (str(run_id),)).fetchone()
+            if not row or row["deleted_at"] is not None:
+                raise KeyError("run not found")
+            snapshot = json.loads(row["snapshot_json"])
+            if (row["status"] != "running" or row["cancel_requested"]
+                    or snapshot.get("source_type") != "manual_gitlab"):
+                raise ValueError("manual GitLab scope requires a running manual GitLab scan")
+            existing = db.execute(
+                "SELECT manifest_json FROM manual_gitlab_manifests WHERE run_id=?", (str(run_id),)
+            ).fetchone()
+            if existing:
+                if existing["manifest_json"] != encoded_manifest or self._json(snapshot.get("file_scope")) != encoded_scope:
+                    raise ValueError("manual GitLab scope is already recorded")
+                db.execute("COMMIT")
+                return
+            snapshot["file_scope"] = json.loads(encoded_scope)
+            db.execute(
+                "INSERT INTO manual_gitlab_manifests(run_id,manifest_json) VALUES(?,?)", (str(run_id), encoded_manifest)
+            )
+            db.execute("UPDATE scan_runs SET snapshot_json=? WHERE run_id=?", (self._json(snapshot), str(run_id)))
+            db.execute(
+                "UPDATE analysis_revisions SET snapshot_json=? WHERE run_id=? AND sequence=1",
+                (self._json(snapshot), str(run_id)),
+            )
+            db.execute("COMMIT")
+
+    def manual_gitlab_manifest(self, run_id: str) -> dict[str, str] | None:
+        with self._db() as db:
+            row = db.execute(
+                "SELECT m.manifest_json FROM manual_gitlab_manifests m "
+                "JOIN scan_runs r ON r.run_id=m.run_id WHERE m.run_id=? AND r.deleted_at IS NULL",
+                (str(run_id),),
+            ).fetchone()
+        return json.loads(row["manifest_json"]) if row else None
+
+    def baseline_manual_gitlab_run(self, current_run: dict) -> dict | None:
+        """Require a successful full scan, then compare against the latest success."""
+        with self._db() as db:
+            current = db.execute(
+                "SELECT project_id,round_number,snapshot_json FROM scan_runs WHERE run_id=? AND deleted_at IS NULL",
+                (str(current_run["run_id"]),),
+            ).fetchone()
+            if not current:
+                raise KeyError("run not found")
+            snapshot = json.loads(current["snapshot_json"])
+            if snapshot.get("source_type") != "manual_gitlab":
+                return None
+            eligible = (
+                "FROM scan_runs r "
+                "JOIN manual_gitlab_manifests m ON m.run_id=r.run_id "
+                "WHERE r.project_id=? AND r.round_number<? AND r.status='completed' AND r.deleted_at IS NULL "
+                "AND json_extract(r.snapshot_json,'$.source_type')='manual_gitlab' "
+                "AND json_extract(r.snapshot_json,'$.gitlab_project_id')=? "
+                "AND json_extract(r.snapshot_json,'$.gitlab_ref_type')=? "
+                "AND json_extract(r.snapshot_json,'$.gitlab_ref_name')=? "
+                "AND COALESCE(json_extract(r.snapshot_json,'$.gitlab_instance_url'),'')=? "
+                "AND COALESCE(json_extract(r.result_json,'$.analysis_overall'),'')<>'partial' "
+                "AND COALESCE(json_extract(r.result_json,'$.analysis_stages.source.status'),'')<>'failed' "
+                "AND COALESCE(json_extract(r.result_json,'$.analysis_stages.library.status'),'')<>'failed' "
+                "AND COALESCE(json_extract(r.result_json,'$.analysis_stages.quality.status'),'')<>'failed' "
+                "AND NOT EXISTS(SELECT 1 FROM schedule_runs sr WHERE sr.run_id=r.run_id) "
+            )
+            values = (current["project_id"], current["round_number"], snapshot.get("gitlab_project_id"),
+                      snapshot.get("gitlab_ref_type"), snapshot.get("gitlab_ref_name"),
+                      snapshot.get("gitlab_instance_url") or "")
+            full = db.execute(
+                "SELECT r.run_id,r.snapshot_json " + eligible
+                + "AND json_extract(r.snapshot_json,'$.file_scope.effective_mode')='full' "
+                "ORDER BY r.round_number DESC LIMIT 1", values,
+            ).fetchone()
+            if not full:
+                return None
+            rows = db.execute(
+                "SELECT r.run_id,r.snapshot_json,m.manifest_json " + eligible
+                + "ORDER BY r.round_number DESC LIMIT 1", values,
+            ).fetchone()
+            if not rows:
+                return None
+            return {"run_id": rows["run_id"], "snapshot": json.loads(rows["snapshot_json"]),
+                    "manifest": json.loads(rows["manifest_json"]),
+                    "full_scan_run_id": full["run_id"], "full_scan_snapshot": json.loads(full["snapshot_json"])}
 
     def mark_run_running(self, run_id: str) -> bool:
         with self._lock, self._db() as db:
@@ -2416,7 +2534,45 @@ class PortalStore:
     def _page_values(page: int, page_size: int) -> tuple[int, int]:
         return max(1, int(page)), min(100, max(1, int(page_size)))
 
-    def paginate_runs(self, project_ids: list[str], *, page=1, page_size=50, search="", status="", scan_scope="", source="") -> dict:
+    @staticmethod
+    def _runs_order(sort_by: str, sort_order: str, *, scheduled: bool = False) -> str:
+        # Only fixed SQL expressions may enter ORDER BY; user input never does.
+        columns = {
+            "round_number": "r.round_number",
+            "project": "p.name COLLATE NOCASE",
+            "source": "COALESCE(json_extract(r.snapshot_json,'$.source_type'),'manual')",
+            "requested_by": "COALESCE(s.display,CASE WHEN r.requested_by='schedule-worker' THEN 'schedule-worker' ELSE '기록 없음' END) COLLATE NOCASE",
+            "scope": "COALESCE(json_extract(r.snapshot_json,'$.scan_scope'),'all')",
+            "standard": "r.standard || ' / ' || r.standard_category",
+            "status": "COALESCE(sr.status,r.status)",
+            "created_at": "r.created_at",
+        }
+        if scheduled:
+            columns.update({
+                "round_number": "sr.scheduled_for",
+                "source": "'scheduled_server'",
+                "requested_by": "'schedule-worker'",
+                "scope": "t.scan_scope",
+                "standard": "t.standard",
+                "status": "sr.status",
+                "created_at": "sr.created_at",
+            })
+        keys = sort_by.split(",") if sort_by else []
+        directions = sort_order.split(",")
+        if (any(direction not in {"asc", "desc"} for direction in directions)
+                or (keys and (len(keys) > 8 or len(keys) != len(set(keys))
+                              or len(keys) != len(directions) or any(key not in columns for key in keys)))
+                or (not keys and len(directions) != 1)):
+            raise ValueError("invalid run sort")
+        if not keys:
+            return ("sr.scheduled_for DESC,sr.created_at DESC,sr.schedule_run_id" if scheduled
+                    else "r.created_at DESC,r.round_number DESC,r.run_id")
+        terms = [f"{columns[key]} {direction.upper()}" for key, direction in zip(keys, directions)]
+        terms.append("sr.schedule_run_id" if scheduled else "r.run_id")
+        return ",".join(terms)
+
+    def paginate_runs(self, project_ids: list[str], *, page=1, page_size=50, search="", status="", scan_scope="", source="", requested_by="", sort_by="", sort_order="desc") -> dict:
+        order = self._runs_order(sort_by, sort_order)
         page, page_size = self._page_values(page, page_size)
         result = {"items": [], "total": 0, "page": page, "page_size": page_size}
         ids = list(dict.fromkeys(str(value) for value in project_ids))
@@ -2424,6 +2580,9 @@ class PortalStore:
             return result
         clauses = ["r.deleted_at IS NULL", "r.project_id IN (" + ",".join("?" for _ in ids) + ")"]
         values = list(ids)
+        if requested_by:
+            clauses.append("r.requested_by=?")
+            values.append(str(requested_by))
         if status:
             clauses.append("COALESCE(sr.status,r.status)=?")
             values.append(str(status))
@@ -2431,8 +2590,11 @@ class PortalStore:
             clauses.append("COALESCE(json_extract(r.snapshot_json,'$.scan_scope'),'all')=?")
             values.append(str(scan_scope))
         if source:
-            clauses.append("COALESCE(json_extract(r.snapshot_json,'$.source_type'),'manual')=?")
-            values.append(str(source))
+            if source == "manual":
+                clauses.append("COALESCE(json_extract(r.snapshot_json,'$.source_type'),'manual') IN ('manual','manual_gitlab')")
+            else:
+                clauses.append("COALESCE(json_extract(r.snapshot_json,'$.source_type'),'manual')=?")
+                values.append(str(source))
         if search:
             clauses.append("(p.name LIKE ? ESCAPE '\\' OR s.display LIKE ? ESCAPE '\\' OR CAST(r.round_number AS TEXT) LIKE ? ESCAPE '\\' OR r.created_at LIKE ? ESCAPE '\\')")
             pattern = "%" + str(search)[:500].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
@@ -2444,7 +2606,7 @@ class PortalStore:
             result["total"] = db.execute(f"SELECT count(*) {joins}WHERE {where}", values).fetchone()[0]
             rows = db.execute(
                 f"SELECT {columns},{RUN_LIST_SNAPSHOT_SQL},s.display AS requested_by_id,p.name AS project_name {joins}WHERE {where} "
-                "ORDER BY r.created_at DESC,r.round_number DESC,r.run_id LIMIT ? OFFSET ?",
+                f"ORDER BY {order} LIMIT ? OFFSET ?",
                 (*values, page_size, (page - 1) * page_size),
             ).fetchall()
             result["items"] = [self._listed_run(db, row) for row in rows]
@@ -2517,6 +2679,8 @@ class PortalStore:
         snapshot = json.loads(value.pop("snapshot_json"))
         value["scan_scope"] = snapshot.get("scan_scope", "all")
         value["source"] = snapshot.get("source_type") or "manual"
+        value["requested_scan_mode"] = snapshot.get("requested_scan_mode")
+        value["file_scope"] = snapshot.get("file_scope")
         if value["source"] == "scheduled_server":
             scheduled = db.execute("SELECT schedule_run_id FROM schedule_runs WHERE run_id=?", (value["run_id"],)).fetchone()
             if scheduled:

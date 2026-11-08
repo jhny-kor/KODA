@@ -26,6 +26,12 @@
 		AA0000000000000000000061 /* NativeLocalAIImpact.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000062; };
 		AA0000000000000000000071 /* NativeAIReport.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000072; };
 		AA0000000000000000000081 /* LocalAIReportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000082; };
+		AB0000000000000000000011 /* NativeWebAuditModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0000000000000000000012; };
+		AB0000000000000000000021 /* NativeWebAuditTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0000000000000000000022; };
+		AB0000000000000000000031 /* NativeWebAuditRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0000000000000000000032; };
+		AB0000000000000000000041 /* NativeWebAuditAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0000000000000000000042; };
+		AB0000000000000000000051 /* NativeWebAuditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0000000000000000000052; };
+		AB0000000000000000000061 /* NativeWebAuditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0000000000000000000062; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -50,6 +56,12 @@
 		AA0000000000000000000062 /* NativeLocalAIImpact.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeLocalAIImpact.swift; sourceTree = "<group>"; };
 		AA0000000000000000000072 /* NativeAIReport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAIReport.swift; sourceTree = "<group>"; };
 		AA0000000000000000000082 /* LocalAIReportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAIReportView.swift; sourceTree = "<group>"; };
+		AB0000000000000000000012 /* NativeWebAuditModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebAuditModels.swift; sourceTree = "<group>"; };
+		AB0000000000000000000022 /* NativeWebAuditTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebAuditTransport.swift; sourceTree = "<group>"; };
+		AB0000000000000000000032 /* NativeWebAuditRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebAuditRules.swift; sourceTree = "<group>"; };
+		AB0000000000000000000042 /* NativeWebAuditAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebAuditAPI.swift; sourceTree = "<group>"; };
+		AB0000000000000000000052 /* NativeWebAuditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebAuditor.swift; sourceTree = "<group>"; };
+		AB0000000000000000000062 /* NativeWebAuditView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebAuditView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -85,6 +97,12 @@
 				AA0000000000000000000062 /* NativeLocalAIImpact.swift */,
 				AA0000000000000000000072 /* NativeAIReport.swift */,
 				AA0000000000000000000082 /* LocalAIReportView.swift */,
+				AB0000000000000000000062 /* NativeWebAuditView.swift */,
+				AB0000000000000000000052 /* NativeWebAuditor.swift */,
+				AB0000000000000000000042 /* NativeWebAuditAPI.swift */,
+				AB0000000000000000000032 /* NativeWebAuditRules.swift */,
+				AB0000000000000000000022 /* NativeWebAuditTransport.swift */,
+				AB0000000000000000000012 /* NativeWebAuditModels.swift */,
 				0A1B2C3D4E5F600000000011 /* KODAApp.swift */,
 				0A1B2C3D4E5F600000000012 /* ContentView.swift */,
 				0A1B2C3D4E5F600000000018 /* SecurityStandardsView.swift */,
@@ -218,6 +236,12 @@
 				AA0000000000000000000061 /* NativeLocalAIImpact.swift in Sources */,
 				AA0000000000000000000071 /* NativeAIReport.swift in Sources */,
 				AA0000000000000000000081 /* LocalAIReportView.swift in Sources */,
+				AB0000000000000000000061 /* NativeWebAuditView.swift in Sources */,
+				AB0000000000000000000051 /* NativeWebAuditor.swift in Sources */,
+				AB0000000000000000000041 /* NativeWebAuditAPI.swift in Sources */,
+				AB0000000000000000000031 /* NativeWebAuditRules.swift in Sources */,
+				AB0000000000000000000021 /* NativeWebAuditTransport.swift in Sources */,
+				AB0000000000000000000011 /* NativeWebAuditModels.swift in Sources */,
 				0A1B2C3D4E5F600000000001 /* KODAApp.swift in Sources */,
 				0A1B2C3D4E5F600000000002 /* ContentView.swift in Sources */,
 				0A1B2C3D4E5F600000000003 /* ScannerBridge.swift in Sources */,

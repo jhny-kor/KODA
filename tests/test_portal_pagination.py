@@ -46,6 +46,47 @@ class PortalPaginationTests(unittest.TestCase):
         self.assertEqual(store.run_summary(run["run_id"])["result"]["finding_count"], count)
         return project, run["run_id"]
 
+    def test_runs_owner_and_sort_filters_follow_authenticated_subject(self):
+        project, run_id = self.make_run(1)
+        store = self.server.portal_store
+        other = str(uuid.uuid4())
+        store.ensure_subject(other, "admin")  # Same display must not imply same owner.
+        store.set_subject(other, status="enabled", system_admin=True, actor=self.admin)
+        target = Path(self.tmp.name) / "other.txt"
+        target.write_text("test")
+        input_id = store.add_input(project, target.name, target, other)
+        other_run = store.create_scan(other, project, input_id, "local", "all")
+        for subject, expected in ((self.admin, run_id), (other, other_run['run_id'])):
+            status, result = self.request("/koda/api/v1/runs?mine=1&sort_by=round_number&sort_order=asc", headers=self.headers(subject))
+            self.assertEqual(status, 200)
+            self.assertEqual([row['run_id'] for row in result['items']], [expected])
+        status, html = self.request("/koda/runs?mine=1&sort_by=round_number&sort_order=asc&page_size=1", headers=self.headers())
+        self.assertEqual(status, 200)
+        self.assertIn("본인 결과만 조회", html)
+        self.assertIn("data-run-sort='round_number'", html)
+        self.assertIn("aria-sort='ascending'", html)
+        self.assertIn(run_id, html)
+        self.assertNotIn(other_run['run_id'], html)
+        for endpoint in ("/koda/runs", "/koda/api/v1/runs"):
+            self.assertEqual(self.request(endpoint + "?sort_by=invalid", headers=self.headers())[0], 422)
+        status, scheduled = self.request("/koda/runs?source=scheduled_server&mine=1", headers=self.headers())
+        self.assertEqual(status, 200)
+        self.assertIn("점검 결과가 없습니다", scheduled)
+
+    def test_runs_multi_sort_priority_reset_and_filter_preservation(self):
+        _, run_id = self.make_run(1)
+        status, html = self.request("/koda/runs?mine=1&sort_by=status,round_number&sort_order=asc,desc&page_size=1", headers=self.headers())
+        self.assertEqual(status, 200)
+        self.assertIn(run_id, html)
+        self.assertIn("상태 정렬, 1순위, 오름차순", html)
+        self.assertIn("회차 정렬, 2순위, 내림차순", html)
+        self.assertIn("id='run-reset'", html)
+        self.assertIn("runs-list-controls", html)
+        self.assertIn("keys.splice(index,1)", html)
+        for query in ("sort_by=status,round_number&sort_order=asc", "sort_by=status,status&sort_order=asc,desc"):
+            for endpoint in ("/koda/runs", "/koda/api/v1/runs"):
+                self.assertEqual(self.request(endpoint + '?' + query, headers=self.headers())[0], 422)
+
     def test_run_html_is_a_bounded_page_with_lazy_detail(self):
         _, run_id = self.make_run()
         with patch.object(self.server.portal_store, "run", side_effect=AssertionError("full result loaded")):

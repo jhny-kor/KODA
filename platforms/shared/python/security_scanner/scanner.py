@@ -197,6 +197,10 @@ class SecurityScanner:
         return ScanResult(report_findings, summary, tuple(self.components), tuple(self.warnings))
 
     def _changed_files(self, target: TargetConfig) -> set[Path] | None:
+        if self.config.file_selection is not None:
+            root = target.path.resolve()
+            return {path.resolve() for path in self.config.file_selection
+                    if path.resolve() == root or root in path.resolve().parents}
         if not self.config.changed_only:
             return None
         changed, warnings = git_changes.changed_files(self.config.diff_base, target.path)
@@ -268,6 +272,8 @@ class SecurityScanner:
         if not target.path.exists():
             raise ValueError(f"Target does not exist: {target.path}")
         if target.path.is_file():
+            if self.config.file_selection is not None and target.path.resolve() not in self._changed_files(target):
+                return [], []
             source_profile = self.config.standard == "sw-dev-security-49"
             if source_profile and not (is_source_file(target.path) or is_text_candidate(target.path)):
                 return [], []
@@ -291,7 +297,7 @@ class SecurityScanner:
             self._changed_scope.update(path.resolve() for path in changed)
         # SW49 needs whole-project context. Only the user-facing result is
         # diff-scoped; the evidence ledger and status use the full project.
-        filtering = self.config.changed_only and changed is not None and self.config.standard != "sw-dev-security-49"
+        filtering = changed is not None and self.config.standard != "sw-dev-security-49"
         for file_path in self._iter_files(target):
             if self.config.standard == "sw-dev-security-49" and not (is_source_file(file_path) or is_text_candidate(file_path)):
                 continue

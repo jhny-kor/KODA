@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var showProjectProfiles = false
     @State private var showThreatModelWizard = false
     @State private var showComplianceDashboard = false
+    @State private var showNativeWebAudit = false
     @AppStorage("koda.dashboard.topFraction.v2") private var dashboardTopFraction = 0.25
 
     var body: some View {
@@ -74,6 +75,9 @@ struct ContentView: View {
             SettingsView(language: $language) {
                 showSettings = false
             }
+        }
+        .sheet(isPresented: $showNativeWebAudit) {
+            NativeWebAuditView(language: language, onClose: { showNativeWebAudit = false })
         }
         .sheet(isPresented: $showFixWizard) {
             SecurityFixWizardSheet(
@@ -247,6 +251,13 @@ struct ContentView: View {
                         scanner.runWebScan(language: language)
                     } label: {
                         Label(language == .ko ? "웹사이트 점검 (실시간)" : "Scan Website (Live)", systemImage: "globe")
+                    }
+                    .disabled(scanner.isRunning)
+
+                    Button {
+                        showNativeWebAudit = true
+                    } label: {
+                        Label(language == .ko ? "웹 정밀 점검 (API·권한·시나리오)" : "Web Audit (API · Access · Scenarios)", systemImage: "checklist")
                     }
                     .disabled(scanner.isRunning)
 

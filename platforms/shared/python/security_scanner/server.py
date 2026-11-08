@@ -102,6 +102,7 @@ def scan_directory_payload(
     display_path: str | None = None,
     scan_scope: str | None = None,
     cve_only: bool = False,
+    file_selection: tuple[Path, ...] | None = None,
 ) -> dict[str, object]:
     if min_severity not in SEVERITIES:
         raise ValueError(f"Unsupported min_severity: {min_severity}")
@@ -145,7 +146,20 @@ def scan_directory_payload(
         enable_vuln_intel=enable_osv and not source_only,
         standard=standard_selection.standard,
         standard_category=standard_selection.category,
+        file_selection=file_selection,
     )
+    if file_selection is not None and not file_selection:
+        payload = build_dashboard_payload(
+            (), (target.name,), language, target_paths={target.name: display_path or str(target_path)},
+            scan_path=display_path or str(target_path), kind="upload" if display_path else "directory",
+            standard=standard_selection.standard, standard_category=standard_selection.category,
+            scanned_categories=scanner_categories,
+        )
+        payload["scan"].update(scope=scan_scope or "all", enable_local_vulnerabilities=enable_local_vulnerabilities,
+                               local_vulnerability={"status": "skipped", "queried_components": 0,
+                                                    "matched_vulnerabilities": 0,
+                                                    "warning": "신규·변경 파일이 없어 검사를 생략했습니다."})
+        return payload
     scanner = SecurityScanner(config)
     scan_result = scanner.scan()
     raw_findings = list(scan_result.findings)

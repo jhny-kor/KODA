@@ -703,6 +703,7 @@ def _gitlab_scan_report(run: dict, tracker_run_id: str, tracker_result: dict) ->
             "disabledRules": snapshot.get("disabled_rules", []),
             "rulePolicyVersion": snapshot.get("rule_policy_version"), "rulePolicyHash": snapshot.get("rule_policy_hash"),
             "scannerVersion": snapshot.get("scanner_version"), "inputHash": snapshot.get("input_hash"),
+            **({"fileScope": snapshot["file_scope"]} if isinstance(snapshot.get("file_scope"), dict) else {}),
         },
         "kodaRunId": run.get("run_id"), "trackerRunId": tracker_run_id,
         "kodaResult": koda_result, "trackerResult": tracker_result,
@@ -745,6 +746,11 @@ def _gitlab_mr_summary(report: dict, file_path: str) -> tuple[str, str, list[str
         f"- 전체 결과 JSON: [{cell(file_path)}]({quote(file_path, safe='/')})", "",
         "각 분석기의 결과를 별도로 집계합니다. 검토 필요 항목은 확정 취약점과 구분하며, 0건도 점검 범위·단계 상태와 함께 확인하세요.",
     ]
+    if isinstance(inspection.get("fileScope"), dict):
+        from .reporting import file_scope_rows
+        lines += ["", "### 파일 점검 범위"] + [
+            f"- {cell(label)}: {cell(value, 1000)}" for label, value in file_scope_rows(inspection["fileScope"])
+        ]
     severities = ("critical", "high", "medium", "low", "info", "unknown")
     for label, items in (("KODA 소스코드", source_findings), ("KODA 라이브러리", library_findings), ("Tracker 라이브러리", remote)):
         counts = Counter(str(item.get("severity") or "unknown").lower() for item in items)
