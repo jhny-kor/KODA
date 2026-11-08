@@ -21,12 +21,12 @@ Linux KODA는 Tracker의 SBOM 관리 화면이 아니라 KODA 보안·품질 점
 
 ## 공통 AI 점검 요약
 
-1. Tracker 운영 환경에서 `TRACKER_AI_BASE_URL`로 사내 OpenAI 호환 서버의 `/v1`
-   주소를 지정합니다. `TRACKER_AI_ENCRYPTION_KEY`에는 API 키 저장용 Fernet 키를 설정합니다.
-   모델 주소는 Tracker API 컨테이너의 사내 AI 네트워크에서 접근할 수 있어야 합니다.
-   API 키를 사용하는 모델 서버는 Tracker가 신뢰하는 HTTPS 인증서를 사용합니다.
-2. KODA의 **관리자 설정 → 연동 설정 → Tracker 공통 AI 설정**을 엽니다. Tracker에서
-   모델 ID와 필요한 API 키를 저장하고 **저장된 설정으로 연결 시험**을 실행합니다.
+1. KODA의 **관리자 설정 → 연동 설정 → Tracker 공통 AI 설정**을 엽니다.
+   Tracker에서 **사내 AI 서버 주소**와 모델 ID를 입력합니다. 주소 예시는
+   `https://ai-gateway.internal/v1`입니다. Tracker API 컨테이너에서 이 주소에 접근할 수 있어야 합니다.
+2. 모델 서버가 API 키를 요구하면 Tracker 운영 환경에 `TRACKER_AI_ENCRYPTION_KEY`로
+   API 키 저장용 Fernet 키를 설정합니다. Tracker가 신뢰하는 HTTPS 주소와 모델의 API 키를
+   화면에서 저장한 뒤 **저장된 설정으로 연결 시험**을 실행합니다.
 3. KODA에서 완료된 회차의 **점검 결과 상세 → 공통 AI 점검 요약 → AI 요약 생성**을
    누릅니다. KODA는 `KODA_TRACKER_URL`과 `KODA_TRACKER_PROVISIONING_TOKEN_FILE`로
    Tracker에 접속합니다. 사용자는 해당 프로젝트의 결과 조회 권한이 필요합니다.
