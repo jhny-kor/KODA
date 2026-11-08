@@ -16,6 +16,7 @@ grype_db_latest_url="${KODA_GRYPE_DB_LATEST_URL:-https://grype.anchore.io/databa
 refresh=0
 vuln_data_only=0
 data_cache_only=0
+without_vulnerability_data=0
 vuln_data_dir="${KODA_VULN_DATA_DIR:-$repo_root/dist/Windows}"
 
 usage() {
@@ -26,6 +27,7 @@ Builds dist/linux/koda-linux-x86_64-<version>.tar.gz on a connected
 macOS/Linux host.
 
 Options:
+  --without-vulnerability-data  build applications/tools only; no vulnerability feeds or DB
   --refresh         re-validate cached yearly NVD feeds against their .meta
                     files and re-download the Grype DB latest metadata
   --data-cache-only download/verify NVD and KEV only, for Linux update packages
@@ -53,6 +55,10 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --without-vulnerability-data)
+      without_vulnerability_data=1
+      shift
+      ;;
     --refresh)
       refresh=1
       shift
@@ -78,9 +84,20 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [[ "$without_vulnerability_data" == 1 && "$vuln_data_only" == 1 ]]; then
+  echo "error: --without-vulnerability-data cannot be combined with data-only exports." >&2
+  exit 2
+fi
+if [[ "$without_vulnerability_data" == 1 ]]; then
+  asset_dir="$cache_dir/assets-app-only"
+fi
+
 command -v curl >/dev/null 2>&1 || { echo "error: curl is required." >&2; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo "error: python3 is required." >&2; exit 2; }
-mkdir -p "$asset_dir/tools" "$asset_dir/grype-db/incoming" "$asset_dir/vuln-data/nvd" "$dist_dir"
+mkdir -p "$asset_dir/tools" "$dist_dir"
+if [[ "$without_vulnerability_data" == 0 ]]; then
+  mkdir -p "$asset_dir/grype-db/incoming" "$asset_dir/vuln-data/nvd"
+fi
 find "$cache_dir" -type f -name '*.part.*' -delete
 
 download() {
@@ -182,6 +199,7 @@ if [ "$vuln_data_only" -eq 0 ]; then
 download_tool syft "$syft_version"
 download_tool grype "$grype_version"
 
+if [[ "$without_vulnerability_data" == 0 ]]; then
 latest_json="$cache_dir/grype-db-latest.json"
 if [ "$refresh" -eq 1 ]; then
   invalidate "$latest_json"
@@ -223,6 +241,7 @@ if actual != expected:
 print(f"verified {path.name}: {actual}")
 PY
 
+fi # database-enabled profile
 fi
 
 download_nvd_feed() {
@@ -258,6 +277,7 @@ download_nvd_feed() {
   fi
 }
 
+if [[ "$without_vulnerability_data" == 0 ]]; then
 feed_batch=()
 for year in $(seq "$nvd_start_year" "$nvd_end_year"); do
   download_nvd_feed "$year" &
@@ -382,6 +402,21 @@ path.write_text(
 )
 PY
 
+else
+  python3 - "$asset_dir/versions.txt" "$syft_version" "$grype_version" <<'PY_APP'
+import datetime
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text(
+    "KODA offline Linux x86_64 application-only bundle\n"
+    f"built_at={datetime.datetime.now(datetime.timezone.utc).isoformat()}\n"
+    f"syft={sys.argv[2]}\ngrype={sys.argv[3]}\n"
+    "vulnerability_data=absent\ngrype_db=absent\nnvd_start_year=absent\nnvd_end_year=absent\n"
+    "cisa_kev_date_released=absent\ncisa_kev_catalog_version=absent\n"
+    "managed_data_required=true\n", encoding="utf-8")
+PY_APP
+fi # vulnerability data profile
+
 python3 - "$asset_dir/manifest.sha256" "$asset_dir" <<'PY'
 import hashlib
 import pathlib
@@ -412,8 +447,9 @@ if [ "$(uname -s)" = "Darwin" ]; then
     -v "$repo_root:/src" \
     -w /src \
     python:3.10-bookworm \
-    bash -lc "KODA_LINUX_ARCH=x86_64 KODA_OFFLINE_ASSET_DIR='$offline_asset_rel' KODA_LINUX_DIST_DIR='$dist_rel' bash platforms/linux/package.sh"
+    bash -lc "KODA_WITHOUT_VULNERABILITY_DATA='$without_vulnerability_data' KODA_LINUX_ARCH=x86_64 KODA_OFFLINE_ASSET_DIR='$offline_asset_rel' KODA_LINUX_DIST_DIR='$dist_rel' bash platforms/linux/package.sh"
 else
+  KODA_WITHOUT_VULNERABILITY_DATA="$without_vulnerability_data" \
   KODA_LINUX_ARCH=x86_64 \
   KODA_OFFLINE_ASSET_DIR="$asset_dir" \
   KODA_LINUX_DIST_DIR="$dist_dir" \

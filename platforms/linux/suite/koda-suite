@@ -379,6 +379,11 @@ suite_compose() {
   shift
   local proof="$(env_value "$prefix/tracker/.env" KODA_GATEWAY_PROOF "")"
   local compose_key="${TRACKER_DATA_UPDATE_VERIFY_KEY_FILE:-$(env_value "$prefix/tracker/.env" TRACKER_DATA_UPDATE_VERIFY_KEY_FILE "")}"
+  local key_compose_args=()
+  if [[ -n "$compose_key" ]]; then
+    [[ -f "$prefix/tracker/compose.data-key.yaml" ]] || fail "registered data key requires compose.data-key.yaml"
+    key_compose_args=(-f "$prefix/tracker/compose.data-key.yaml")
+  fi
   local provisioning_file="${KODA_TRACKER_PROVISIONING_TOKEN_FILE:-$(env_value "$prefix/tracker/.env" KODA_TRACKER_PROVISIONING_TOKEN_FILE "")}"
   local token_dir="${KODA_TRACKER_TOKEN_DIR:-$(env_value "$prefix/tracker/.env" KODA_TRACKER_TOKEN_DIR "")}"
   if [[ -n "$compose_key" && "$compose_key" != /* ]]; then
@@ -392,7 +397,7 @@ suite_compose() {
   KODA_TRACKER_PROVISIONING_TOKEN_FILE="$provisioning_file" KODA_TRACKER_TOKEN_DIR="$token_dir" \
   TRACKER_DATA_UPDATE_VERIFY_KEY_FILE="$compose_key" KODA_GATEWAY_PROOF="$proof" docker compose --project-directory "$prefix/tracker" --env-file "$prefix/tracker/.env" \
     -f "$prefix/tracker/compose.yaml" -f "$prefix/tracker/compose.airgap.yaml" \
-    -f "$prefix/tracker/compose.integration.yaml" "$@"
+    -f "$prefix/tracker/compose.integration.yaml" ${key_compose_args[@]+"${key_compose_args[@]}"} "$@"
 }
 
 start_dashboard() {
@@ -520,8 +525,13 @@ prepare_payloads() {
 
 verify_data_update_key() {
   local env_file="$1" verify_key
+  verified_data_key=""
   verify_key="${TRACKER_DATA_UPDATE_VERIFY_KEY_FILE:-$(env_value "$env_file" TRACKER_DATA_UPDATE_VERIFY_KEY_FILE "")}"
-  if [[ -n "$verify_key" && "$verify_key" != /* ]]; then
+  if [[ -z "$verify_key" ]]; then
+    echo "Data verification key: unconfigured; application installation is allowed, signed data activation remains unavailable."
+    return 0
+  fi
+  if [[ "$verify_key" != /* ]]; then
     verify_key="$(dirname -- "$env_file")/$verify_key"
   fi
   [[ -f "$verify_key" && -r "$verify_key" && ! -L "$verify_key" ]] \
@@ -547,6 +557,7 @@ validate_preflight() {
   "$install_tmp/tracker/scripts/preflight-airgap.sh" "$env_file"
   runtime_values "$env_file"
   if [[ "$require_vulnerability_data" == 1 ]]; then
+    [[ -n "$verified_data_key" ]] || fail "Vulnerability data activation requires a registered verification key; application installation does not."
     [[ "$TRACKER_VULNERABILITY_BUNDLE" == included \
         && -d "$install_tmp/tracker/vulnerability-data" \
         && ! -L "$install_tmp/tracker/vulnerability-data" ]] \
@@ -601,8 +612,9 @@ install_suite() {
       [[ -d "$install_tmp/tracker/vulnerability-data" \
           && ! -L "$install_tmp/tracker/vulnerability-data" ]] \
         || fail "included Tracker vulnerability data is missing or unsafe."
-      [[ -f "$prefix/metadata.env" ]] \
-        || tracker_install_args+=(--import-vuln-bundle)
+      if [[ ! -f "$prefix/metadata.env" && -n "${TRACKER_DATA_UPDATE_VERIFY_KEY_FILE:-$(env_value "$env_file" TRACKER_DATA_UPDATE_VERIFY_KEY_FILE "")}" ]]; then
+        tracker_install_args+=(--import-vuln-bundle)
+      fi
       ;;
     absent)
       [[ ! -e "$install_tmp/tracker/vulnerability-data" \

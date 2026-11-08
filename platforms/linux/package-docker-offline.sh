@@ -14,10 +14,13 @@ repo_root="$(CDPATH= cd -- "$script_dir/../.." && pwd)"
 dist_dir="${KODA_LINUX_DIST_DIR:-$repo_root/dist/linux}"
 python_image="${KODA_PYTHON_IMAGE:-python:3.12-slim-bookworm}"
 refresh=0
+without_vulnerability_data=0
 
 usage() {
   cat <<'EOF'
 Usage: package-docker-offline.sh [--refresh]
+
+--without-vulnerability-data builds tools/applications only; no vulnerability feeds or DB.
 
 Builds the closed-network Docker deliverable on a connected host with
 Docker + buildx. Reuses dist/linux/koda-linux-x86_64-<version>.tar.gz,
@@ -35,6 +38,7 @@ EOF
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --refresh) refresh=1; shift ;;
+    --without-vulnerability-data) without_vulnerability_data=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -64,9 +68,15 @@ bundle_tar="$dist_dir/$bundle_name.tar.gz"
 package_name="koda-docker-offline-x86_64-$version"
 
 # 4-5. source offline tarball
-if [ ! -f "$bundle_tar" ] || [ "$refresh" -eq 1 ]; then
+profile_mismatch=0
+if [[ -f "$bundle_tar" ]]; then
+  cached_profile="$(tar -xzOf "$bundle_tar" "$bundle_name/versions.txt" 2>/dev/null | sed -n 's/^vulnerability_data=//p' || true)"
+  if [[ "$without_vulnerability_data" == 1 && "$cached_profile" != absent ]] || [[ "$without_vulnerability_data" == 0 && "$cached_profile" == absent ]]; then profile_mismatch=1; fi
+fi
+if [ ! -f "$bundle_tar" ] || [ "$refresh" -eq 1 ] || [ "$profile_mismatch" -eq 1 ]; then
   refresh_flag=()
   [ "$refresh" -eq 1 ] && refresh_flag=(--refresh)
+  [ "$without_vulnerability_data" -eq 1 ] && refresh_flag+=(--without-vulnerability-data)
   bash "$script_dir/package-offline.sh" ${refresh_flag[@]+"${refresh_flag[@]}"}
 fi
 [ -f "$bundle_tar" ] || fail "offline bundle not found: $bundle_tar"

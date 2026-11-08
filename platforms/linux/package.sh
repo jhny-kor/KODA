@@ -6,6 +6,14 @@ repo_root="$(CDPATH= cd -- "$script_dir/../.." && pwd)"
 shared_python="$repo_root/platforms/shared/python"
 dist_dir="${KODA_LINUX_DIST_DIR:-$repo_root/dist/linux}"
 offline_asset_dir="${KODA_OFFLINE_ASSET_DIR:-}"
+without_vulnerability_data="${KODA_WITHOUT_VULNERABILITY_DATA:-0}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --without-vulnerability-data) without_vulnerability_data=1; shift ;;
+    *) echo "error: unknown package option: $1" >&2; exit 2 ;;
+  esac
+done
+[[ "$without_vulnerability_data" == 0 || "$without_vulnerability_data" == 1 ]] || exit 2
 version="$(awk -F'"' '/^version =/ { print $2; exit }' "$shared_python/pyproject.toml")"
 version="${version:-0.1.0}"
 case "${KODA_LINUX_ARCH:-$(uname -m)}" in
@@ -43,6 +51,11 @@ if [ -n "$offline_asset_dir" ]; then
     echo "error: offline Java tooling is currently packaged for Linux x86_64 only." >&2
     exit 1
   fi
+  for tool in syft grype; do
+    [[ -f "$offline_asset_dir/tools/$tool" && ! -L "$offline_asset_dir/tools/$tool" ]] || { echo "missing offline tool: $tool" >&2; exit 1; }
+  done
+  cp -R "$offline_asset_dir/tools" "$stage/tools"
+  if [[ "$without_vulnerability_data" == 0 ]]; then
   for required in \
     "$offline_asset_dir/tools/syft" \
     "$offline_asset_dir/tools/grype" \
@@ -62,7 +75,6 @@ if [ -n "$offline_asset_dir" ]; then
     echo "error: offline asset directory has no NVD JSON feed." >&2
     exit 1
   fi
-  cp -R "$offline_asset_dir/tools" "$stage/tools"
   cp -R "$offline_asset_dir/vuln-data" "$stage/vuln-data"
   # The download cache can retain several DB releases. The native installer
   # imports the first incoming archive, so ship only the declared selection.
@@ -138,6 +150,28 @@ if manifest.is_file():
         lines.append(f"{actual}  {relative}")
     (stage / "manifest.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
+  else
+    # Only files actually staged belong in an application-only manifest.
+    python3 - "$stage" "$offline_asset_dir" <<'PY_APP_MANIFEST'
+import hashlib
+from pathlib import Path
+import sys
+stage, assets = map(Path, sys.argv[1:])
+version = assets / "versions.txt"
+if not version.is_file() or "vulnerability_data=absent" not in version.read_text().splitlines():
+    raise SystemExit("application-only assets must explicitly declare vulnerability_data=absent")
+lines=[]
+(stage / "versions.txt").write_bytes(version.read_bytes())
+for path in sorted([*(stage / "tools").rglob("*"), stage / "versions.txt"]):
+    if path.is_file():
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
+        checksum = digest.hexdigest()
+        lines.append(f"{checksum}  {path.relative_to(stage)}")
+(stage / "manifest.sha256").write_text("\n".join(lines)+"\n")
+PY_APP_MANIFEST
+  fi
   if [ -f "$offline_asset_dir/versions.txt" ]; then
     cp "$offline_asset_dir/versions.txt" "$stage/versions.txt"
   fi

@@ -20,7 +20,7 @@ class LinuxSuiteContractTests(unittest.TestCase):
         cls.gateway = (ROOT / "platforms/linux/suite/gateway.conf.template").read_text()
         cls.suite_env = (ROOT / "platforms/linux/suite/koda-suite.env.example").read_text()
 
-    def test_registered_public_key_is_required_without_private_key_mount(self) -> None:
+    def test_missing_public_key_allows_app_but_configured_key_is_checked(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             env_file = root / '.env'
@@ -30,8 +30,8 @@ class LinuxSuiteContractTests(unittest.TestCase):
             helper.chmod(0o755)
             env = {**os.environ, 'TRACKER_DATA_UPDATE_VERIFY_KEY_FILE': ''}
             missing = subprocess.run([str(helper), str(env_file)], env=env, capture_output=True, text=True)
-            self.assertNotEqual(missing.returncode, 0)
-            self.assertIn('Register TRACKER_DATA_UPDATE_VERIFY_KEY_FILE', missing.stderr)
+            self.assertEqual(missing.returncode, 0, missing.stderr)
+            self.assertIn('unconfigured', missing.stdout)
             private, public = root/'signing.pem', root/'approved.pub'
             subprocess.run(['openssl','genpkey','-algorithm','RSA','-pkeyopt','rsa_keygen_bits:1024','-out',str(private)],check=True,capture_output=True)
             subprocess.run(['openssl','pkey','-in',str(private),'-pubout','-out',str(public)],check=True,capture_output=True)

@@ -1,19 +1,11 @@
 services:
   portal-api:
     environment:
-      TRACKER_DATA_UPDATE_VERIFY_KEY: /run/secrets/tracker-data-update-verify.pub
       TRACKER_OFFLINE_MODE: "true"
       TRACKER_PACKAGE_METADATA_ENABLED: "false"
       TRACKER_KODA_PROVISIONING_TOKEN_FILE: /run/secrets/koda-tracker-provisioning
     volumes:
-      - ${TRACKER_DATA_UPDATE_VERIFY_KEY_FILE:-./config/data-update-verify.pub}:/run/secrets/tracker-data-update-verify.pub:ro
       - ${KODA_TRACKER_PROVISIONING_TOKEN_FILE}:/run/secrets/koda-tracker-provisioning:ro
-
-  portal-data-updater:
-    environment:
-      TRACKER_DATA_UPDATE_VERIFY_KEY: /run/secrets/tracker-data-update-verify.pub
-    volumes:
-      - ${TRACKER_DATA_UPDATE_VERIFY_KEY_FILE:-./config/data-update-verify.pub}:/run/secrets/tracker-data-update-verify.pub:ro
 
   gateway:
     volumes:

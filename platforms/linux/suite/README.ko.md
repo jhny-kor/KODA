@@ -14,7 +14,7 @@ Linux x86_64, Docker Engine, Compose v2, Python 3, Bash, sha256sum, flock이 필
 
 `.env.example`을 서버 전용 `.env`로 복사하고 DB 비밀번호·관리자 초기 비밀번호·LDAP 암호화 키·공개 HTTPS 오리진을 설정합니다. `koda-suite.env.example`은 gateway와 KODA worker 자원 한도의 예시입니다. 예시 파일에 비밀값을 넣어 다시 배포하지 않습니다.
 
-새 서버에는 초기 통합 자료의 서명을 검증하는 **데이터 갱신용 공개키**를 별도로 등록합니다.
+애플리케이션 설치·업데이트에는 데이터 갱신용 공개키 등록이 필요하지 않습니다. 키가 없는 경우 기존 사용자·점검결과는 유지되며 자료 검증 상태는 `unconfigured`입니다. 새 서명 자료를 반입·적용할 때에만 **데이터 갱신용 공개키**를 등록합니다.
 `TRACKER_DATA_UPDATE_VERIFY_KEY_FILE`은 이 공개키의 서버 경로이며, 설치본 자체의 서명을 검증하는
 릴리스 공개키와 구분합니다. 빌드 담당자는 `KODA_DATA_UPDATE_SIGNING_KEY`에 수집 원본·출력 디렉터리
 밖에 둔 개인키를 지정하고 `build-suite-vuln-bundle.sh`로 초기 자료를 만듭니다.
@@ -95,8 +95,12 @@ Linux는 직접 Python 모듈을 실행할 때도 관리 데이터 필수 모드
 
 공통 루트의 `.managed.json`은 `koda-managed-vulnerability-data-v1` 형식, `active`/`purging`/`purged` 상태를 보존합니다. KODA는 활성 버전과 `current` 폴더명이 같은지 확인합니다. `.release.lock` 파일을 읽기 전용으로 열어 전체 분석 동안 공유 잠금을 유지합니다. Tracker의 적용·삭제는 배타 잠금을 요구하므로 진행 중인 읽기가 있으면 재시도해야 합니다. 잠금 중이거나 승인 자료가 없으면 CVE 비교는 `unavailable`/오류이며 0건으로 성공 처리하지 않습니다. Java 보고서의 CVE 통계는 JSON `null`, 화면 “점검 불가”로 표시하고 종료 코드는 2입니다. SBOM과 비CVE 분석은 계속 만들 수 있습니다. 기존 분석 시점의 저장 결과와 사용자 정보는 유지합니다.
 
-서명 검증 공개키는 설치 전에 `TRACKER_DATA_UPDATE_VERIFY_KEY_FILE`에 등록합니다. 절대경로 또는 `.env` 디렉터리를 기준으로 한 상대경로이며, API와 데이터 갱신 프로세스에 `/run/secrets/tracker-data-update-verify.pub:ro`로 연결합니다. 승인된 PEM 공개키만 지정하고 개인 서명키는 폐쇄망 서버에 복사하지 않습니다. 키가 없거나 잘못되면 설치·갱신을 명확한 오류로 중단하며 임의 키를 생성하지 않습니다. 기존 실행 인스턴스와 저장된 결과를 삭제하지 않습니다. 공개키와 `.managed.json`·`.release.lock`, 릴리스 디렉터리는 KODA 컨테이너 사용자(UID 1000 및 실행 UID)가 읽을 수 있어야 합니다. 잠금 파일의 기본 권한은 0644입니다.
+서명된 취약점 자료를 적용하기 전에 `TRACKER_DATA_UPDATE_VERIFY_KEY_FILE`에 자료 검증 공개키를 등록합니다. 절대경로 또는 `.env` 디렉터리를 기준으로 한 상대경로이며, API와 데이터 갱신 프로세스에 `/run/secrets/tracker-data-update-verify.pub:ro`로 연결합니다. 승인된 PEM 공개키만 지정하고 개인 서명키는 폐쇄망 서버에 복사하지 않습니다. 키가 비어 있으면 애플리케이션 설치·업데이트는 허용하고 서명 자료 반입·적용은 차단합니다. 비어 있지 않은 잘못된 키는 오류로 중단하며 임의 키를 생성하지 않습니다. 기존 실행 인스턴스와 저장된 결과를 삭제하지 않습니다. 공개키와 `.managed.json`·`.release.lock`, 릴리스 디렉터리는 KODA 컨테이너 사용자(UID 1000 및 실행 UID)가 읽을 수 있어야 합니다. 잠금 파일의 기본 권한은 0644입니다.
 
 이 계약은 로컬 회귀 테스트와 Docker 실행 인자/설치 계약으로 검증합니다. 실제 Linux 서버의 UID·공유 볼륨 파일 시스템에서 `flock`과 읽기 권한이 동작하는지, 최종 서명 이미지로 반입→분석→잠금 충돌→삭제→재반입이 되는지는 운영 인수 점검에 포함해야 합니다.
 
 승인 파일의 원본 증거 `approved-metadata.env`·`approved-manifest.sha256`·서명은 활성 릴리스에 보존됩니다. KODA도 같은 공개키를 읽기 전용으로 연결하여 원본 서명과 파일 해시, 런타임 데이터 선택 메타데이터를 확인합니다. 삭제 상태나 승인 근거 누락·변조, 등록 키 누락은 모두 `unavailable`입니다. 새 원본은 최초 분석 때 전체 해시를 확인하며 이후에는 읽기 전용·불변 릴리스의 파일 장치/파일번호·크기·mtime·ctime·권한과 검증키·승인 증거의 동일성을 검사해 같은 결과를 제한된 캐시에 재사용합니다. 변경이 하나라도 있으면 캐시를 사용하지 않습니다. 이 캐시는 데이터 삭제 뒤 과거 자료를 선택하는 경로가 아닙니다. 직접 Docker CLI는 `KODA_DATA_UPDATE_VERIFY_KEY_FILE`, 네이티브 Linux는 `KODA_DATA_UPDATE_VERIFY_KEY`에 승인 공개키 경로를 지정합니다. Suite는 등록된 Tracker 키를 자동 연결하며 개인키는 연결하지 않습니다.
+
+## 2026-11-06 반입본
+
+[폐쇄망 반입 및 설치 안내서](INSTALL-20261106.ko.md)를 참고합니다. 반입본의 설치·업데이트 진입점 소스는 `handover/`에 있습니다.

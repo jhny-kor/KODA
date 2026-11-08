@@ -23,6 +23,7 @@ Optional environment:
   KODA_DOCKER_BUNDLE   verified KODA Docker air-gap tar.gz
   KODA_LINUX_DIST_DIR  output directory, default dist/linux
   KODA_SUITE_VERSION   suite archive version, default KODA version
+  KODA_SUITE_ALLOW_NO_DATA=1 allows an application-only Tracker archive
   KODA_DOCKER_SOURCE_REVISION  clean ancestor used to build the Docker payload,
                          allowed only when subsequent changes are Suite-only
   KODA_SUITE_ALLOW_DIRTY=1 explicitly permits a development snapshot build;
@@ -46,7 +47,7 @@ esac
 [[ -n "$tracker_bundle" && -f "$tracker_bundle" ]] \
   || fail "set KODA_TRACKER_BUNDLE to the verified Tracker tar.gz"
 
-python3 - "$koda_bundle" "$tracker_bundle" <<'PY'
+python3 - "$koda_bundle" "$tracker_bundle" "${KODA_SUITE_ALLOW_NO_DATA:-0}" <<'PY'
 import pathlib
 import posixpath
 import hashlib
@@ -88,48 +89,53 @@ with tarfile.open(sys.argv[2], "r:gz") as archive:
         if pathlib.PurePosixPath(name).name.startswith("._"):
             raise SystemExit(f"Tracker archive contains AppleDouble metadata: {name}")
     members = {posixpath.normpath(item.name): item for item in archive.getmembers()}
-    bootstrap_name = "vulnerability-data/unified-update.tar.gz"
-    bootstrap = members.get(bootstrap_name)
-    seed_metadata = members.get("vulnerability-data/metadata.env")
-    seed_manifest = members.get("vulnerability-data/manifest.sha256")
-    if values.get("VULNERABILITY_BUNDLE") != "included" or any(item is None or not item.isfile() for item in (bootstrap, seed_metadata, seed_manifest)):
-        raise SystemExit("Tracker release must include a signed unified first-install bootstrap")
-    if seed_metadata.size > 65536 or seed_manifest.size > 16 * 1024 * 1024 or bootstrap.size <= 0:
-        raise SystemExit("invalid first-install bootstrap metadata or manifest size")
-    seed_values = dict(line.split("=", 1) for line in archive.extractfile(seed_metadata).read().decode().splitlines() if "=" in line)
-    if seed_values.get("UNIFIED_BOOTSTRAP_FILE") != "unified-update.tar.gz":
-        raise SystemExit("Tracker seed must declare UNIFIED_BOOTSTRAP_FILE=unified-update.tar.gz")
-    hashes = []
-    for line in archive.extractfile(seed_manifest).read().decode().splitlines():
-        fields = line.split()
-        if len(fields) == 2 and fields[1].removeprefix("./") == "unified-update.tar.gz":
-            hashes.append(fields[0])
-    if len(hashes) != 1 or not re.fullmatch(r"[0-9a-fA-F]{64}", hashes[0]):
-        raise SystemExit("Tracker seed manifest must cover unified-update.tar.gz exactly once")
-    checksum = hashlib.sha256()
-    with archive.extractfile(bootstrap) as incoming:
-        for chunk in iter(lambda: incoming.read(1024 * 1024), b""):
-            checksum.update(chunk)
-    if checksum.hexdigest() != hashes[0].lower():
-        raise SystemExit("Tracker signed bootstrap checksum mismatch")
-    with archive.extractfile(bootstrap) as incoming, tarfile.open(fileobj=incoming, mode="r|gz") as unified:
-        proof = {}
-        expanded = 0
-        for count, member in enumerate(unified, 1):
-            expanded += member.size
-            if count > 100_000 or member.size > 4 * 1024 ** 3 or expanded > 12 * 1024 ** 3:
-                raise SystemExit("unified bootstrap exceeds data-update limits")
-            name = posixpath.normpath(member.name)
-            if member.name.startswith("/") or name == ".." or name.startswith("../") or member.issym() or member.islnk():
-                raise SystemExit("unsafe unified bootstrap member")
-            if name not in {"metadata.env", "manifest.sha256", "manifest.sha256.sig"}:
-                continue
-            limit = 16 * 1024 * 1024 if name == "manifest.sha256" else 65536
-            if name in proof or not member.isfile() or not 0 < member.size <= limit:
-                raise SystemExit("invalid unified bootstrap signature proof")
-            proof[name] = unified.extractfile(member).read()
-        if set(proof) != {"metadata.env", "manifest.sha256", "manifest.sha256.sig"} or b"DATASET_TYPE=unified\n" not in proof["metadata.env"]:
-            raise SystemExit("Tracker bootstrap must carry a unified dataset and original signed manifest")
+    state = values.get("VULNERABILITY_BUNDLE")
+    if state == "absent" and sys.argv[3] == "1":
+        if any(name.startswith("vulnerability-data/") for name in members):
+            raise SystemExit("unexpected vulnerability data in app-only release")
+    else:
+        bootstrap_name = "vulnerability-data/unified-update.tar.gz"
+        bootstrap = members.get(bootstrap_name)
+        seed_metadata = members.get("vulnerability-data/metadata.env")
+        seed_manifest = members.get("vulnerability-data/manifest.sha256")
+        if values.get("VULNERABILITY_BUNDLE") != "included" or any(item is None or not item.isfile() for item in (bootstrap, seed_metadata, seed_manifest)):
+            raise SystemExit("Tracker release must include a signed unified first-install bootstrap")
+        if seed_metadata.size > 65536 or seed_manifest.size > 16 * 1024 * 1024 or bootstrap.size <= 0:
+            raise SystemExit("invalid first-install bootstrap metadata or manifest size")
+        seed_values = dict(line.split("=", 1) for line in archive.extractfile(seed_metadata).read().decode().splitlines() if "=" in line)
+        if seed_values.get("UNIFIED_BOOTSTRAP_FILE") != "unified-update.tar.gz":
+            raise SystemExit("Tracker seed must declare UNIFIED_BOOTSTRAP_FILE=unified-update.tar.gz")
+        hashes = []
+        for line in archive.extractfile(seed_manifest).read().decode().splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[1].removeprefix("./") == "unified-update.tar.gz":
+                hashes.append(fields[0])
+        if len(hashes) != 1 or not re.fullmatch(r"[0-9a-fA-F]{64}", hashes[0]):
+            raise SystemExit("Tracker seed manifest must cover unified-update.tar.gz exactly once")
+        checksum = hashlib.sha256()
+        with archive.extractfile(bootstrap) as incoming:
+            for chunk in iter(lambda: incoming.read(1024 * 1024), b""):
+                checksum.update(chunk)
+        if checksum.hexdigest() != hashes[0].lower():
+            raise SystemExit("Tracker signed bootstrap checksum mismatch")
+        with archive.extractfile(bootstrap) as incoming, tarfile.open(fileobj=incoming, mode="r|gz") as unified:
+            proof = {}
+            expanded = 0
+            for count, member in enumerate(unified, 1):
+                expanded += member.size
+                if count > 100_000 or member.size > 4 * 1024 ** 3 or expanded > 12 * 1024 ** 3:
+                    raise SystemExit("unified bootstrap exceeds data-update limits")
+                name = posixpath.normpath(member.name)
+                if member.name.startswith("/") or name == ".." or name.startswith("../") or member.issym() or member.islnk():
+                    raise SystemExit("unsafe unified bootstrap member")
+                if name not in {"metadata.env", "manifest.sha256", "manifest.sha256.sig"}:
+                    continue
+                limit = 16 * 1024 * 1024 if name == "manifest.sha256" else 65536
+                if name in proof or not member.isfile() or not 0 < member.size <= limit:
+                    raise SystemExit("invalid unified bootstrap signature proof")
+                proof[name] = unified.extractfile(member).read()
+            if set(proof) != {"metadata.env", "manifest.sha256", "manifest.sha256.sig"} or b"DATASET_TYPE=unified\n" not in proof["metadata.env"]:
+                raise SystemExit("Tracker bootstrap must carry a unified dataset and original signed manifest")
 PY
 
 tracker_repo="${KODA_TRACKER_REPO:-$repo_root/../security-sbom-dependecy}"
@@ -271,8 +277,10 @@ PY
 cp "$repo_root/LICENSE" "$repo_root/NOTICE" "$stage/"
 
 tracker_vuln_bundle="$(tar -xzOf "$tracker_bundle" ./metadata.env 2>/dev/null | awk -F= '$1 == "VULNERABILITY_BUNDLE" { print $2; exit }')"
-[[ "$tracker_vuln_bundle" == included ]] \
-  || fail "Tracker release must include fresh vulnerability data for an offline install."
+if [[ "$tracker_vuln_bundle" != included ]]; then
+  [[ "$tracker_vuln_bundle" == absent && "${KODA_SUITE_ALLOW_NO_DATA:-0}" == 1 ]] \
+    || fail "Tracker release must include fresh vulnerability data, or explicitly enable application-only packaging."
+fi
 
 cat > "$stage/metadata.env" <<EOF
 SUITE_VERSION=$version
