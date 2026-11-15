@@ -29,7 +29,8 @@ def main(argv=None, runner=None):
             raise h.Failure('운영 설정은 새 설치 경로 밖의 일반 파일로 준비하세요.')
         env, _ = h.source_environment(env_file, runner)
         host = SimpleNamespace(prefix=prefix, env_file=env_file, env=env, runner=runner)
-        release_args = SimpleNamespace(archive=None, release_public_key=h.HERE/'release-public.pem')
+        release_args = SimpleNamespace(archive=None, verification_dir=None,
+                                       release_public_key=h.HERE/'release-public.pem')
         with h.release(release_args, host) as (suite, release_env):
             require_empty_prefix(prefix)
             runner.run(['bash', suite, 'install', '--prefix', prefix, '--env-file', env_file], env=release_env)

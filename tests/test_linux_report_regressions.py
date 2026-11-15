@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree
 
 from security_scanner.reporting import _java_library_payload, render_html_pair_zip_from_payload
 from security_scanner.offline_vuln_data import load_offline_data
@@ -134,6 +135,75 @@ class LinuxReportRegressions(unittest.TestCase):
         legacy = self._files({"scan": {"scope": "library"}})
         self.assertIn("탐지된 취약점이 없습니다.", empty["report-vulnerabilities.html"])
         self.assertIn("레거시 결과", legacy["report-vulnerabilities.html"])
+
+    def test_saved_ai_opinions_export_separately_from_original_findings(self):
+        from security_scanner.portal_reports import render_portal_report
+        from security_scanner.portal_store import PortalStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = PortalStore(Path(directory) / "portal.sqlite3")
+            actor = "00000000-0000-0000-0000-000000000001"
+            store.bootstrap(actor)
+            project = store.create_project("AI report")
+            store.set_membership(project, actor, "admin")
+            target = Path(directory) / "requirements.txt"
+            target.write_text("demo==1.0\n", encoding="utf-8")
+            input_id = store.add_input(project, target.name, target)
+            run = store.create_scan(actor, project, input_id, "local", "all", scan_scope="library")
+            findings = [
+                {"rule_id": "code.example", "title": "Source result", "category": "code", "severity": "medium", "path": "app.py"},
+                {"rule_id": "dependency.example", "title": "demo 1.0", "category": "dependencies", "severity": "high",
+                 "path": target.name, "evidence": "pkg:pypi/demo@1.0: CVE-2026-0002"},
+                {"rule_id": "dependency.example", "title": "demo 1.0", "category": "dependencies", "severity": "critical",
+                 "path": target.name, "evidence": "pkg:pypi/demo@1.0: CVE-2026-0001"},
+            ]
+            store.complete_run(run["run_id"], {"findings": findings, "vulnerabilities": [
+                {"component_name": "demo", "installed_version": "1.0", "severity": "critical", "cve_ids": ["CVE-2026-0001"]},
+                {"component_name": "demo", "installed_version": "1.0", "severity": "high", "cve_ids": ["CVE-2026-0002"]},
+            ]})
+            original = store.run(run["run_id"])["result"]
+            opinion = {
+                "verdict": "likely_false", "reasoning": "<img src=x> 라이브러리 검토 근거",
+                "impact": "영향 설명", "remediation": "수정 설명", "retest": "새 SBOM으로 다시 점검",
+            }
+            store.save_ai_review(run["run_id"], 1, "internal-model", opinion, actor)
+            store.save_ai_review(run["run_id"], 0, "internal-model", {**opinion, "reasoning": "소스 검토 근거"}, actor)
+
+            def export(format_name):
+                return render_portal_report(store.path, run["run_id"], format_name, "ko")[0]
+
+            report = json.loads(export("json"))
+            self.assertEqual(report["findings"], original["findings"])
+            self.assertEqual(report["vulnerabilities"], original["vulnerabilities"])
+            self.assertEqual([row["finding_index"] for row in report["ai_finding_reviews"]], [0, 1])
+            self.assertEqual(store.run(run["run_id"])["result"], original)
+
+            with zipfile.ZipFile(io.BytesIO(export("html"))) as archive:
+                documents = {name: archive.read(name).decode() for name in archive.namelist()}
+            for name in ("report.html", "report-detail.html", "report-vulnerabilities.html"):
+                document = documents[name]
+                self.assertIn('href="#ai-finding-reviews"', document)
+                appendix = document.split('<section id="ai-finding-reviews"', 1)[1]
+                self.assertIn("AI 검토 의견", appendix)
+                self.assertIn("오탐 가능성 높음", appendix)
+                self.assertIn("재점검 방법", appendix)
+                self.assertIn("CVE-2026-0002", appendix)
+                self.assertNotIn("CVE-2026-0001", appendix)
+                self.assertIn("&lt;img src=x&gt;", appendix)
+                self.assertNotIn("<img src=x>", appendix)
+                self.assertEqual("소스 검토 근거" in appendix, name != "report-vulnerabilities.html")
+
+            markdown = export("markdown").decode()
+            self.assertIn("## AI 검토 의견", markdown)
+            self.assertIn("새 SBOM으로 다시 점검", markdown)
+            self.assertNotIn("<img src=x>", markdown)
+            for format_name, opinion_part in (("xlsx", "xl/worksheets/sheet2.xml"), ("hwpx", "Contents/section0.xml")):
+                with zipfile.ZipFile(io.BytesIO(export(format_name))) as archive:
+                    data = ElementTree.fromstring(archive.read(opinion_part))
+                values = " ".join(data.itertext())
+                self.assertIn("라이브러리 검토 근거", values)
+                self.assertIn("소스 검토 근거", values)
+                self.assertIn("새 SBOM으로 다시 점검", values)
 
 
 if __name__ == "__main__":

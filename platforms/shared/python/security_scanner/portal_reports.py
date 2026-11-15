@@ -188,17 +188,22 @@ def render_portal_report(db_path: str, run_id: str, report_format: str, language
 
 
 def _render(args) -> bytes:
+    from .portal_store import read_ai_reviews
     from .reporting import render_html_pair_zip_from_payload, render_hwpx, render_markdown_from_payload, render_pdf, render_xlsx
 
     db = sqlite3.connect("file:" + quote(str(Path(args.db).resolve()), safe="/") + "?mode=ro", uri=True, timeout=5)
     db.row_factory = sqlite3.Row
     try:
+        db.execute("BEGIN")
         row = db.execute("SELECT result_json,snapshot_json,standard,standard_category,status FROM scan_runs WHERE run_id=? AND deleted_at IS NULL", (args.run,)).fetchone()
+        if row is None or row["status"] != "completed":
+            raise ValueError("completed run no longer available")
+        reviews = read_ai_reviews(db, args.run)
     finally:
         db.close()
-    if row is None or row["status"] != "completed":
-        raise ValueError("completed run no longer available")
     result = json.loads(row["result_json"]) if row["result_json"] else {}
+    if reviews:
+        result["ai_finding_reviews"] = reviews
     snapshot, scan = json.loads(row["snapshot_json"]), dict(result.get("scan") or {})
     scan.setdefault("scope", snapshot.get("scan_scope") or "all")
     scan.setdefault("standard", row["standard"] or snapshot.get("standard"))

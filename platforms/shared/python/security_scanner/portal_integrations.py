@@ -538,6 +538,39 @@ def summarize_koda_run(summary: dict, findings: list[dict]) -> dict:
     return {"summary": summary_text, "advisory": True}
 
 
+def review_koda_finding(kind: str, facts: dict) -> tuple[str, dict]:
+    from .portal_ai_review import REVIEW_TEXT_FIELDS, REVIEW_VERDICTS, clean_review_text
+
+    if not shared_ai_available():
+        raise IntegrationError("공통 AI 연동 설정이 없습니다", status=503)
+    try:
+        token = _secret(os.environ["KODA_TRACKER_PROVISIONING_TOKEN_FILE"].strip())
+    except (IntegrationError, OSError, UnicodeError) as exc:
+        raise IntegrationError("공통 AI 연동 토큰을 읽을 수 없습니다", status=503) from exc
+    response = _tracker_request_json("/api/v1/integrations/koda/ai-finding-review", token,
+                                     method="POST", direct=True, timeout=70, payload={"kind": kind, "facts": facts})
+    model, review = response.get("model"), response.get("review")
+    if (response.get("advisory") is not True or not isinstance(model, str)
+            or not re.fullmatch(r"[A-Za-z0-9._:/-]{1,128}", model) or not isinstance(review, dict)):
+        raise IntegrationError("공통 AI 검토 응답 형식이 올바르지 않습니다")
+    verdict = review.get("verdict")
+    if not isinstance(verdict, str) or verdict not in REVIEW_VERDICTS:
+        raise IntegrationError("공통 AI 검토 판정이 올바르지 않습니다")
+    fields = {field: clean_review_text(review.get(field), 1200) for field in REVIEW_TEXT_FIELDS}
+    if not all(fields.values()):
+        raise IntegrationError("공통 AI 검토 항목이 누락되었습니다")
+    if (facts.get("verificationStatus") == "unverified"
+            or set(facts) <= {"ruleId", "severity", "verificationStatus"}):
+        return model, {
+            "verdict": "needs_review",
+            "reasoning": "점검 근거가 부족하거나 민감 정보 보호를 위해 일부 근거를 제외했습니다.",
+            "impact": "현재 정보로 영향 범위를 판단할 수 없습니다.",
+            "remediation": "권한이 있는 담당자가 KODA의 원본 근거와 점검 범위를 확인하세요.",
+            "retest": "필요한 근거를 확보한 뒤 동일 범위로 KODA 점검을 다시 실행하세요.",
+        }
+    return model, {"verdict": verdict, **fields}
+
+
 def provision_tracker_repository(gitlab_url: str, project: dict) -> dict[str, str]:
     provisioning_file = os.environ.get("KODA_TRACKER_PROVISIONING_TOKEN_FILE", "").strip()
     token_dir_value = os.environ.get("KODA_TRACKER_TOKEN_DIR", "").strip()

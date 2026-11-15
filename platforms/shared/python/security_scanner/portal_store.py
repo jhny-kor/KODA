@@ -23,7 +23,7 @@ SCREEN_PERMISSIONS = frozenset({
 SCOPED_SCAN_PERMISSIONS = frozenset({"scan.library.create", "scan.source.create"})
 FEATURE_PERMISSIONS = frozenset({
     "input.manage", "scan.create", *SCOPED_SCAN_PERMISSIONS, "project.manage",
-    "runs.export", "runs.delete", "runs.tracker.publish", "runs.gitlab.result.publish",
+    "runs.export", "runs.ai_review", "runs.delete", "runs.tracker.publish", "runs.gitlab.result.publish",
     "runs.gitlab.issues.publish", "project.create", "project.delete",
 })
 LEGACY_PROJECT_PERMISSION = "project.view"
@@ -69,6 +69,19 @@ RUN_LIST_SNAPSHOT_SQL = (
     "'file_scope',json_remove(json_extract(r.snapshot_json,'$.file_scope'),"
     "'$.selected_paths','$.deleted_paths','$.scanner_fingerprint')) AS snapshot_json"
 )
+
+
+def read_ai_reviews(db: sqlite3.Connection, run_id: str) -> list[dict]:
+    """Read opinion snapshots independently of the original scan payload."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_ai_reviews'").fetchone():
+        return []
+    return [
+        {"finding_index": index, "model": model, "created_at": created_at, **json.loads(review)}
+        for index, model, created_at, review in db.execute(
+            "SELECT finding_index,model,created_at,review_json FROM finding_ai_reviews "
+            "WHERE run_id=? ORDER BY finding_index", (str(run_id),),
+        )
+    ]
 
 
 class PortalStore:
@@ -136,6 +149,11 @@ class PortalStore:
                   revision_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
                   snapshot_json TEXT NOT NULL, result_json TEXT, created_at TEXT NOT NULL,
                   UNIQUE(run_id,sequence));
+                CREATE TABLE IF NOT EXISTS finding_ai_reviews(
+                  run_id TEXT NOT NULL, finding_index INTEGER NOT NULL,
+                  model TEXT NOT NULL, created_at TEXT NOT NULL, review_json TEXT NOT NULL,
+                  PRIMARY KEY(run_id,finding_index),
+                  FOREIGN KEY(run_id) REFERENCES scan_runs(run_id) ON DELETE CASCADE);
                 CREATE TABLE IF NOT EXISTS manual_gitlab_manifests(
                   run_id TEXT PRIMARY KEY, manifest_json TEXT NOT NULL,
                   FOREIGN KEY(run_id) REFERENCES scan_runs(run_id) ON DELETE CASCADE);
@@ -2657,6 +2675,57 @@ class PortalStore:
             raise KeyError("finding not found")
         return {**finding, "finding_index": index}
 
+    def run_finding_library_records(self, run_id: str, purl: str, identifiers: set[str]) -> list[dict]:
+        if not purl or not identifiers:
+            return []
+        with self._db() as db:
+            rows = db.execute(
+                "SELECT v.value FROM scan_runs r,json_each(r.result_json,'$.vulnerabilities') v "
+                "WHERE r.run_id=:run AND r.deleted_at IS NULL AND v.type='object' "
+                "AND json_extract(v.value,'$.purl')=:purl AND ("
+                "json_extract(v.value,'$.vulnerability_id') IN (SELECT value FROM json_each(:ids)) OR "
+                "EXISTS(SELECT 1 FROM json_each(v.value,'$.cve_ids') c WHERE c.value IN (SELECT value FROM json_each(:ids))) OR "
+                "EXISTS(SELECT 1 FROM json_each(v.value,'$.vulnerability_ids') a WHERE a.value IN (SELECT value FROM json_each(:ids)))) "
+                "LIMIT 100",
+                {"run": str(run_id), "purl": purl, "ids": self._json(sorted(identifiers))},
+            )
+            return [json.loads(row[0]) for row in rows]
+
+    def run_ai_review(self, run_id: str, index: int) -> dict | None:
+        with self._db() as db:
+            row = db.execute(
+                "SELECT model,created_at,review_json FROM finding_ai_reviews WHERE run_id=? AND finding_index=?",
+                (str(run_id), index),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"finding_index": index, "model": row["model"], "created_at": row["created_at"], **json.loads(row["review_json"])}
+
+    def save_ai_review(self, run_id: str, index: int, model: str, review: dict, actor: str) -> dict:
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            run = db.execute(
+                "SELECT project_id FROM scan_runs WHERE run_id=? AND deleted_at IS NULL AND status='completed'",
+                (str(run_id),),
+            ).fetchone()
+            if run is None:
+                raise KeyError("run not found")
+            if not self.can(actor, run["project_id"], "runs.view") or not self.can(actor, run["project_id"], "runs.ai_review"):
+                raise PermissionError("AI review denied")
+            inserted = db.execute(
+                "INSERT INTO finding_ai_reviews VALUES(?,?,?,?,?) ON CONFLICT(run_id,finding_index) DO NOTHING",
+                (str(run_id), index, model, self._now(), self._json(review)),
+            )
+            if inserted.rowcount:
+                self._audit_db(db, actor, "finding.ai_review.created", run["project_id"], {
+                    "run_id": str(run_id), "finding_index": index, "model": model, "verdict": review["verdict"],
+                })
+            db.execute("COMMIT")
+            saved = self.run_ai_review(run_id, index)
+            if saved is None:
+                raise KeyError("run not found")
+            return saved
+
     def run(self, run_id: str) -> dict:
         with self._db() as db:
             row = db.execute(
@@ -2727,6 +2796,7 @@ class PortalStore:
             now = self._now()
             db.execute("UPDATE scan_runs SET deleted_at=?,result_json=NULL,result_summary_json=NULL WHERE run_id=? AND deleted_at IS NULL", (now, str(run_id)))
             db.execute("UPDATE analysis_revisions SET result_json=NULL WHERE run_id=?", (str(run_id),))
+            db.execute("DELETE FROM finding_ai_reviews WHERE run_id=?", (str(run_id),))
             self._audit_db(db, actor, "scan.deleted", run["project_id"], {"run_id": str(run_id), "round_number": run["round_number"]})
             db.execute("COMMIT")
 

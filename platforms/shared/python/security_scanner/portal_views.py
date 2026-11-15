@@ -78,6 +78,7 @@ def page(title: str, body: str, *, admin: bool = False, nav_permissions: set[str
 @media(max-width:1100px){{.start-copy>.muted{{white-space:normal}}.dashboard-top,.form-grid,.result-layout{{grid-template-columns:1fr}}.inspector{{position:static}}}}
 @media(max-width:1000px){{.sidebar{{position:static;width:auto;min-height:auto}}.brand{{height:64px}}.side-nav{{flex:0 0 auto;flex-direction:row;overflow:auto}}.side-nav a{{white-space:nowrap}}.side-nav [data-nav='guide']{{margin-top:0}}.workspace{{margin-left:0}}.topbar{{padding:0 24px}}main{{padding:28px 24px 48px}}.stats{{grid-template-columns:repeat(2,1fr)}}.guide-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
 @media(max-width:700px){{.subject-picker{{width:100%}}.gitlab-config-grid{{grid-template-columns:1fr}}main{{padding:24px 16px 40px}}h1{{font-size:26px;margin-bottom:20px}}.panel-head{{align-items:flex-start;flex-direction:column;padding:18px}}.panel-head>.toolbar{{width:100%}}.toolbar label{{width:100%}}.toolbar label input,.toolbar label select,.toolbar label textarea{{flex:1;min-width:0}}input[type=search]{{min-width:0;width:100%}}.start-panel{{align-items:flex-start;flex-direction:column;padding:22px}}.stage-grid{{grid-template-columns:1fr}}.summary-strip{{grid-template-columns:repeat(2,1fr)}}.summary-strip div:nth-child(2n){{border-right:0}}.summary-strip div:last-child{{grid-column:1 / -1;border-top:1px solid var(--line)}}.option-row{{grid-template-columns:1fr}}.steps,.panel-body{{padding:20px}}.table-wrap{{margin:0 -1px}}th,td{{padding:12px}}.project-grid,.compare-layout,.guide-grid,.glossary-grid,.guide-meta{{grid-template-columns:1fr;margin-left:0;margin-right:0}}.compare-layout .compare-wide{{grid-column:auto}}.guide-standard summary strong{{width:100%}}}}
+.finding-review{{border-block:1px solid var(--line);background:var(--surface-soft);overflow-wrap:anywhere}}.finding-review dl{{margin:14px 0}}.finding-review dt{{font-weight:700;margin-top:12px}}.finding-review dd{{margin:4px 0 0;white-space:pre-wrap}}.finding-review button:disabled{{opacity:.6;cursor:wait}}
 </style><script>const json=async(url,options={{}})=>{{const r=await fetch(url,{{credentials:'include',...options,headers:{{'Content-Type':'application/json',...(options.headers||{{}})}}}});if(!r.ok)throw new Error((await r.json().catch(()=>({{}}))).detail||`HTTP ${{r.status}}`);return r.status===204?null:r.json()}};</script></head><body>
 <a class='skip-link' href='#main-content'>본문으로 건너뛰기</a><aside class='sidebar' id='sidebar'><a class='brand' aria-label='KODA' href='/koda/'><img src='/koda/assets/KODA.ico' alt=''><span>KODA</span></a><nav class='side-nav'>{nav_html}{admin_link}{guide_link}</nav></aside><div class='workspace'><header class='topbar'><button class='sidebar-toggle' id='sidebar-toggle' type='button' aria-controls='sidebar' aria-expanded='true' aria-label='사이드바 닫기' title='사이드바 닫기'><svg viewBox='0 0 24 24' aria-hidden='true' focusable='false'><path d='M4 6h16M4 12h16M4 18h16'></path></svg></button><div class='account-menu' id='account-menu'><button class='user-menu' id='account-toggle' type='button' aria-controls='account-panel' aria-expanded='false' aria-haspopup='true' title='계정 메뉴'><span class='account-icon' aria-hidden='true'><svg viewBox='0 0 24 24'><circle cx='12' cy='8' r='4'></circle><path d='M4 21a8 8 0 0 1 16 0'></path></svg></span><span class='account-label' id='account-label'>사용자</span><svg class='account-chevron' viewBox='0 0 24 24' aria-hidden='true'><path d='m6 9 6 6 6-6'></path></svg></button><div class='account-panel' id='account-panel' aria-label='계정 메뉴' hidden><div class='account-summary'><span class='account-avatar' id='account-avatar' aria-hidden='true'>사</span><div><strong id='account-display'>사용자</strong></div></div><dl class='account-details'><div><dt>아이디</dt><dd id='account-id'>-</dd></div><div><dt>역할</dt><dd id='account-role'>-</dd></div></dl><button class='account-logout' id='account-logout' type='button'>로그아웃</button></div></div></header><main id='main-content'><h1>{esc(title)}</h1>{body}</main></div>
 <script>
@@ -230,6 +231,7 @@ PERMISSION_METADATA = {
     "compare.view": ("회차 비교", "화면 접근", "두 완료 회차의 신규·해결·유지 항목을 비교합니다."),
     "projects.view": ("프로젝트", "화면 접근", "프로젝트와 입력·회차 목록을 조회합니다."),
     "runs.export": ("점검 결과", "보고서 내보내기", "보고서 보기, HTML·PDF·Excel·JSON·SBOM 다운로드 및 비교 결과 내보내기를 허용합니다."),
+    "runs.ai_review": ("점검 결과", "AI 검토 실행", "선택한 발견 항목의 근거를 사내 AI로 보내 검토 의견을 생성합니다."),
     "runs.delete": ("점검 결과", "결과 삭제", "완료·실패·취소된 점검 결과와 보고서를 삭제합니다."),
     "runs.tracker.publish": ("점검 결과", "Tracker 전송", "실패한 Tracker 결과 전송을 재시도합니다."),
     "runs.gitlab.result.publish": ("점검 결과", "GitLab 결과 등록", "실패한 GitLab 결과·MR 등록을 재시도합니다."),
@@ -482,7 +484,7 @@ def runs_page(projects: list[tuple[dict, list[dict]]], *, admin: bool, schedule_
     if show_management:
         body += "<script>document.querySelectorAll('[data-delete-run]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm(`${button.dataset.round}회차 점검 결과를 삭제하시겠습니까? KODA의 결과와 보고서를 더 이상 조회할 수 없습니다. Tracker·GitLab에 전송된 결과는 유지됩니다.`))return;button.disabled=true;try{await json('/koda/api/v1/runs/'+encodeURIComponent(button.dataset.deleteRun),{method:'DELETE'});if(document.querySelector('[data-server-pagination]'))return location.reload();const row=button.closest('[data-page-item]'),pager=row?.closest('[data-pager]');if(row){row.dataset.removed='true';row.remove()}pager?._paginate(false)}catch(e){alert(e.message);button.disabled=false}}))</script>"
     return page("점검 결과", body, admin=admin, nav_permissions=nav_permissions)
-def run_page(run: dict, *, admin: bool, project_name: str | None = None, tracker: dict | None = None, gitlab_issues: dict | None = None, schedule_run: dict | None = None, nav_permissions=None, feature_permissions: set | None = None, finding_page: dict | None = None, finding_filters: dict | None = None, publication_pending: bool = False, ai_enabled: bool = False) -> str:
+def run_page(run: dict, *, admin: bool, project_name: str | None = None, tracker: dict | None = None, gitlab_issues: dict | None = None, schedule_run: dict | None = None, nav_permissions=None, feature_permissions: set | None = None, finding_page: dict | None = None, finding_filters: dict | None = None, publication_pending: bool = False, ai_enabled: bool = False, review_enabled: bool = False) -> str:
     def allowed(permission):
         return admin or permission in (feature_permissions or set())
 
@@ -655,12 +657,32 @@ def run_page(run: dict, *, admin: bool, project_name: str | None = None, tracker
 <p class='muted'>심각도별 건수와 최대 25개 규칙 ID를 사내 모델로 보냅니다. 응답은 검토 참고용입니다.</p>
 <button id='ai-summary' type='button'>AI 요약 생성</button><p id='ai-summary-status' role='status'></p>
 <pre id='ai-summary-result' style='white-space:pre-wrap;overflow-wrap:anywhere' hidden></pre></div></section>"""
+    finding_review_panel = ""
+    if run["status"] == "completed" and finding_page is not None and findings:
+        review_controls = """
+<div id='finding-review-controls' hidden>
+<p class='muted' id='finding-review-input'>선택한 항목의 점검 근거를 사내 AI에 보냅니다.</p>
+<button type='button' id='finding-review-start' aria-describedby='finding-review-input'>AI 검토</button>
+</div>""" if review_enabled else ""
+        finding_review_panel = f"""
+<section class='panel-body finding-review' id='finding-review' aria-labelledby='finding-review-title' hidden>
+<h3 id='finding-review-title'>AI 검토 의견</h3>
+<p class='muted'>보고서에 함께 표시되는 참고 의견입니다.</p>
+{review_controls}<p id='finding-review-status' role='status'></p>
+<div id='finding-review-result' hidden>
+<dl><dt>검토 분류</dt><dd data-review-field='verdict'></dd>
+<dt>판단 근거</dt><dd data-review-field='reasoning'></dd>
+<dt>영향 범위</dt><dd data-review-field='impact'></dd>
+<dt>권장 조치</dt><dd data-review-field='remediation'></dd>
+<dt>재점검 방법</dt><dd data-review-field='retest'></dd></dl>
+<p class='muted' id='finding-review-metadata'></p>
+</div></section>"""
     body = f"""<div class='toolbar toolbar-between toolbar-spaced'><div><strong>{esc(project_name or run.get('project_name') or '')}</strong> · <strong>{esc(type_label)}</strong> · <span id='run-status' class='status status-{esc(run['status'])}'>{esc(run['status'])}</span> · {esc(_standard_label(run))} · {esc(format_portal_time(run.get('created_at')))}</div><div class='toolbar'>{run_action}{exports}</div></div>
 <section class='panel progress-panel'><div class='toolbar toolbar-between'><strong id='run-stage'>{esc(run.get('stage', run.get('status', 'queued')))}</strong><span id='run-progress-text'>{esc(run.get('progress', 0))}%</span></div><div class='progress'><span id='run-progress' style='width:{esc(run.get('progress', 0))}%'></span></div></section>
 {legacy_stage_note}<div class='stage-grid'>{''.join(stage_cards)}</div>{file_scope_panel}
 <section class='panel summary-strip'><div><small>심각</small><strong class='sev-critical'>{counts['critical']}</strong></div><div><small>높음</small><strong class='sev-high'>{counts['high']}</strong></div><div><small>보통</small><strong>{counts['medium']}</strong></div><div><small>낮음</small><strong>{counts['low']}</strong></div><div><small>전체</small><strong>{finding_count}</strong></div></section>
 <div class='result-layout'><section class='panel'><div class='tabs' role='tablist' aria-label='점검 결과 분류'><button class='active' type='button' role='tab' aria-selected='true' data-tab=''>전체 {finding_count}</button><button type='button' role='tab' aria-selected='false' data-tab='library'>라이브러리 취약점 {group_counts['library']}</button><button type='button' role='tab' aria-selected='false' data-tab='source'>소스코드 취약점 {group_counts['source']}</button><button type='button' role='tab' aria-selected='false' data-tab='quality'>품질 점검 {group_counts['quality']}</button></div><div class='panel-head'><div class='toolbar'><input id='finding-search' type='search' placeholder='제목, 규칙 ID, 파일 검색'><select id='severity'><option value=''>모든 심각도</option><option>critical</option><option>high</option><option>medium</option><option>low</option></select></div></div><div class='table-wrap' data-pager data-page-size='10'><table id='findings' class='resizable-table'>{colgroup}<thead><tr>{headers}</tr></thead><tbody>{rows}{filtered_empty}</tbody></table></div></section>
-<aside class='panel inspector'><div class='panel-head'><h2 id='detail-title'>점검 항목 상세</h2></div><div class='panel-body' id='detail'><p class='muted'>왼쪽 목록에서 항목을 선택하세요.</p></div><div class='panel-body'><h3>실행 정보 (변경 불가)</h3><ul class='summary-list'><li><span>정책 버전</span><strong>{esc(run['policy_version'])}</strong></li><li><span>요청 계정 ID</span><strong class='mono'>{esc(run.get('requested_by_id') or run.get('requested_by') or run.get('snapshot', {}).get('requested_by') or '기록 없음')}</strong></li><li><span>스캐너 버전</span><strong>{esc(run['snapshot'].get('scanner_version',''))}</strong></li></ul></div></aside></div>
+<aside class='panel inspector'><div class='panel-head'><h2 id='detail-title'>점검 항목 상세</h2></div><div class='panel-body' id='detail'><p class='muted'>왼쪽 목록에서 항목을 선택하세요.</p></div>{finding_review_panel}<div class='panel-body'><h3>실행 정보 (변경 불가)</h3><ul class='summary-list'><li><span>정책 버전</span><strong>{esc(run['policy_version'])}</strong></li><li><span>요청 계정 ID</span><strong class='mono'>{esc(run.get('requested_by_id') or run.get('requested_by') or run.get('snapshot', {}).get('requested_by') or '기록 없음')}</strong></li><li><span>스캐너 버전</span><strong>{esc(run['snapshot'].get('scanner_version',''))}</strong></li></ul></div></aside></div>
 {schedule_panel}{gitlab_source}{ai_panel}<details><summary>불변 실행 스냅샷</summary><pre>{esc(json.dumps(run['snapshot'], ensure_ascii=False, indent=2))}</pre></details><p class='error'>{esc(run.get('error') or '')}</p>
 <script>function resizeFindingColumn(handle,width){{const col=document.querySelectorAll('#findings col')[Number(handle.dataset.columnIndex)];if(col)col.style.width=Math.max(72,width)+'px'}}document.querySelectorAll('.column-resizer').forEach(handle=>{{handle.addEventListener('pointerdown',e=>{{e.preventDefault();const col=document.querySelectorAll('#findings col')[Number(handle.dataset.columnIndex)],start=e.clientX,width=col.getBoundingClientRect().width;handle.setPointerCapture(e.pointerId);handle.onpointermove=x=>resizeFindingColumn(handle,width+x.clientX-start);handle.onpointerup=()=>handle.onpointermove=null}});handle.addEventListener('keydown',e=>{{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){{e.preventDefault();const col=document.querySelectorAll('#findings col')[Number(handle.dataset.columnIndex)];resizeFindingColumn(handle,col.getBoundingClientRect().width+(e.key==='ArrowRight'?16:-16))}}}})}})</script>
 <script>const runId={script_json(run['run_id'])},terminal={str(terminal).lower()},findings={script_json(findings)},h=v=>String(v??'').replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));let tab='',selectedSeverity='';function show(i){{const f=findings[i];if(!f)return;const sev=['critical','high','medium','low','info'].includes(f.severity)?f.severity:'info';document.querySelectorAll('.finding-row').forEach(x=>x.classList.toggle('selected',x.dataset.index==i));document.querySelector('#detail-title').textContent=f.title||'점검 항목 상세';document.querySelector('#detail').innerHTML=`<div class="detail-section"><span class="sev sev-${{sev}}">${{h(f.severity)}}</span> · <code>${{h(f.rule_id)}}</code><p>${{h(f.description||'설명이 없습니다.')}}</p></div><div class="detail-section"><h3>위치</h3><p><code>${{h(f.path||'—')}}${{f.line?':'+h(f.line):''}}</code></p><pre>${{h(f.evidence||f.target||'표시할 증거가 없습니다.')}}</pre></div><div class="detail-section"><h3>조치 방법</h3><p>${{h(f.recommendation||'권장 조치가 없습니다.')}}</p></div>`}}function filter(){{const q=document.querySelector('#finding-search').value.toLowerCase();let visible=0;document.querySelectorAll('.finding-row').forEach(r=>{{const f=findings[Number(r.dataset.index)],filtered=(q&&!r.textContent.toLowerCase().includes(q))||(selectedSeverity&&f.severity!==selectedSeverity)||(tab&&r.dataset.group!==tab);r.dataset.filtered=String(filtered);if(!filtered)visible++}});document.querySelector('#findings').closest('[data-pager]')?._paginate();const empty=document.querySelector('#filtered-empty');if(empty)empty.hidden=visible>0}}document.querySelectorAll('.finding-row').forEach(r=>r.addEventListener('click',()=>show(r.dataset.index)));document.querySelector('#finding-search').addEventListener('input',filter);document.querySelector('#severity').addEventListener('change',e=>{{selectedSeverity=e.target.value;filter()}});document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{{document.querySelectorAll('[data-tab]').forEach(x=>{{x.classList.toggle('active',x===b);x.setAttribute('aria-selected',x===b)}});tab=b.dataset.tab;filter()}}));document.querySelector('#cancel')?.addEventListener('click',async()=>{{if(confirm('이 점검을 취소할까요?')){{await json(`/koda/api/v1/runs/${{runId}}/cancel`,{{method:'POST',body:'{{}}'}});location.reload()}}}});{tracker_retry_script}{result_retry_script}{issue_retry_script}let pollingStopped=false;window.addEventListener('pagehide',()=>pollingStopped=true);async function pollStatus(){{if(pollingStopped)return;try{{const r=await json(`/koda/api/v1/runs/${{runId}}/status`),status=document.querySelector('#run-status');status.textContent=r.status;status.className='status status-'+r.status;document.querySelector('#run-stage').textContent=r.stage;document.querySelector('#run-progress').style.width=r.progress+'%';document.querySelector('#run-progress-text').textContent=r.progress+'%';if(['completed','failed','cancelled'].includes(r.status)){{pollingStopped=true;return location.reload()}}}}catch(e){{console.warn(e)}}if(!pollingStopped)setTimeout(pollStatus,2000)}}if(!terminal)setTimeout(pollStatus,2000);if(findings.length)show(0)</script>"""
@@ -677,7 +699,68 @@ def run_page(run: dict, *, admin: bool, project_name: str | None = None, tracker
         script_start = body.rfind("<script>const runId=")
         body = body[:script_start] + "<script>const runId=" + script_json(run["run_id"]) + ",terminal=" + str(terminal).lower() + ",publicationPending=" + str(publication_pending).lower() + ",findings=" + script_json(findings) + ",findingFilters=" + script_json(finding_filters) + ",pageSize=" + str(finding_page["page_size"]) + ";" + r"""
 const h=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let selectedRequest=0;
-async function show(i){const request=++selectedRequest,summary=findings[i];if(!summary)return;document.querySelectorAll('.finding-row').forEach(x=>x.classList.toggle('selected',x.dataset.index==i));document.querySelector('#detail-title').textContent=summary.title||'점검 항목 상세';document.querySelector('#detail').textContent='불러오는 중…';try{const f=await json(`/koda/api/v1/runs/${runId}/findings/${summary.finding_index}`);if(request!==selectedRequest)return;const sev=['critical','high','medium','low','info'].includes(f.severity)?f.severity:'info';document.querySelector('#detail').innerHTML=`<div class="detail-section"><span class="sev sev-${sev}">${h(f.severity)}</span> · <code>${h(f.rule_id)}</code><p>${h(f.description||'설명이 없습니다.')}</p></div><div class="detail-section"><h3>위치</h3><p><code>${h(f.path||'—')}${f.line?':'+h(f.line):''}</code></p><pre>${h(f.evidence||f.target||'표시할 증거가 없습니다.')}</pre></div><div class="detail-section"><h3>조치 방법</h3><p>${h(f.recommendation||'권장 조치가 없습니다.')}</p></div>`}catch(e){if(request===selectedRequest)document.querySelector('#detail').textContent=e.message}}
+const reviewPanel=document.querySelector('#finding-review');
+const reviewControls=document.querySelector('#finding-review-controls');
+const reviewButton=document.querySelector('#finding-review-start');
+const reviewStatus=document.querySelector('#finding-review-status');
+const reviewResult=document.querySelector('#finding-review-result');
+const pendingReviews=new Map();
+const reviewLabels={likely_true:'취약점 가능성 높음',likely_false:'오탐 가능성 높음',not_affected:'해당 환경 영향 없음 후보',needs_review:'추가 확인 필요'};
+function displayFindingReview(review){
+  for(const field of reviewResult.querySelectorAll('[data-review-field]')){
+    const name=field.dataset.reviewField;
+    field.textContent=name==='verdict'?(reviewLabels[review.verdict]||reviewLabels.needs_review):review[name];
+  }
+  const time=new Date(review.created_at);
+  const dateText=Number.isNaN(time.getTime())?'':new Intl.DateTimeFormat('ko-KR',{
+    timeZone:'Asia/Seoul',dateStyle:'short',timeStyle:'medium'
+  }).format(time);
+  document.querySelector('#finding-review-metadata').textContent=[review.model,dateText&&`${dateText} (KST)`].filter(Boolean).join(' · ');
+  reviewResult.hidden=false;
+}
+async function loadFindingReview(url,request){
+  if(!reviewPanel)return;
+  reviewResult.hidden=true;
+  reviewStatus.textContent='';
+  if(reviewControls)reviewControls.hidden=true;
+  try{
+    const pending=pendingReviews.get(url);
+    if(pending){
+      reviewPanel.hidden=false;
+      reviewStatus.textContent='사내 AI가 이 항목을 검토하고 있습니다…';
+    }
+    const data=await (pending||json(url));
+    if(request!==selectedRequest||!data.eligible||(!data.review&&!reviewButton))return;
+    reviewPanel.hidden=false;
+    reviewStatus.textContent='';
+    if(data.review){displayFindingReview(data.review);return;}
+    reviewButton.disabled=false;
+    reviewControls.hidden=false;
+    reviewButton.onclick=async()=>{
+      reviewButton.disabled=true;
+      reviewStatus.textContent='사내 AI가 이 항목을 검토하고 있습니다…';
+      const job=json(url,{method:'POST',body:'{}'});
+      pendingReviews.set(url,job);
+      try{
+        const result=await job;
+        if(request!==selectedRequest)return;
+        displayFindingReview(result.review);
+        reviewControls.hidden=true;
+        reviewStatus.textContent='검토 의견을 저장했습니다.';
+      }catch(e){
+        if(request===selectedRequest)reviewStatus.textContent=e.message;
+      }finally{
+        pendingReviews.delete(url);
+        if(request===selectedRequest)reviewButton.disabled=false;
+      }
+    };
+  }catch(e){
+    if(request!==selectedRequest)return;
+    reviewPanel.hidden=false;
+    reviewStatus.textContent=e.message;
+  }
+}
+async function show(i){const request=++selectedRequest,summary=findings[i];if(!summary)return;document.querySelectorAll('.finding-row').forEach(x=>x.classList.toggle('selected',x.dataset.index==i));document.querySelector('#detail-title').textContent=summary.title||'점검 항목 상세';document.querySelector('#detail').textContent='불러오는 중…';if(reviewPanel)reviewPanel.hidden=true;const url=`/koda/api/v1/runs/${runId}/findings/${summary.finding_index}`;try{const f=await json(url);if(request!==selectedRequest)return;const sev=['critical','high','medium','low','info'].includes(f.severity)?f.severity:'info';document.querySelector('#detail').innerHTML=`<div class="detail-section"><span class="sev sev-${sev}">${h(f.severity)}</span> · <code>${h(f.rule_id)}</code><p>${h(f.description||'설명이 없습니다.')}</p></div><div class="detail-section"><h3>위치</h3><p><code>${h(f.path||'—')}${f.line?':'+h(f.line):''}</code></p><pre>${h(f.evidence||f.target||'표시할 증거가 없습니다.')}</pre></div><div class="detail-section"><h3>조치 방법</h3><p>${h(f.recommendation||'권장 조치가 없습니다.')}</p></div>`;void loadFindingReview(`${url}/ai-review`,request)}catch(e){if(request===selectedRequest)document.querySelector('#detail').textContent=e.message}}
 document.querySelectorAll('.finding-row').forEach(r=>r.addEventListener('click',()=>show(Number(r.dataset.index))));
 document.querySelector('#finding-search').value=findingFilters.search||'';document.querySelector('#severity').value=findingFilters.severity||'';document.querySelector('#finding-page-size').value=String(pageSize);
 function queryFindings(group=findingFilters.group||''){const query=new URLSearchParams({search:document.querySelector('#finding-search').value,severity:document.querySelector('#severity').value,group,page:'1',page_size:document.querySelector('#finding-page-size').value});location='/koda/runs/'+runId+'?'+query}

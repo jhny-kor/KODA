@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .grype_adapter import inspect_grype
 from .sbom import safe_csv_cell
+from .portal_ai_review import finding_review_facts, library_identity, review_kind
 from .portal_identity import IdentityError, IdentityUnavailable, identity_from_headers
 from .portal_integrations import (
     IntegrationError,
@@ -42,6 +43,7 @@ from .portal_integrations import (
     remove_gitlab_configuration,
     resolve_gitlab_configuration_tokens,
     resolve_gitlab_ref,
+    review_koda_finding,
     save_gitlab_configuration,
     send_tracker_sbom,
     shared_ai_available,
@@ -807,6 +809,53 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 return False
             return True
 
+        def _finding_ai_review(self, identity, run_id, index, *, create=False):
+            if index > 9_223_372_036_854_775_807:
+                return self._json(404, {"code": "not_found"})
+            try:
+                run = store.run_status(run_id)
+                if not self._project(identity, run["project_id"], "runs.view"):
+                    return self._json(404, {"code": "not_found"})
+                if run["status"] != "completed":
+                    return self._json(409, {"code": "analysis_incomplete", "detail": "완료된 점검을 선택하세요"})
+                if create and not store.can(identity.subject_id, run["project_id"], "runs.ai_review"):
+                    return self._json(403, {"code": "forbidden"})
+                finding = store.run_finding(run_id, index)
+            except KeyError:
+                return self._json(404, {"code": "not_found"})
+            kind = review_kind(finding)
+            review = store.run_ai_review(run_id, index) if kind else None
+            if not create or review is not None:
+                return self._json(200, {"eligible": kind is not None, "review": review})
+            if kind is None:
+                return self._json(422, {"code": "ai_review_ineligible", "detail": "소스코드 또는 라이브러리 발견 항목을 선택하세요"})
+            if not shared_ai_available():
+                return self._json(503, {"code": "ai_unavailable", "detail": "공통 AI 연동 설정이 없습니다"})
+            review_key = (run_id, index)
+            with self.server.ai_review_lock:
+                active = self.server.active_ai_reviews
+                if review_key in active or len(active) >= 2:
+                    return self._json(429, {"code": "ai_busy", "detail": "AI 검토를 처리 중입니다. 잠시 후 다시 시도하세요"})
+                active.add(review_key)
+            try:
+                review = store.run_ai_review(run_id, index)
+                if review is None:
+                    purl, identifiers = library_identity(finding) if kind == "library" else ("", set())
+                    records = store.run_finding_library_records(run_id, purl, identifiers)
+                    facts = finding_review_facts(finding, records)
+                    model, opinion = review_koda_finding(kind, facts)
+                    review = store.save_ai_review(run_id, index, model, opinion, identity.subject_id)
+                return self._json(200, {"eligible": True, "review": review})
+            except IntegrationError as exc:
+                if exc.status == 429:
+                    return self._json(429, {"code": "ai_busy", "detail": "AI 요청이 처리 중입니다. 잠시 후 다시 시도하세요"})
+                if exc.status in {404, 503}:
+                    return self._json(503, {"code": "ai_unavailable", "detail": "Tracker 버전과 공통 AI 설정을 확인하세요"})
+                return self._json(502, {"code": "ai_unavailable", "detail": "Tracker와 사내 AI 서버의 연결 및 응답을 확인하세요"})
+            finally:
+                with self.server.ai_review_lock:
+                    active.discard(review_key)
+
         def _stream_input(self, identity, project_id, parsed):
             if not self._project(identity, project_id, "input.manage"):
                 return self._json(404, {"code": "not_found"})
@@ -999,7 +1048,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 feature_permissions = {permission for permission in (
                     "runs.export", "runs.delete", "runs.tracker.publish",
                     "runs.gitlab.result.publish", "runs.gitlab.issues.publish",
-                    "scan.library.create", "scan.source.create",
+                    "scan.library.create", "scan.source.create", "runs.ai_review",
                 ) if store.can(identity.subject_id, run["project_id"], permission)}
                 return self._html(200, run_page(
                     run, project_name=project["name"], tracker=store.tracker_delivery(run["run_id"]),
@@ -1007,6 +1056,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                     schedule_run=(store.schedule_run(run["snapshot"]["schedule_run_id"]) if run.get("snapshot", {}).get("source_type") == "scheduled_server" and run.get("snapshot", {}).get("schedule_run_id") else None),
                     feature_permissions=feature_permissions, finding_page=finding_page, finding_filters=finding_filters,
                     ai_enabled=shared_ai_available(),
+                    review_enabled=shared_ai_available() and "runs.ai_review" in feature_permissions,
                     publication_pending=store.run_status(run["run_id"]).get("publication_pending", False), admin=admin, nav_permissions=nav_permissions,
                 ))
             if path == "/koda/compare":
@@ -1151,6 +1201,9 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                         sort_by=query.get("sort_by", [""])[0], sort_order=query.get("sort_order", ["desc"])[0]))
                 except ValueError as exc:
                     return self._json(422, {"code": "invalid_request", "detail": str(exc)})
+            match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/findings/([0-9]{1,19})/ai-review", path)
+            if match:
+                return self._finding_ai_review(identity, match.group(1), int(match.group(2)))
             match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/(status|findings)(?:/(\d+))?", path)
             if match:
                 try:
@@ -1411,7 +1464,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 feature_table = "".join((
                     feature_accordion("라이브러리 취약점", ("input.manage", "scan.library.create"), "라이브러리 취약점 점검 실행 권한입니다. 파일 등록 권한은 프로젝트 전체에서 공유됩니다."),
                     feature_accordion("소스코드 취약점", ("input.manage", "scan.source.create"), "소스코드 취약점 점검 실행 권한입니다. 파일 등록 권한은 프로젝트 전체에서 공유됩니다."),
-                    feature_accordion("점검 결과", ("runs.export", "runs.delete", "runs.tracker.publish", "runs.gitlab.result.publish", "runs.gitlab.issues.publish"), "보고서 내보내기, 결과 삭제와 연동 전송 재시도를 각각 설정합니다. 배정된 프로젝트에만 적용됩니다."),
+                    feature_accordion("점검 결과", ("runs.export", "runs.ai_review", "runs.delete", "runs.tracker.publish", "runs.gitlab.result.publish", "runs.gitlab.issues.publish"), "보고서 내보내기, AI 검토, 결과 삭제와 연동 전송 재시도를 각각 설정합니다. 배정된 프로젝트에만 적용됩니다."),
                     feature_accordion("프로젝트", ("project.create", "project.delete", "input.manage"), "프로젝트 생성, 배정된 프로젝트 삭제 및 입력 등록 권한을 설정합니다. 시스템 관리자는 모든 기능을 사용할 수 있습니다."),
                 ))
                 role_json = script_json({role: [] for role in policy["roles"]})
@@ -1591,6 +1644,13 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                         run = store.create_scan(identity.subject_id, **payload)
                     self.server.portal_worker.enqueue(run["run_id"])
                     return self._json(202, run)
+                match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/findings/([0-9]{1,19})/ai-review", path)
+                if match:
+                    if not self._exact(payload, set()):
+                        return
+                    if self.headers.get("Sec-Fetch-Site") == "cross-site":
+                        return self._json(403, {"code": "forbidden"})
+                    return self._finding_ai_review(identity, match.group(1), int(match.group(2)), create=True)
                 match = re.fullmatch(r"/koda/api/v1/runs/([0-9a-f-]+)/ai-summary", path)
                 if match:
                     if not self._exact(payload, set()):
@@ -1922,6 +1982,8 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
     server.internal_json_slot = threading.BoundedSemaphore(1)
     server.internal_archive_slot = threading.BoundedSemaphore(1)
     server.public_json_slot = threading.BoundedSemaphore(8)
+    server.ai_review_lock = threading.Lock()
+    server.active_ai_reviews = set()
     server.portal_store = store
     from .portal_worker import ExternalWorkerProxy
     server.portal_worker = (ExternalWorkerProxy(store) if os.environ.get("KODA_PORTAL_EXTERNAL_WORKER") == "1"

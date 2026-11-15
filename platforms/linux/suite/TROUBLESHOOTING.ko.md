@@ -62,6 +62,37 @@ Tracker 로그인은 `/`, KODA 포털은 `/koda/`입니다. 운영 모드는 HTT
 
 운영 장애를 해결하려고 개발 모드나 임의 인증 헤더로 우회하지 않습니다. 서버 시각이 크게 틀리면 세션·서명·자료 유효기간 판정도 어긋나므로 호스트 시간을 함께 확인합니다.
 
+### 게이트웨이 설정 복구
+
+운영 `tracker/.env`에서 `KODA_GATEWAY_PROOF`가 사라졌다면 `recover-gateway-proof.py`가 포함된 반입 도구 디렉터리에서 다음 읽기 전용 검사를 실행합니다. 기존 설치 계정으로 실행하며, 실제 설치 경로를 지정합니다.
+
+```bash
+python3 ./recover-gateway-proof.py --prefix "$PREFIX"
+```
+
+`복구 가능`이 표시되면 실행 중인 게이트웨이와 `koda-dashboard`에 같은 값이 있는 상태입니다. 아래 명령은 `tracker/.env`를 비공개 파일로 백업한 뒤 기존 값을 복구합니다. 값은 화면에 출력되지 않으며 실행 중인 컨테이너는 그대로 사용합니다.
+
+```bash
+python3 ./recover-gateway-proof.py --prefix "$PREFIX" --apply
+```
+
+두 컨테이너에 복구할 값이 없고 운영 `.env`도 비어 있다면 구버전 전환 사전 검사를 사용합니다. 값이 서로 다르면 최근 운영 백업과 실행 중인 컨테이너의 설치 경로를 확인합니다. [구버전 전환 절차](INSTALL-20261106.ko.md#이전-설치의-게이트웨이-설정-확인)
+
+### Tracker 적용 후 KODA에서 취약점 자료를 읽지 못함
+
+Tracker에 활성 릴리스가 있는데 KODA가 `approved data proof or registered verification public key is missing`을 표시하면 실행 중인 컨테이너의 공개키 마운트를 확인합니다.
+
+```bash
+docker inspect -f '{{.Name}}{{range .Mounts}}{{if eq .Destination "/run/secrets/tracker-data-update-verify.pub"}} {{.Source}} RW={{.RW}}{{end}}{{end}}' \
+  koda-dashboard koda-sbom-portal-api
+docker exec koda-dashboard test -r /run/secrets/tracker-data-update-verify.pub
+```
+
+- Tracker에만 공개키 마운트가 보이면 `tracker/.env`의 `TRACKER_DATA_UPDATE_VERIFY_KEY_FILE`이 실제 공개키 파일을 가리키는지 확인합니다. 이미 정상 등록된 상태라면 진행 중인 점검이 끝난 뒤 `"$PREFIX/koda-suite" start --prefix "$PREFIX"`로 시작합니다.
+- 두 컨테이너에 마운트가 보이면 경로와 KODA의 읽기 권한을 확인합니다. 공개키를 읽을 수 있으면 공유 볼륨의 `current` 아래에 `approved-metadata.env`, `approved-manifest.sha256`, `approved-manifest.sha256.sig`, `metadata.env`가 있는지 확인합니다.
+
+조치 후 KODA **취약점 DB**에서 활성 릴리스와 자료별 기준일을 확인합니다.
+
 ## 4. DB 연결·부팅 실패
 
 ```bash

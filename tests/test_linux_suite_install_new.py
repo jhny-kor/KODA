@@ -30,6 +30,7 @@ class FreshTests(unittest.TestCase):
             @contextlib.contextmanager
             def released(args,host):
                 self.assertEqual(args.release_public_key,n.h.HERE/'release-public.pem')
+                self.assertIsNone(args.verification_dir)
                 self.assertIsNone(args.archive);events.append('verified');yield root/'suite',{'POSTGRES_PASSWORD':'fixture'}
             runner.run.side_effect=lambda *a,**k:events.append('install')
             with mock.patch.object(n.sys,'platform','linux'),mock.patch.object(n.h,'source_environment',return_value=({},set())),mock.patch.object(n.h,'release',released),contextlib.redirect_stdout(io.StringIO()):

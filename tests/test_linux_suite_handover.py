@@ -14,6 +14,9 @@ from unittest import mock
 ROOT=Path(__file__).resolve().parents[1] / "platforms/linux/suite/handover"
 SPEC=importlib.util.spec_from_file_location('handover',ROOT/'handover.py')
 h=importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(h)
+RECOVERY_SPEC = importlib.util.spec_from_file_location('gateway_recovery', ROOT/'recover-gateway-proof.py')
+gateway_recovery = importlib.util.module_from_spec(RECOVERY_SPEC)
+RECOVERY_SPEC.loader.exec_module(gateway_recovery)
 
 class FixtureRunner(h.Runner):
     def __init__(self,prefix,identity=None):
@@ -39,6 +42,9 @@ class FixtureRunner(h.Runner):
         elif args[:2]==['docker','inspect']: value=json.dumps([c for c in self.containers if c['Id'] in args[2:]]).encode()
         elif args[:2]==['docker','compose']: value=json.dumps(self.config).encode()
         elif args[:3] in (['docker','volume','inspect'],['docker','image','inspect']): value=b'[]'
+        elif args[:3] == ['docker','volume','ls']: value=b''
+        elif args[:4] == ['docker','exec','id-postgres','psql']: value=b'f\n'
+        elif args[:4] == ['docker','exec','id-gateway','wget']: value=b''
         else: raise AssertionError('Unexpected Docker fixture command: '+repr(args))
         return subprocess.CompletedProcess(args,0,value,b'')
 
@@ -147,6 +153,321 @@ class HandoverTests(unittest.TestCase):
         host=h.Host(self.prefix,self.prefix/'tracker/.env',runner)
         self.assertNotIn('unrelated',[item['Id'] for item in host.containers])
         self.assertFalse(any(call[:2]==['docker','stop'] for call in runner.calls))
+
+    def test_shared_mount_conflicts_report_names_and_states_without_stopping_containers(self):
+        runner = FixtureRunner(self.prefix)
+        tracker = self.prefix / 'tracker'
+        runner.containers.extend([
+            {'Id': 'live-foreign', 'Name': '/foreign-data-writer', 'State': {'Running': True},
+             'Config': {'Labels': {'com.docker.compose.project': 'qa-suite',
+                                   'com.docker.compose.project.working_dir': '/different-install'},
+                        'Env': ['PASSWORD=private-fixture-sentinel']},
+             'Mounts': [{'Type': 'volume', 'Name': 'qa-postgres-data', 'RW': True}]},
+            {'Id': 'stopped-foreign', 'Name': '/stopped-snapshot', 'State': {'Running': False},
+             'Config': {'Labels': None},
+             'Mounts': [{'Type': 'bind', 'Source': str(self.prefix / 'data/koda-portal'), 'RW': True}]},
+            {'Id': 'read-only', 'Name': '/read-only-monitor', 'State': {'Running': True},
+             'Config': {'Labels': None},
+             'Mounts': [{'Type': 'volume', 'Name': 'qa-postgres-data', 'RW': False}]},
+        ])
+        with self.assertRaises(h.Failure) as caught:
+            h.Host(self.prefix, tracker / '.env', runner)
+        message = str(caught.exception)
+        self.assertIn('foreign-data-writer [실행 중] · 쓰기 마운트: postgres-data', message)
+        self.assertIn('Compose 프로젝트 일치, 작업 경로 다름', message)
+        self.assertIn('stopped-snapshot [정지] · 쓰기 마운트: data/koda-portal', message)
+        self.assertNotIn('read-only-monitor', message)
+        self.assertNotIn('private-fixture-sentinel', message)
+        self.assertFalse(any(call[:2] == ['docker', 'stop'] for call in runner.calls))
+
+    def test_gateway_proof_recovery_checks_before_writing_and_creates_private_backup(self):
+        env_file = self.prefix/'tracker/.env'
+        original = b'TRACKER_DB_NAME=tracker\nKODA_GATEWAY_PROOF=\n'
+        env_file.write_bytes(original)
+        proof = 'test_gateway_proof_' + 'a' * 32
+        output = io.StringIO()
+        with mock.patch.object(gateway_recovery, 'live_proof', return_value=proof), contextlib.redirect_stdout(output):
+            gateway_recovery.recover(self.prefix, False)
+            self.assertEqual(env_file.read_bytes(), original)
+            self.assertFalse(list(env_file.parent.glob('.env.gateway-proof-backup.*')))
+            gateway_recovery.recover(self.prefix, True)
+        backup, = env_file.parent.glob('.env.gateway-proof-backup.*')
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(env_file.read_bytes(),
+                         original.replace(b'KODA_GATEWAY_PROOF=', b'KODA_GATEWAY_PROOF=' + proof.encode()))
+        self.assertNotIn(proof, output.getvalue())
+
+    def test_gateway_proof_recovery_never_overwrites_a_conflicting_existing_value(self):
+        env_file = self.prefix/'tracker/.env'
+        original = env_file.read_bytes()
+        proof = 'test_gateway_proof_' + 'a' * 32
+        with mock.patch.object(gateway_recovery, 'live_proof', return_value=proof):
+            with self.assertRaisesRegex(gateway_recovery.RecoveryError, '다른 gateway proof'):
+                gateway_recovery.recover(self.prefix, True)
+        self.assertEqual(env_file.read_bytes(), original)
+        self.assertFalse(list(env_file.parent.glob('.env.gateway-proof-backup.*')))
+
+    def legacy_gateway_fixture(self):
+        env_file = self.prefix / 'tracker/.env'
+        env_file.write_text(env_file.read_text().replace('KODA_GATEWAY_PROOF=private-fixture-sentinel\n', ''))
+        runner = FixtureRunner(self.prefix)
+        runner.containers.append({
+            'Id': 'id-gateway', 'Name': '/qa-gateway', 'Image': 'sha256:gateway',
+            'State': {'Running': True}, 'Mounts': [],
+            'Config': {'Labels': {'com.docker.compose.service': 'gateway',
+                                  'com.docker.compose.project': 'qa-suite',
+                                  'com.docker.compose.project.working_dir': str(env_file.parent)}},
+        })
+        return env_file, runner
+
+    def test_legacy_gateway_check_is_read_only_and_needs_an_explicit_flag(self):
+        env_file, runner = self.legacy_gateway_fixture()
+        original = env_file.read_bytes()
+        with self.assertRaisesRegex(h.Failure, 'KODA_GATEWAY_PROOF'):
+            h.Host(self.prefix, env_file, runner)
+        with mock.patch.object(runner, 'run', wraps=runner.run) as calls:
+            host = h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
+        compose_calls = [call for call in calls.call_args_list if call.args[0][:2] == ['docker', 'compose']]
+        self.assertEqual(len(compose_calls), 1)
+        self.assertIn(h.PROOF_KEY, compose_calls[0].kwargs['env'])
+        self.assertNotIn(h.PROOF_KEY, host.env)
+        self.assertEqual(env_file.read_bytes(), original)
+        self.assertFalse(any(call[:2] in (['docker', 'stop'], ['docker', 'start']) for call in runner.calls))
+
+        runner.containers[-1]['Config']['Env'] = [h.PROOF_KEY + '=existing']
+        with self.assertRaisesRegex(h.Failure, '기존 값을 복구'):
+            h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
+
+    def test_legacy_recheck_ignores_inspect_order_but_reports_real_changes(self):
+        env_file, runner = self.legacy_gateway_fixture()
+        host = h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
+        worker = next(item for item in runner.containers if item['Id'] == 'id-portal-worker')
+        worker['Mounts'].reverse()
+        runner.containers.reverse()
+        host.recheck_legacy_gateway()
+
+        for mapping, key, value, message in (
+            (worker['Mounts'][0], 'RW', False, r'qa-portal-worker \(마운트\)'),
+            (worker, 'Image', 'sha256:replacement', r'qa-portal-worker \(이미지\)'),
+            (worker['State'], 'Running', False, r'qa-portal-worker \(실행 상태\)'),
+            (worker, 'Id', 'replacement-id', '추가·제거·교체됐습니다: qa-portal-worker'),
+        ):
+            with self.subTest(field=key), mock.patch.dict(mapping, {key: value}):
+                with self.assertRaisesRegex(h.Failure, message):
+                    host.recheck_legacy_gateway()
+
+    def test_legacy_migration_can_leave_a_finished_nonrestarting_grype_import_in_place(self):
+        env_file, runner = self.legacy_gateway_fixture()
+        importer = {
+            'Id': 'id-grype', 'Name': '/koda-grype-db-import',
+            'State': {'Running': False, 'Status': 'exited', 'ExitCode': 0, 'StartedAt': 'first'},
+            'Config': {'Labels': None}, 'HostConfig': {'RestartPolicy': {'Name': 'no'}},
+            'Mounts': [{'Type': 'volume', 'Name': 'qa-vuln-data', 'RW': True}],
+        }
+        runner.containers.append(importer)
+        host = h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
+        self.assertNotIn('id-grype', {container['id'] for container in host.original})
+        host.recheck_retired_grype_import()
+        importer['State']['StartedAt'] = 'second'
+        with self.assertRaisesRegex(h.Failure, '반입 작업의 상태가 바뀌었습니다'):
+            host.recheck_retired_grype_import()
+        importer['State'].update(Running=True, Status='running')
+        with self.assertRaisesRegex(h.Failure, r'koda-grype-db-import \[실행 중\]'):
+            h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
+        importer['State'].update(Running=False, Status='exited')
+        importer['HostConfig']['RestartPolicy']['Name'] = 'always'
+        with self.assertRaisesRegex(h.Failure, r'koda-grype-db-import \[정지\]'):
+            h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
+        self.assertFalse(any(call[:2] in (['docker', 'stop'], ['docker', 'rm']) for call in runner.calls))
+
+    def test_legacy_scheduler_with_matching_mounts_is_included_in_backup_writers(self):
+        env_file, runner = self.legacy_gateway_fixture()
+        env_file.write_text(env_file.read_text() + 'KODA_SCHEDULE_ENABLED=1\n')
+        data = self.prefix / 'data/koda-portal'
+        worker = {
+            'Id': 'id-schedule', 'Name': '/koda-schedule-worker', 'Image': 'sha256:koda-old',
+            'State': {'Running': True},
+            'Config': {'Image': 'qa-koda:old', 'User': f'{os.getuid()}:{os.getgid()}',
+                       'Labels': {'io.koda.offline': 'true'}, 'Cmd': ['schedule-worker']},
+            'Mounts': [
+                {'Type': 'bind', 'Source': str(data/'schedule-auth'), 'Destination': '/run/koda/schedule', 'RW': False},
+                {'Type': 'bind', 'Source': str(data.with_name('koda-portal-schedule')),
+                 'Destination': '/var/lib/koda-schedule', 'RW': True},
+            ],
+        }
+        runner.containers.append(worker)
+        host = h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
+        self.assertIn('id-schedule', {container['id'] for container in host.original})
+        worker['Mounts'][1]['Source'] = '/foreign/schedule'
+        with self.assertRaisesRegex(h.Failure, '고정 이름 컨테이너와 충돌.*koda-schedule-worker'):
+            h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
+
+    def test_legacy_update_with_dependency_track_fails_before_backup_or_release(self):
+        env_file, runner = self.legacy_gateway_fixture()
+        runner.containers.append({
+            'Id': 'id-dtrack', 'Name': '/qa-suite-dtrack-apiserver', 'Image': 'sha256:dtrack',
+            'State': {'Running': True}, 'Config': {'Labels': {'com.docker.compose.project': 'qa-suite',
+                       'com.docker.compose.service': 'dtrack-apiserver'}}, 'Mounts': [],
+        })
+        args = ['update', '--migrate-legacy-gateway-proof', '--prefix', str(self.prefix)]
+        errors = io.StringIO()
+        with (mock.patch.object(h.sys, 'platform', 'linux'), mock.patch.object(h, 'release') as release,
+              mock.patch.object(h, 'backup_host') as backup, contextlib.redirect_stderr(errors)):
+            self.assertEqual(h.main(args, runner), 2)
+        self.assertIn('Dependency-Track의 전용 DB와 볼륨', errors.getvalue())
+        release.assert_not_called()
+        backup.assert_not_called()
+        self.assertFalse(any(call[:2] == ['docker', 'stop'] for call in runner.calls))
+        @contextlib.contextmanager
+        def released(args, host):
+            yield self.root/'signed/koda-suite', host.env
+        output = io.StringIO()
+        with (mock.patch.object(h.sys, 'platform', 'linux'), mock.patch.object(h, 'release', released),
+              mock.patch.object(h, 'backup_host') as backup, contextlib.redirect_stdout(output)):
+            self.assertEqual(h.main(['check', *args[1:]], runner), 0)
+        self.assertIn('업데이트 보류: Dependency-Track 데이터 보존 방안을', output.getvalue().splitlines()[-1])
+        backup.assert_not_called()
+
+    def test_retirement_uses_signed_cleaner_and_refuses_tracker_database(self):
+        env_file, runner = self.legacy_gateway_fixture()
+        host = h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
+        suite = self.root/'signed/koda-suite'
+        (suite.parent/'bundles').mkdir(parents=True)
+        (suite.parent/'metadata.env').write_text('TRACKER_BUNDLE=bundles/tracker.tar.gz\n')
+        source = b"""
+def read_env(path):
+    return dict(line.split('=', 1) for line in open(path).read().splitlines())
+class Cleaner:
+    project = 'qa-suite'
+    def __init__(self, values): pass
+    def plan(self): return [], ['qa-dtrack-data'], []
+"""
+        with h.tarfile.open(suite.parent/'bundles/tracker.tar.gz', 'w:gz') as archive:
+            member = h.tarfile.TarInfo('./scripts/remove-retired-analysis.py'); member.size = len(source)
+            archive.addfile(member, io.BytesIO(source))
+
+        def run(command, **kwargs):
+            if command[0] == 'python3':
+                return h.Runner().run(command, **kwargs)
+            return subprocess.CompletedProcess(command, 0, b'{"exists":true,"owned":true,"shared":false}', b'')
+
+        with mock.patch.object(runner, 'run', side_effect=run):
+            plan = host.dependency_track_plan(suite)
+            self.assertEqual(plan['volumes'], ['qa-dtrack-data'])
+            self.assertEqual(plan['database'], 'dtrack')
+            with env_file.open('a') as output:
+                output.write('DTRACK_DB_NAME=tracker\n')
+            with self.assertRaisesRegex(h.Failure, 'Tracker·관리자 설정과 충돌'):
+                host.dependency_track_plan(suite)
+
+    def test_retirement_backup_archives_database_and_volume_before_cleanup(self):
+        env_file, runner = self.legacy_gateway_fixture()
+        host = h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
+        plan = {'database':'dtrack','role':'dtrack','admin':'postgres','exists':True,'volumes':['qa-dtrack-data']}
+        folder = self.root/'backup'; folder.mkdir(mode=0o700)
+        commands = []
+
+        def run(command, **kwargs):
+            commands.append(command)
+            if 'pg_dump' in command:
+                kwargs['output'].write(b'private database fixture')
+            elif 'pg_restore' in command:
+                self.assertIn('--file=/dev/null', command)
+                self.assertEqual(kwargs['stdin'].read(), b'private database fixture')
+            else:
+                self.assertIn('type=volume,src=qa-dtrack-data,dst=/snapshot,readonly', command)
+                with h.tarfile.open(fileobj=kwargs['output'], mode='w|gz') as archive:
+                    archive.add(env_file, arcname='fixture')
+
+        state = {'exists':True,'owned':True,'shared':False,'connected':False}
+        with (mock.patch.object(host, 'dependency_track_database', return_value=state),
+              mock.patch.object(runner, 'run', side_effect=run)):
+            manifest = h.backup_dependency_track(host, folder, plan)
+            self.assertEqual(manifest['dump'], 'dependency-track.dump')
+            self.assertEqual(manifest['volumes'], {'qa-dtrack-data':'dependency-track-volume-1.tar.gz'})
+            self.assertEqual((folder/manifest['dump']).stat().st_mode & 0o777, 0o600)
+            self.assertTrue(any('--dbname=dtrack' in command for command in commands))
+            self.assertFalse(any('--dbname=tracker' in command for command in commands))
+            commands.clear()
+            state['connected'] = True
+            with self.assertRaisesRegex(h.Failure, '아직 연결이 남아'):
+                h.backup_dependency_track(host, folder, plan)
+            self.assertFalse(commands)
+
+    def test_retirement_never_enters_installer_when_backup_fails(self):
+        env_file, fixture_runner = self.legacy_gateway_fixture()
+        host = h.Host(self.prefix, env_file, fixture_runner, migrate_legacy_gateway_proof=True)
+        args = ['--prefix', str(self.prefix), '--migrate-legacy-gateway-proof', '--retire-dependency-track']
+
+        @contextlib.contextmanager
+        def released(_args, actual):
+            yield self.root/'signed/koda-suite', actual.env
+
+        runner = mock.Mock()
+        with (mock.patch.object(h.sys, 'platform', 'linux'), mock.patch.object(h, 'Host', return_value=host),
+              mock.patch.object(h, 'release', released), mock.patch.object(host, 'dependency_track_plan', return_value={'exists':True}),
+              mock.patch.object(h, 'backup_host', side_effect=h.Failure('test backup failed')) as backup,
+              contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO())):
+            self.assertEqual(h.main(['check', *args], runner), 0)
+            self.assertIn('정리 범위 확인 완료', output.getvalue())
+            backup.assert_not_called()
+            self.assertEqual(h.main(['update', *args], runner), 2)
+            backup.assert_called_once()
+            runner.run.assert_not_called()
+
+    def test_legacy_gateway_update_backs_up_before_enabling_proof(self):
+        env_file, fixture_runner = self.legacy_gateway_fixture()
+        host = h.Host(self.prefix, env_file, fixture_runner, migrate_legacy_gateway_proof=True)
+        original = env_file.read_bytes()
+        folder = self.root / 'backup'
+        folder.mkdir(mode=0o700)
+        archive = self.root / 'suite.tar.gz'
+        archive.write_bytes(b'fixture')
+        events = []
+        proof = 'legacy-migration-fixture-' + 'a' * 32
+
+        @contextlib.contextmanager
+        def released(args, actual):
+            self.assertIs(actual, host)
+            self.assertEqual(env_file.read_bytes(), original)
+            for container in fixture_runner.containers:
+                container['Mounts'].reverse()
+            yield self.root / 'signed/koda-suite', actual.env
+
+        def backup(actual, root, *, hold):
+            self.assertTrue(hold)
+            self.assertNotIn(h.PROOF_KEY, actual.env)
+            self.assertEqual(env_file.read_bytes(), original)
+            events.append('backup')
+            return folder, ['id-old']
+
+        runner = mock.Mock()
+        def install_or_status(args, *, env):
+            self.assertNotIn(h.PROOF_KEY, env)
+            action = args[2]
+            events.append(action)
+            if action == 'install':
+                env_file.write_bytes(original + f'{h.PROOF_KEY}={proof}\n'.encode())
+                for container in h.gateway_pair(fixture_runner.containers):
+                    container['Config']['Env'] = [f'{h.PROOF_KEY}={proof}']
+
+        runner.run.side_effect = install_or_status
+        with (mock.patch.object(h.sys, 'platform', 'linux'),
+              mock.patch.object(h, 'Host', return_value=host),
+              mock.patch.object(h, 'release', released),
+              mock.patch.object(h, 'backup_host', side_effect=backup),
+              contextlib.redirect_stdout(io.StringIO())):
+            status = h.main(['update', '--migrate-legacy-gateway-proof', '--prefix', str(self.prefix),
+                             '--archive', str(archive)], runner)
+        self.assertEqual(status, 0)
+        self.assertEqual(events, ['backup', 'install', 'status'])
+        self.assertIn(['docker', 'exec', 'id-gateway', 'wget', '-q', '-T', '10', '-O', '/dev/null',
+                       'http://127.0.0.1:8080/koda/ready'], fixture_runner.calls)
+        fixture_runner.containers[-1]['Config']['Env'] = []
+        with self.assertRaisesRegex(h.Failure, '두 실행 컨테이너에 일치하지'):
+            host.check_preserved()
 
     def test_missing_install_does_not_create_default_or_run_commands(self):
         runner=mock.Mock()
@@ -287,6 +608,21 @@ class HandoverTests(unittest.TestCase):
         with self.assertRaisesRegex(h.Failure,'SHA-256'):
             with h.release(args,host): self.fail('corrupt release yielded')
         runner.run.assert_not_called()
+
+    def test_separate_verification_directory_and_mismatched_signature(self):
+        args = self.signed_release()
+        args.verification_dir = self.root/'verification'
+        args.verification_dir.mkdir()
+        for extension in ('.sha256', '.sig'):
+            path = args.archive.with_name(args.archive.name+extension)
+            path.rename(args.verification_dir/path.name)
+        runner = h.Runner()
+        host = type('HostFixture', (), {'env':dict(os.environ),'runner':runner,
+                    'prefix':self.prefix,'env_file':self.prefix/'tracker/.env'})()
+        with h.release(args, host): pass
+        (args.verification_dir/(args.archive.name+'.sig')).write_bytes(b'incorrect signature')
+        with self.assertRaisesRegex(h.Failure, 'SHA-256은 일치하지만 배포 서명이'):
+            with h.release(args, host): self.fail('invalid release yielded')
 
     def recovery_backup(self):
         import tarfile

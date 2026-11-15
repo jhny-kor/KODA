@@ -1,12 +1,15 @@
 import unittest
 import io
+import re
+import shutil
+import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
 
 from security_scanner.linux_portal import _comparison_data
 from security_scanner.portal_integrations import gitlab_archive_root
-from security_scanner.portal_views import gitlab_admin_page
+from security_scanner.portal_views import gitlab_admin_page, run_page
 
 
 class _ComparisonStore:
@@ -28,6 +31,69 @@ class _ComparisonStore:
 
 
 class PortalUiRegressionTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "requires Node")
+    def test_finding_review_stays_with_its_selected_item(self):
+        run = {"run_id": "r", "status": "completed", "round_number": 1, "policy_version": 1, "snapshot": {}}
+        finding_page = {"items": [
+            {"finding_index": 11, "category": "code", "title": "소스코드"},
+            {"finding_index": 27, "category": "dependencies", "title": "라이브러리"},
+            {"finding_index": 39, "category": "quality", "title": "품질"},
+        ], "page": 1, "page_size": 10, "total": 3}
+        read_only = run_page(run, admin=False, finding_page=finding_page)
+        self.assertIn("AI 검토 의견", read_only)
+        self.assertNotIn("id='finding-review-start'", read_only)
+        self.assertNotIn("id='finding-review'", run_page({**run, "status": "running"}, admin=False, finding_page=finding_page))
+        html = run_page(run, admin=False, finding_page=finding_page, review_enabled=True)
+        script = next(s for s in re.findall(r"<script(?: [^>]*)?>(.*?)</script>", html, re.S)
+                      if "const pendingReviews=" in s)
+        harness = r"""
+const assert=require('node:assert/strict');
+const fields=['verdict','reasoning','impact','remediation','retest'].map(name=>({dataset:{reviewField:name}}));
+const nodes=new Map(), calls=[];
+const document={querySelector(id){
+  if(id==='#cancel')return null;
+  if(!nodes.has(id))nodes.set(id,{
+    hidden:true,textContent:'',addEventListener(){},querySelectorAll(){return fields;}
+  });
+  return nodes.get(id);
+},querySelectorAll(){return [];}};
+const window={addEventListener(){}};
+const wait=()=>new Promise(resolve=>setImmediate(resolve));
+const opinion=(reasoning)=>({verdict:'needs_review',reasoning,impact:'영향',remediation:'조치',retest:'재점검',model:'internal',created_at:'2026-11-13T03:04:05Z'});
+const source=opinion('소스 검토'), library=opinion('<strong>라이브러리 검토</strong>');
+let save, saved=false;
+async function json(url,options){
+  const index=url.split('/').at(-2);
+  calls.push([url,options]);
+  if(!url.endsWith('/ai-review'))return {title:'원본',recommendation:'원본 조치'};
+  if(options?.method==='POST')return new Promise(resolve=>{save=()=>{saved=true;resolve({eligible:true,review:source})}});
+  return {eligible:index!=='39',review:index==='27'?library:(saved?source:null)};
+}
+"""
+        checks = r"""
+(async()=>{
+  await wait();
+  assert.equal(reviewControls.hidden,false);
+  const job=reviewButton.onclick();
+  assert.equal(reviewButton.disabled,true);
+  assert.deepEqual(calls.at(-1),['/koda/api/v1/runs/r/findings/11/ai-review',{method:'POST',body:'{}'}]);
+  await show(1);await wait();
+  assert.equal(reviewResult.hidden,false);
+  assert.equal(fields[1].textContent,library.reasoning);
+  assert.equal(fields[1].innerHTML,undefined);
+  assert.equal(reviewControls.hidden,true);
+  save();await job;
+  assert.equal(fields[1].textContent,library.reasoning);
+  assert.match(document.querySelector('#detail').innerHTML,/원본 조치/);
+  await show(0);await wait();
+  assert.equal(fields[1].textContent,source.reasoning);
+  await show(2);await wait();
+  assert.equal(reviewPanel.hidden,true);
+})().catch(e=>{console.error(e);process.exitCode=1});
+"""
+        result = subprocess.run(["node", "-e", harness + script + checks], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_gitlab_archive_root_reads_each_branch_archive_member_root(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = []

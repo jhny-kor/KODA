@@ -1817,6 +1817,19 @@ def render_markdown_from_payload(payload: dict[str, object], language: str = "ko
     web_audit = payload.get("web_audit")
     if isinstance(web_audit, dict):
         report = report.rstrip("\n") + "\n\n" + render_web_audit_markdown(web_audit, language=language)
+    reviews = _ai_review_rows(payload, language)
+    if reviews:
+        title, note, columns = _ai_review_labels(language)
+        # Model prose is untrusted and may contain Markdown or HTML syntax.
+        def plain_text(value: str) -> str:
+            return re.sub(r"([\\`*_{}\[\]()#+!|~])", r"\\\1", html.escape(" ".join(value.splitlines()), quote=False))
+
+        lines = ["", f"## {title}", "", note, ""]
+        for row in reviews:
+            lines.append(f"### {plain_text(row[0])} · {plain_text(row[1])}")
+            lines.extend(f"- **{label}** {plain_text(value)}" for label, value in zip(columns[2:], row[2:]) if value)
+            lines.append("")
+        report = report.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
     return report
 
 
@@ -1900,6 +1913,13 @@ def render_html_pair_zip_from_payload(payload: dict[str, object], language: str 
         audit_html = _web_audit_html(web_audit, language)
         main_html = main_html.replace("</main>", f"{audit_html}</main>", 1)
         detail_html = detail_html.replace("</main>", f"{audit_html}</main>", 1)
+    reviews = _ai_review_rows(payload, "ko")
+    main_html = _append_ai_reviews_html(main_html, reviews, "ko")
+    detail_html = _append_ai_reviews_html(detail_html, reviews, "ko")
+    if vulnerability_html:
+        vulnerability_html = _append_ai_reviews_html(
+            vulnerability_html, _ai_review_rows(payload, "ko", library_only=True), "ko",
+        )
     buffer = io.BytesIO()
     original_sbom = payload.get("sbom")
     spdx_sbom = None
@@ -2100,6 +2120,86 @@ def _payload_findings(payload: dict[str, object], language: str = "en") -> list[
     return [item for item in values if isinstance(item, dict)] if isinstance(values, list) else []
 
 
+def _ai_review_labels(language: str) -> tuple[str, str, tuple[str, ...]]:
+    if language == "ko":
+        return (
+            "AI 검토 의견",
+            "담당자 검토를 위한 의견입니다. 원본 발견과 심각도는 점검 결과에서 확인하세요.",
+            ("발견 번호", "발견 항목", "규칙 ID", "발견 위치", "구성요소·취약점 근거", "AI 판단",
+             "판단 근거", "영향 범위", "권장 조치", "재점검 방법", "모델", "검토 시각"),
+        )
+    return (
+        "AI review opinions",
+        "Advisory for reviewers. See the scan results for the original findings and severities.",
+        ("Finding number", "Finding", "Rule ID", "Location", "Component and vulnerability evidence", "AI assessment",
+         "Reasoning", "Impact scope", "Recommended action", "Retest method", "Model", "Reviewed at"),
+    )
+
+
+def _ai_review_rows(payload: dict[str, object], language: str, *, library_only: bool = False) -> list[tuple[str, ...]]:
+    reviews, findings = payload.get("ai_finding_reviews"), payload.get("findings")
+    if not isinstance(reviews, list) or not isinstance(findings, list):
+        return []
+    verdicts = {
+        "likely_true": ("취약점 가능성 높음", "Likely affected"),
+        "likely_false": ("오탐 가능성 높음", "Likely false positive"),
+        "not_affected": ("해당 환경 영향 없음 후보", "Likely not affected in this environment"),
+        "needs_review": ("추가 확인 필요", "Needs further review"),
+    }
+    rows = []
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        index = review.get("finding_index")
+        if type(index) is not int or not 0 <= index < len(findings) or not isinstance(findings[index], dict):
+            continue
+        finding = findings[index]
+        library = str(finding.get("category") or "").lower() == "dependencies"
+        if library_only and not library:
+            continue
+        verdict = verdicts.get(str(review.get("verdict") or ""), verdicts["needs_review"])
+        fields = (
+            index + 1, finding.get("title") or finding.get("rule_id") or "—",
+            finding.get("rule_id"), _source_location(finding), finding.get("evidence") if library else "",
+            verdict[0 if language == "ko" else 1],
+            *(review.get(key) for key in ("reasoning", "impact", "remediation", "retest", "model", "created_at")),
+        )
+        # Remove characters that cannot be represented in an XML 1.0 cell or paragraph.
+        rows.append(tuple(re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]", "", str(value or "")) for value in fields))
+    return rows
+
+
+def _append_ai_reviews_html(document: str, rows: list[tuple[str, ...]], language: str) -> str:
+    if not rows:
+        return document
+    title, note, columns = _ai_review_labels(language)
+    cards = []
+    for row in rows:
+        fields = "".join(
+            f"<dt>{html.escape(label)}</dt><dd>{html.escape(value)}</dd>"
+            for label, value in zip(columns[2:], row[2:]) if value
+        )
+        cards.append(f"<article><h3>#{html.escape(row[0])} · {html.escape(row[1])}</h3><dl>{fields}</dl></article>")
+    section = (
+        f'<section id="ai-finding-reviews" aria-labelledby="ai-finding-reviews-heading">'
+        f'<h2 id="ai-finding-reviews-heading">{html.escape(title)}</h2>'
+        f'<p>{html.escape(note)}</p>{"".join(cards)}</section>'
+    )
+    styles = (
+        "#ai-finding-reviews{margin:24px 0;padding:18px;border:1px solid #cbd6e5;border-radius:14px;background:#fff}"
+        "#ai-finding-reviews article{border-top:1px solid #dce4ee;padding-top:8px}"
+        "#ai-finding-reviews dt{font-weight:700}#ai-finding-reviews dd{margin:0 0 8px;white-space:pre-wrap;overflow-wrap:anywhere}"
+        ".ai-finding-reviews-link{font-size:13px;font-weight:700;color:#0b3b89;white-space:nowrap}"
+    )
+    header_actions = '<div class="report-header-actions">'
+    link = f'<a class="ai-finding-reviews-link" href="#ai-finding-reviews">{html.escape(title)} ({len(rows)})</a>'
+    return (
+        document.replace("</style>", styles + "</style>", 1)
+        .replace(header_actions, header_actions + link, 1)
+        .replace("</main>", section + "</main>", 1)
+    )
+
+
 def _finding_mapping_text(item: dict[str, object], language: str) -> str:
     mappings = item.get("standard_mappings")
     if isinstance(mappings, dict):
@@ -2148,6 +2248,10 @@ def render_xlsx(payload: dict[str, object], language: str = "ko") -> bytes:
         )
 
     sheets: list[tuple[str, list[list[object]]]] = [("Findings", rows)]
+    reviews = _ai_review_rows(payload, language)
+    if reviews:
+        title, note, columns = _ai_review_labels(language)
+        sheets.append((title, [[note], list(columns), *[list(row) for row in reviews]]))
     scope_rows = file_scope_rows((payload.get("scan") or {}).get("file_scope"), language)
     if scope_rows:
         sheets.append(("FileScope", [["항목", "값"] if language == "ko" else ["Field", "Value"], *[list(row) for row in scope_rows]]))
@@ -2408,6 +2512,20 @@ def render_hwpx(payload: dict[str, object], language: str = "ko") -> bytes:
                 "16", "25", para_id,
             ))
 
+    reviews = _ai_review_rows(payload, language)
+    if reviews:
+        title, note, columns = _ai_review_labels(language)
+        review_paragraphs = [(title, "17", "24"), (note, "16", "25")]
+        for row in reviews:
+            review_paragraphs.append((f"#{row[0]} · {row[1]}", "17", "24"))
+            for label, value in zip(columns[2:], row[2:]):
+                if value:
+                    lines = value.splitlines() or [""]
+                    review_paragraphs.append((f"{label} · {lines[0]}", "16", "25"))
+                    review_paragraphs.extend((line, "16", "25") for line in lines[1:])
+        for text, char_pr, para_pr in review_paragraphs:
+            para_id += 1
+            paragraphs.append(_hwpx_paragraph(text, char_pr, para_pr, para_id))
     new_section = (prefix + "".join(paragraphs) + "</hs:sec>").encode("utf-8")
 
     buffer = io.BytesIO()

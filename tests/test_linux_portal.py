@@ -39,7 +39,7 @@ from security_scanner.portal_integrations import (
     publish_tracker_result,
     remove_gitlab_configuration,
     save_gitlab_configuration,
-    test_gitlab_write_configuration,
+    test_gitlab_write_configuration as check_gitlab_write_configuration,
 )
 from security_scanner.linux_portal import MAX_INPUT_BYTES, _deliver_gitlab_issues, _deliver_gitlab_result, _deliver_tracker, _run_delivery, create_portal_server
 from security_scanner.grype_adapter import GrypeMatch, GrypeResult
@@ -244,7 +244,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
                 ({"scopes": ["read_api"]}, {}), ({"scopes": ["api"]}, {}),
             ],
         ):
-            self.assertEqual(test_gitlab_write_configuration(
+            self.assertEqual(check_gitlab_write_configuration(
                 "https://gitlab.example.internal", "read-token", "write-token",
             ), account)
         with patch("security_scanner.portal_integrations._gitlab_status", side_effect=[account, account]), patch(
@@ -253,7 +253,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
             ],
         ):
             with self.assertRaisesRegex(IntegrationError, "api 범위"):
-                test_gitlab_write_configuration(
+                check_gitlab_write_configuration(
                     "https://gitlab.example.internal", "read-token", "write-token",
                 )
         with patch("security_scanner.portal_integrations._gitlab_status", side_effect=[account, {"id": 8, "username": "other"}]), patch(
@@ -262,7 +262,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
             ],
         ):
             with self.assertRaisesRegex(IntegrationError, "같은 계정"):
-                test_gitlab_write_configuration(
+                check_gitlab_write_configuration(
                     "https://gitlab.example.internal", "read-token", "write-token",
                 )
 
@@ -1168,6 +1168,107 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual(self.request("/koda/ready")[0], 503)
         self.assertEqual(self.request("/koda/ready", headers={"X-KODA-Gateway-Proof": "wrong"})[0], 503)
         self.assertEqual(self.request("/koda/ready", headers={"X-KODA-Gateway-Proof": TEST_GATEWAY_PROOF})[0], 200)
+
+    def test_finding_ai_review_uses_stored_evidence_and_preserves_scan(self):
+        calls = []
+        opinion = {"verdict": "needs_review", "reasoning": "근거를 확인하세요.", "impact": "배포 범위 확인",
+                   "remediation": "입력 검증을 점검하세요.", "retest": "같은 범위로 다시 점검하세요."}
+
+        class Tracker(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                calls.append((self.path, self.headers.get("Authorization"), body))
+                invalid = body["facts"]["ruleId"] == "code.invalid-response"
+                response = {"model": "fixture-model", "advisory": True, "review": {} if invalid else opinion}
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(response).encode())
+
+            def log_message(self, *args):
+                pass
+
+        tracker = ThreadingHTTPServer(("127.0.0.1", 0), Tracker)
+        thread = threading.Thread(target=tracker.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.server.portal_worker.close()
+            store = self.server.portal_store
+            project = store.create_project("AI finding review", self.admin)
+            source = Path(self.tmp.name) / "example.py"
+            source.write_text("print('ok')\n", encoding="utf-8")
+            input_id = store.add_input(project, source.name, source, self.admin)
+            run_id = store.create_scan(self.admin, project, input_id, "local", "all")["run_id"]
+            run_url = f"/koda/api/v1/runs/{run_id}"
+            url = f"{run_url}/findings/0/ai-review"
+            viewer, outsider, reviewer = (str(uuid.uuid4()) for _ in range(3))
+            for subject in (viewer, outsider, reviewer):
+                store.ensure_subject(subject, "viewer")
+                store.set_subject(subject, status="enabled", actor=self.admin)
+            store.set_membership(project, viewer, "viewer", self.admin)
+            store.set_membership(project, reviewer, "analyst", self.admin)
+            policy = store.role_policy()
+            policy["roles"]["analyst"].append("runs.ai_review")
+            store.set_role_policy(policy["roles"], policy["version"], self.admin)
+            token_file = Path(self.tmp.name) / "provisioning.token"
+            token_file.write_text("fixture-provisioning-token\n", encoding="utf-8")
+            headers = self.headers()
+            with patch.dict(os.environ, {
+                "KODA_TRACKER_URL": f"http://127.0.0.1:{tracker.server_port}",
+                "KODA_TRACKER_PROVISIONING_TOKEN_FILE": str(token_file),
+            }):
+                self.assertEqual(self.request(url, method="POST", payload={}, headers=headers)[0], 409)
+                purl = "pkg:pypi/example@1.0"
+                source_finding = {"category": "code", "rule_id": "code.example", "severity": "high",
+                                  "title": "Input handling", "path": "/private/worktree/example.py", "line": 7,
+                                  "source_context": {"lines": [{"number": 7, "text": "return validate(value)"},
+                                                               {"number": 8, "text": "password = 'fixture-secret'"}]}}
+                library_finding = {"category": "dependencies", "rule_id": "dependency.osv-known-vulnerability",
+                                   "severity": "medium", "issue_key": f"dependency.osv-known-vulnerability|{purl}|CVE-2025-12345"}
+                original = {"findings": [source_finding, library_finding, {"category": "screen_quality", "rule_id": "quality.example"},
+                                         {**source_finding, "rule_id": "code.invalid-response"}],
+                            "vulnerabilities": [{"purl": purl, "cve_ids": ["CVE-2025-99999"], "fixed_versions": ["wrong"]},
+                                                {"purl": purl, "cve_ids": ["CVE-2025-12345"], "installed_version": "1.0",
+                                                 "fixed_versions": ["1.1"], "nvd": {"descriptions": ["Approved reference."]}}]}
+                store.complete_run(run_id, original)
+                self.assertEqual(self.request(url, headers=self.headers(outsider))[0], 404)
+                self.assertEqual(self.request(url, method="POST", payload={}, headers=self.headers(viewer))[0], 403)
+                self.assertEqual(self.request(url, method="POST", payload={"prompt": "override"}, headers=headers)[0], 422)
+                self.assertEqual(self.request(url, method="POST", payload={}, headers={**headers, "Sec-Fetch-Site": "cross-site"})[0], 403)
+                self.assertEqual(self.request(f"{run_url}/findings/2/ai-review", headers=headers), (200, {"eligible": False, "review": None}))
+                self.assertEqual(self.request(url, headers=headers), (200, {"eligible": True, "review": None}))
+                self.assertEqual(calls, [])
+
+                status, saved = self.request(url, method="POST", payload={}, headers=headers)
+                self.assertEqual(status, 200, saved)
+                self.assertEqual({key: saved["review"][key] for key in opinion}, opinion)
+                self.assertEqual(self.request(url, headers=self.headers(viewer)), (200, saved))
+                self.assertEqual(self.request(url, method="POST", payload={}, headers=headers), (200, saved))
+                self.assertEqual(len(calls), 1)
+                path, auth, source_body = calls[0]
+                self.assertEqual((path, auth, source_body["kind"]), ("/api/v1/integrations/koda/ai-finding-review", "Bearer fixture-provisioning-token", "source"))
+                self.assertIn("return validate(value)", source_body["facts"]["sourceContext"])
+                self.assertNotIn("fixture-secret", str(source_body))
+                self.assertNotIn("/private/worktree", str(source_body))
+
+                self.assertEqual(self.request(f"{run_url}/findings/1/ai-review", method="POST", payload={}, headers=self.headers(reviewer))[0], 200)
+                library_body = calls[1][2]
+                self.assertEqual(library_body["kind"], "library")
+                self.assertEqual(library_body["facts"]["package"], purl)
+                self.assertEqual(library_body["facts"]["fixedVersions"], "1.1")
+                self.assertIn("Approved reference.", library_body["facts"]["description"])
+                self.assertEqual(self.request(f"{run_url}/findings/3/ai-review", method="POST", payload={}, headers=headers)[0], 502)
+                self.assertIsNone(store.run_ai_review(run_id, 3))
+                self.assertEqual(store.run(run_id)["result"], original)
+                self.assertEqual(self.request(f"{run_url}/findings/0", headers=headers)[1], {**source_finding, "finding_index": 0})
+                self.assertEqual(sum(event["action"] == "finding.ai_review.created" for event in store.audit_events()), 2)
+                store.delete_run(run_id, self.admin)
+                self.assertEqual(self.request(url, headers=headers)[0], 404)
+                self.assertIsNone(store.run_ai_review(run_id, 0))
+        finally:
+            tracker.shutdown()
+            tracker.server_close()
+            thread.join(timeout=2)
 
     def test_public_json_slot_rejects_excess_concurrent_parsers(self):
         slots = [self.server.public_json_slot.acquire(blocking=False) for _ in range(8)]
