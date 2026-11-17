@@ -288,7 +288,7 @@ class ExportTests(unittest.TestCase):
             main = archive.read("report.html").decode("utf-8")
             detail = archive.read("report-detail.html").decode("utf-8")
             self.assertNotIn("source-main-guide-open", main)
-            self.assertIn('href="report-detail.html"', main)
+            self.assertIn('href="report-detail.html" target="_blank" rel="noopener noreferrer"', main)
             self.assertIn("상세 보고서 더보기", main)
             self.assertNotIn("source-detail-guide-open", detail)
             self.assertNotIn('href="report.html"', detail)

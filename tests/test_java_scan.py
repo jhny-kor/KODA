@@ -394,7 +394,7 @@ class JavaScanTests(unittest.TestCase):
             write_reports(output, (), (), 0, (), "2026-07-23", language=None)
             html_report = (output / "server-library-report-detail.html").read_text(encoding="utf-8")
             main_report = (output / "server-library-report.html").read_text(encoding="utf-8")
-            self.assertIn('href="server-library-report-detail.html"', main_report)
+            self.assertIn('href="server-library-report-detail.html" target="_blank" rel="noopener noreferrer"', main_report)
             self.assertIn("상세 보고서 더보기", main_report)
             self.assertIn("아카이브", main_report)
             self.assertIn("확인불가", main_report)
@@ -421,7 +421,7 @@ class JavaScanTests(unittest.TestCase):
             self.assertNotIn('class="library-card-accordion" open', html_report)
             self.assertNotIn('class="workspace-accordion"', html_report)
             self.assertNotIn('id="severity"', html_report)
-            self.assertIn('href="server-library-report.html"', html_report)
+            self.assertIn('href="server-library-report.html" target="_blank" rel="noopener noreferrer"', html_report)
             self.assertIn("KODA Java 라이브러리 취약점 보고서", markdown_report)
 
             write_reports(output, (), (), 0, (), "2026-07-23", language="en")
@@ -461,7 +461,7 @@ class JavaScanTests(unittest.TestCase):
         self.assertIn('id="main-vulnerability-library"', main_html)
         self.assertIn('id="main-vulnerability-kev"', main_html)
         self.assertIn('id="main-vulnerability-table"', main_html)
-        self.assertIn("server-vulnerability-details.html", main_html)
+        self.assertIn('href="server-vulnerability-details.html" target="_blank" rel="noopener noreferrer"', main_html)
         self.assertIn(">KEV / EPSS<span class=\"column-resizer\"", main_html)
         self.assertIn(">CVSS<span class=\"column-resizer\"", main_html)
         self.assertIn(">조치<span class=\"column-resizer\"", main_html)
@@ -477,6 +477,10 @@ class JavaScanTests(unittest.TestCase):
         self.assertIn('class="final-version"', main_html)
         self.assertIn("최종 버전", main_html)
         self.assertIn('href="server-library-report.html"', detail_html)
+        self.assertRegex(
+            detail_html,
+            r'class="vulnerability-report-link" href="server-vulnerability-details\.html#[^"]+" target="_blank" rel="noopener noreferrer"',
+        )
         self.assertIn("라이브러리 취약점 상세", detail_html)
         self.assertIn('class="library"', detail_html)
         self.assertIn("CVE 설명", detail_html)

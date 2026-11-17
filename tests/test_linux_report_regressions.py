@@ -75,8 +75,11 @@ class LinuxReportRegressions(unittest.TestCase):
         self.assertIn("report-vulnerabilities.html", files)
         main, detail = files["report.html"], files["report-vulnerabilities.html"]
         prefix = "report-vulnerabilities.html#"
-        target = main.split(prefix, 1)[1].split('"', 1)[0]
-        self.assertIn(f'id="{target}"', detail)
+        targets = [remainder.split('"', 1)[0] for remainder in main.split(prefix)[1:]]
+        self.assertEqual(len(targets), 2)
+        for target in targets:
+            self.assertIn(f'href="{prefix}{target}" target="_blank" rel="noopener noreferrer"', main)
+            self.assertIn(f'id="{target}"', detail)
         self.assertGreaterEqual(detail.count("vulnerability-CVE-2024-0001-"), 2)
         self.assertIn("alpha", detail)
         self.assertIn("beta", detail)
