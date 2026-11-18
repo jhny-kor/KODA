@@ -25,6 +25,7 @@ import base64
 import difflib
 import hashlib
 import hmac
+import html
 import http.cookiejar
 import http.server
 import ipaddress
@@ -334,6 +335,19 @@ def crawl_web(
                 max_params=max_params, oob_host=oob_host, oob_confirmed=oob_confirmed,
                 intrusive=intrusive, exploit=exploit,
             ))
+            if not _is_static_asset(final_url):
+                # Hidden parameters: names the page reflects though no link used them.
+                discovered = _discover_params(final_url, page_opener, page_headers, timeout, body or b"")
+                if discovered:
+                    final_parts = urllib.parse.urlparse(final_url)
+                    query = urllib.parse.parse_qsl(final_parts.query, keep_blank_values=True)
+                    query += [(name, "1") for name in discovered]
+                    collected.extend(active_probe(
+                        urllib.parse.urlunparse(final_parts._replace(query=urllib.parse.urlencode(query))),
+                        page_opener, page_headers, timeout, target,
+                        max_params=max_params, oob_host=oob_host, oob_confirmed=oob_confirmed,
+                        intrusive=intrusive, exploit=exploit, only=frozenset(discovered),
+                    ))
         if active and body:
             # Opt-in active verification of this page's form fields (GET/POST).
             collected.extend(form_active_probe(final_url, body, page_opener, page_headers, timeout, target,
@@ -2334,6 +2348,86 @@ def _probe_response_headers(
         return None
 
 
+# Parameter discovery: common names plus names the page itself uses in links or
+# scripts, all sent in ONE request with a unique marker each.
+_COMMON_PARAMS = (
+    "id", "q", "query", "search", "s", "keyword", "page", "name", "user", "email",
+    "url", "redirect", "next", "return", "callback", "file", "path", "template",
+    "view", "lang", "debug", "format", "sort", "filter", "category", "type",
+)
+_PAGE_PARAM_RE = re.compile(r"[?&]([A-Za-z_][\w-]{0,30})=")
+_SEARCH_PARAMS_GET_RE = re.compile(r"""searchParams\s*\.\s*get\(\s*["']([A-Za-z_][\w-]{0,30})["']""")
+_MAX_DISCOVERY_NAMES = 30
+_MAX_DISCOVERED = 8
+
+
+def _discover_params(
+    url: str, opener: urllib.request.OpenerDirector, headers: Mapping[str, str], timeout: float, body: bytes | str
+) -> list[str]:
+    """Query parameter names the page reflects, though no link exposed them.
+
+    One request carries every candidate with its own marker (the trailing ``z``
+    keeps ``...1z`` from matching inside ``...10z``); a reflected marker shows the
+    value reaches the response, so the name is worth active testing.
+    """
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else (body or "")
+    parsed = urllib.parse.urlparse(url)
+    existing = set(urllib.parse.parse_qs(parsed.query, keep_blank_values=True))
+    mined = _PAGE_PARAM_RE.findall(text) + _SEARCH_PARAMS_GET_RE.findall(text)
+    names = [n for n in dict.fromkeys([*mined, *_COMMON_PARAMS]) if n not in existing][:_MAX_DISCOVERY_NAMES]
+    if not names:
+        return []
+    token = secrets.token_hex(3)
+    markers = {name: f"kd{token}{index}z" for index, name in enumerate(names)}
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True) + list(markers.items())
+    response = _probe_body(opener, urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query))), headers, timeout)
+    if not response:
+        return []
+    return [name for name, marker in markers.items() if marker in response][:_MAX_DISCOVERED]
+
+
+# Boolean-based blind SQL injection probes: (true suffix, false suffix). The
+# string-context pairs close a quote; the bare pair suits integer parameters.
+_SQL_BOOLEAN_PAIRS = (
+    ("' AND '1'='1", "' AND '1'='2"),
+    (" AND 1=1", " AND 1=2"),
+    ("' AND 1=1-- -", "' AND 1=2-- -"),
+)
+
+
+def _without_echo(body: str, payload: str) -> str:
+    """Drop an echoed payload (raw / HTML-escaped / URL-encoded) before comparing."""
+    for variant in {payload, html.escape(payload), html.escape(payload, quote=False), urllib.parse.quote(payload)}:
+        body = body.replace(variant, "")
+    return body
+
+
+def _boolean_blind_sqli(send: Callable[[str], str | None], original: str) -> str | None:
+    """Evidence when a true condition keeps the page and a false one changes it.
+
+    ``send(value)`` returns the body for that parameter value. The baseline is
+    fetched twice so a page that varies on its own is never read as injectable,
+    and the false condition must reproduce before anything is reported. A value
+    the server ignores (both conditions look like the baseline) or treats as a
+    literal (both differ) does not match.
+    """
+    base, again = send(original), send(original)
+    if not base or not again or not _responses_equivalent(base, again):
+        return None
+    for true_suffix, false_suffix in _SQL_BOOLEAN_PAIRS:
+        true_body, false_body = send(original + true_suffix), send(original + false_suffix)
+        if true_body is None or false_body is None:
+            continue
+        if not _responses_equivalent(_without_echo(true_body, original + true_suffix), base):
+            continue
+        if _responses_equivalent(_without_echo(false_body, original + false_suffix), base):
+            continue
+        repeat = send(original + false_suffix)
+        if repeat is not None and not _responses_equivalent(_without_echo(repeat, original + false_suffix), base):
+            return f"'{true_suffix.strip()}' kept the page while '{false_suffix.strip()}' changed it (reproduced)"
+    return None
+
+
 def _ssti_findings(
     send_value: Callable[[str], str | None], url: str, target: str, label: str,
 ) -> list[Finding]:
@@ -2384,8 +2478,12 @@ def active_probe(
     oob_confirmed: Callable[[str], bool] | None = None,
     intrusive: bool = False,
     exploit: bool = False,
+    only: frozenset[str] | None = None,
 ) -> list[Finding]:
     """Send bounded, non-destructive attack payloads to a URL's query params.
+
+    ``only`` limits probing to those parameter names (others stay as context) and
+    skips the per-URL header probes — used for parameters found by discovery.
 
     Verifies (not just guesses) reflected XSS, SSTI, error-based SQL injection,
     path traversal, and open redirect by observing the server's response. GET-only,
@@ -2408,7 +2506,7 @@ def active_probe(
     # The caller's opener is already policy-bound and configured not to follow
     # redirects.  Creating a fresh opener here would bypass NetworkContext.
     no_redirect_opener = opener
-    for name in list(params)[:max_params]:
+    for name in [n for n in params if only is None or n in only][:max_params]:
         original = params[name][0] if params[name] else ""
 
         # Reflected XSS: a unique marker with HTML-significant chars reflected raw.
@@ -2475,6 +2573,23 @@ def active_probe(
                         "Input change triggers a database error; SQL injection is likely",
                         url, target=target,
                         evidence=f"param '{name}': SQL error signature appeared only with a trailing quote",
+                        recommendation="Use parameterized queries / prepared statements; never build SQL from raw input.",
+                    )
+                )
+        else:
+            # Boolean-based blind SQL injection: when no error is shown, a true
+            # condition reproduces the page while a false one changes it.
+            evidence = _boolean_blind_sqli(
+                lambda value, nm=name: _probe_body(opener, _with_query_param(parsed, nm, value), headers, timeout),
+                original,
+            )
+            if evidence:
+                findings.append(
+                    _finding(
+                        "web.sql-injection-boolean-blind", "high",
+                        "Boolean-based blind SQL injection (true/false conditions change the response)",
+                        url, target=target,
+                        evidence=f"param '{name}': {evidence}",
                         recommendation="Use parameterized queries / prepared statements; never build SQL from raw input.",
                     )
                 )
@@ -2564,6 +2679,8 @@ def active_probe(
                     url, target, label, original,
                 ))
 
+    if only is not None:
+        return findings  # header probes already ran for this URL
     # Injection via request headers (reflected XSS / SSTI). One set per URL, not
     # per param, to cap noise: some apps echo Referer / X-Forwarded-For into the page.
     for header_name in _INJECTABLE_HEADERS:

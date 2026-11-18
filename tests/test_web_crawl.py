@@ -730,6 +730,112 @@ class LiveCrawlTests(unittest.TestCase):
         # Every request is slow but does not scale with the delay -> not injectable.
         self.assertFalse(web._delay_confirms(lambda sec: 5.0, big=3, small=1))
 
+    def _boolean_server(self, respond):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+                body = respond(value)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    _ROWS = "<table>" + "".join(f"<tr><td>user{i}</td><td>row {i} detail</td></tr>" for i in range(30)) + "</table>"
+
+    def _scan_ids(self, server):
+        base = f"http://127.0.0.1:{server.server_address[1]}/items?id=1"
+        findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, active=True)
+        return {f.rule_id for f in findings}
+
+    def test_boolean_blind_sqli_detected_without_error(self):
+        # WHERE id = '<value>': a false condition empties the result set, no error shown.
+        def respond(value):
+            false = "'1'='2" in value or "1=2" in value
+            return "<p>No rows</p>" if false else self._ROWS
+
+        server = self._boolean_server(respond)
+        try:
+            self.assertIn("web.sql-injection-boolean-blind", self._scan_ids(server))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_boolean_blind_not_flagged_for_literal_search(self):
+        # The value is matched literally: any suffix (true or false) finds nothing.
+        server = self._boolean_server(lambda value: self._ROWS if value == "1" else "<p>No rows</p>")
+        try:
+            self.assertNotIn("web.sql-injection-boolean-blind", self._scan_ids(server))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_boolean_blind_not_flagged_when_param_ignored(self):
+        server = self._boolean_server(lambda value: self._ROWS)
+        try:
+            self.assertNotIn("web.sql-injection-boolean-blind", self._scan_ids(server))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def _reflecting_server(self, reflected_param, page_extra=""):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                from urllib.parse import parse_qs, urlparse
+                value = (parse_qs(urlparse(self.path).query).get(reflected_param) or [""])[0]
+                body = f"<html>{page_extra}<p>Results for {value}</p></html>"  # unencoded
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def test_hidden_common_param_discovered_and_probed(self):
+        server = self._reflecting_server("q")
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/search"  # no query params
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, active=True)
+            hits = [f for f in findings if f.rule_id == "web.reflected-xss-verified" and "param 'q'" in f.evidence]
+            self.assertTrue(hits)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_param_name_mined_from_page_script(self):
+        script = '<script>const v = new URL(location.href).searchParams.get("debugmode");</script>'
+        server = self._reflecting_server("debugmode", page_extra=script)
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/app"
+            findings, _w, _p = web.crawl_web(base, max_pages=1, delay=0, active=True)
+            self.assertTrue([f for f in findings if "param 'debugmode'" in f.evidence])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_discovery_quiet_when_nothing_reflects(self):
+        server = self._reflecting_server("unused_param_not_in_lists")
+        try:
+            parsed_base = f"http://127.0.0.1:{server.server_address[1]}/static-page"
+            self.assertEqual(
+                web._discover_params(parsed_base, web.build_auth_opener(), {}, 5.0, "<html>plain</html>"), []
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_exploit_sqli_extracts_db_identity(self):
         class SqlLeak(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
