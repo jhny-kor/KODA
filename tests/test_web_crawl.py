@@ -836,6 +836,76 @@ class LiveCrawlTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def _dom_xss_scan(self, page_script, browser_behavior):
+        """Crawl a live page with a fake browser that models fragment handling."""
+        import html as _html
+        import re as _re
+        from urllib.parse import unquote
+
+        page = f"<html><body><div id=o></div><script>{page_script}</script></body></html>"
+        fragment_loads = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(page.encode())
+
+            def log_message(self, *args):
+                pass
+
+        def fake_render(url, **kwargs):
+            if "#" not in url:
+                return page, set(), [], ""
+            fragment_loads.append(url)
+            payload = unquote(url.split("#", 1)[1])
+            token = _re.search(r"setAttribute\('data-koda-dom-xss','([0-9a-f]+)'\)", payload)
+            runs = token and (
+                (browser_behavior == "html" and payload.startswith("<img"))
+                or (browser_behavior == "eval" and not payload.startswith("<"))
+            )
+            if runs:
+                return f'<html data-koda-dom-xss="{token.group(1)}"><body></body></html>', set(), [], ""
+            return f"<html><body><p>{_html.escape(payload)}</p></body></html>", set(), [], ""
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with patch.object(web, "_render_page", side_effect=fake_render):
+                findings, _w, _p = web.crawl_web(
+                    f"http://127.0.0.1:{server.server_address[1]}/app", max_pages=1, delay=0, active=True, render=True
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+        return {f.rule_id for f in findings}, fragment_loads
+
+    def test_dom_xss_html_sink_detected(self):
+        ids, _loads = self._dom_xss_scan(
+            "document.getElementById('o').innerHTML = decodeURIComponent(location.hash.slice(1));", "html"
+        )
+        self.assertIn("web.dom-xss", ids)
+
+    def test_dom_xss_eval_sink_detected(self):
+        ids, _loads = self._dom_xss_scan("eval(decodeURIComponent(location.hash.slice(1)));", "eval")
+        self.assertIn("web.dom-xss", ids)
+
+    def test_dom_xss_text_echo_not_flagged(self):
+        # Source and sink tokens exist (so the probe runs) but the value is only
+        # rendered as text: the token never lands on <html>.
+        ids, loads = self._dom_xss_scan(
+            "document.getElementById('o').textContent = location.hash; document.getElementById('o').innerHTML += '';",
+            "text",
+        )
+        self.assertTrue(loads)
+        self.assertNotIn("web.dom-xss", ids)
+
+    def test_dom_xss_probe_skipped_without_url_source(self):
+        ids, loads = self._dom_xss_scan("document.getElementById('o').innerHTML = 'static';", "html")
+        self.assertEqual(loads, [])
+        self.assertNotIn("web.dom-xss", ids)
+
     def test_exploit_sqli_extracts_db_identity(self):
         class SqlLeak(http.server.BaseHTTPRequestHandler):
             def do_GET(self):

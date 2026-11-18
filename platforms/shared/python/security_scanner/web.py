@@ -419,6 +419,24 @@ def crawl_web(
                 # stdlib requests keep the fresh session (bidirectional sync).
                 _merge_browser_cookies(page_opener, browser_cookies)
                 candidates.update(extra_urls)  # C/D: network + interaction URLs
+                if active and _has_dom_xss_candidate(rendered):
+                    dom_evidence = _dom_xss_probe(final_url, {
+                        "timeout": timeout,
+                        "extra_headers": page_headers,
+                        "cookies": _opener_cookies(page_opener),
+                        "allowed_origins": allowed,
+                        "network_context": network_context,
+                    })
+                    if dom_evidence:
+                        collected.append(_finding(
+                            "web.dom-xss", "high",
+                            "DOM-based XSS (a URL-fragment payload executes in the browser)",
+                            final_url, target=target, evidence=dom_evidence,
+                            recommendation=(
+                                "Never pass location / document.URL data to innerHTML, document.write or eval; "
+                                "use textContent and safe DOM APIs, and add a strict CSP."
+                            ),
+                        ))
             elif render_error and not render_warned:
                 warnings.append(render_error)
                 render_warned = True
@@ -2346,6 +2364,45 @@ def _probe_response_headers(
             exc.close()
     except (urllib.error.URLError, ssl.SSLError, socket.timeout, OSError):
         return None
+
+
+# DOM-based XSS: a client-side sink fed from the URL. The fragment (#...) never
+# reaches the server, so a hit here is distinct from reflected XSS.
+_DOM_SOURCE_RE = re.compile(
+    r"\b(?:location\s*\.\s*(?:hash|search|href)|document\s*\.\s*(?:URL|documentURI|location)|window\s*\.\s*name)\b"
+)
+# `innerHTML += x` appends markup just like `=`; `==` is a comparison, not a sink.
+_DOM_SINK_RE = re.compile(
+    r"\b(?:innerHTML|outerHTML|insertAdjacentHTML|document\s*\.\s*write(?:ln)?|eval|setTimeout|setInterval|Function)"
+    r"\s*(?:\(|\+?=(?!=))"
+)
+_DOM_XSS_ATTR = "data-koda-dom-xss"
+
+
+def _has_dom_xss_candidate(html_text: str) -> bool:
+    """Inline scripts show both a URL-derived source and an execution sink."""
+    scripts = " ".join(re.findall(r"<script\b[^>]*>(.*?)</script>", html_text, re.IGNORECASE | re.DOTALL))
+    return bool(_DOM_SOURCE_RE.search(scripts) and _DOM_SINK_RE.search(scripts))
+
+
+def _dom_xss_probe(url: str, render_kwargs: Mapping[str, object]) -> str | None:
+    """Load the page with each payload in the URL fragment and report one that ran.
+
+    A payload that executes marks ``<html>`` with a random token, so an echo of
+    the payload as plain text can never match. It reuses ``_render_page``, keeping
+    the browser inside the same origin / WebSocket / service-worker guards.
+    """
+    token = secrets.token_hex(6)
+    mark = f"document.documentElement.setAttribute('{_DOM_XSS_ATTR}','{token}')"
+    executed = re.compile(rf"<html\b[^>]*\b{_DOM_XSS_ATTR}=[\"']?{token}", re.IGNORECASE)
+    base = url.split("#", 1)[0]
+    for payload, kind in ((f"<img src=koda-dom-x onerror={mark}>", "HTML"), (mark, "script")):
+        rendered, _urls, _cookies, _error = _render_page(
+            f"{base}#{urllib.parse.quote(payload, safe='')}", **render_kwargs
+        )
+        if rendered and executed.search(rendered):
+            return f"a URL-fragment payload executed through a client-side {kind} sink (the fragment never reaches the server)"
+    return None
 
 
 # Parameter discovery: common names plus names the page itself uses in links or
