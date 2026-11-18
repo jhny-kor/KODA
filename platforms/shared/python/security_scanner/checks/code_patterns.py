@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from dataclasses import replace as _replace_finding
 from pathlib import Path
 
 from ..models import Finding, TargetConfig
 from .common import is_text_candidate, read_text_lines
+from .python_taint import HANDLED_RULES as _PY_TAINT_RULES
+from .python_taint import analyze_python
 
 
 CODE_EXTENSIONS = {
@@ -2316,7 +2319,64 @@ def check_file(path: Path, target: TargetConfig) -> list[Finding]:
                     )
                 )
                 per_rule_counts[rule.rule_id] = per_rule_counts.get(rule.rule_id, 0) + 1
+    if suffix == ".py":
+        findings = _apply_python_taint(path, lines, findings)
     return findings
+
+
+_AST_CONFIRMED_NOTE = (
+    "파이썬 구문 분석(AST)으로 외부 입력이 방어 처리 없이 위험 동작까지 전달되는 흐름을 확인했습니다."
+)
+
+
+def _apply_python_taint(path: Path, lines: list[str], findings: list[Finding]) -> list[Finding]:
+    """Reconcile line-pattern findings with the parser-based verdicts.
+
+    A finding is dropped only when the AST proves its sink argument clean
+    (sanitizer, numeric cast, allow-list guard, constant); it is confirmed — or
+    added — only when the AST proves a request-to-sink flow. Sinks the AST cannot
+    judge keep their existing verdict.
+    """
+    # Share the line engine's sanitizer vocabulary so the AST never re-flags a
+    # value this scanner already treats as neutralized (validateUrl, escapeLdap...).
+    result = analyze_python("\n".join(lines), extra_sanitizer=lambda name: bool(_SANITIZERS.search(name)))
+    if result is None:
+        return findings
+    kept: list[Finding] = []
+    confirmed: set[tuple[str, int | None]] = set()
+    for finding in findings:
+        key = (finding.rule_id, finding.line)
+        if finding.rule_id in _PY_TAINT_RULES and key in result.safe and key not in result.vulnerable:
+            continue
+        if key in result.vulnerable:
+            if finding.verification_status != "confirmed":
+                finding = _replace_finding(
+                    finding,
+                    verification_status="confirmed",
+                    verification_note=f"{_AST_CONFIRMED_NOTE} {result.vulnerable[key]}",
+                )
+            confirmed.add(key)
+        kept.append(finding)
+    for (rule_id, line), trace in sorted(result.vulnerable.items()):
+        if (rule_id, line) in confirmed or rule_id not in _RULE_BY_ID or not 0 < line <= len(lines):
+            continue
+        rule = _RULE_BY_ID[rule_id]
+        kept.append(
+            Finding(
+                rule_id=rule.rule_id,
+                category="code",
+                severity=rule.severity,
+                title=rule.title,
+                path=path,
+                line=line,
+                evidence=_trim_evidence(lines[line - 1].strip()),
+                description=rule.description,
+                recommendation=rule.recommendation,
+                verification_status="confirmed",
+                verification_note=f"{_AST_CONFIRMED_NOTE} {trace}",
+            )
+        )
+    return kept
 
 
 def _is_comment(line: str) -> bool:
