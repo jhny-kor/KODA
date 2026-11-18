@@ -220,6 +220,41 @@ nothing. Web-scan and net-scan findings are also correlated into higher-level
 `attack-path.*` findings (e.g. SSRF→metadata credential theft, exposed Docker API→
 host takeover) so end-to-end impact is prioritized.
 
+## Python source analysis and static/dynamic correlation
+
+Python files are judged by a parser-based (standard-library `ast`) taint engine on
+top of the line rules. It follows aliasing, f-strings, concat/`format`/`%`, values
+returned by helper functions, and import aliases, and it recognizes numeric casts,
+`shlex.quote`, `basename`/`secure_filename`, the scanner's validate*/escape*
+sanitizers, and allow-list or `re.fullmatch` guards. A line finding is dropped only
+when the engine proves the sink clean and confirmed only when it proves a request
+→ sink flow; anything it cannot judge keeps the line-engine result. Taint passed
+through a function *parameter* (e.g. a FastAPI route argument) is not tracked and
+stays a `needs_review` candidate.
+
+`tests/test_python_taint_bench.py` measures this on a labeled corpus, including a
+held-out set written after the engine (confirmed view: precision 1.00, recall 0.96;
+held-out F1 0.50 with the line rules alone → 0.95). Run it directly for the table:
+
+```bash
+python3 tests/test_python_taint_bench.py
+```
+
+`correlate` cross-confirms a source-scan report with a web-scan report. Findings
+that agree on a weakness (SQL injection, command / template injection, XSS, path
+traversal, SSRF, open redirect) are corroborated, and when the code file declares
+a route whose path matches the probed URL (Flask/FastAPI decorators, Django
+`path()`, Express) they are marked as the same endpoint — fix these first:
+
+```bash
+python3 -m security_scanner scan --target . --format json --output code.json
+python3 -m security_scanner web-scan --url https://staging.example.com --crawl --active --format json --output web.json
+python3 -m security_scanner correlate --source code.json --web web.json --language en
+```
+
+The report also lists static-only weaknesses (worth a targeted live test) and
+dynamic-only ones (live issue whose sink is not in this source tree).
+
 For a complete command list and current flags, run:
 
 ```bash
@@ -304,6 +339,20 @@ sends data-destroying payloads. Tune coverage with `--max-params` and
 `--max-form-fields`; set `--delay 0` for maximum throughput. See the
 [web-scan scanning tiers](security/WEB_AUDIT.md#web-scan-scanning-tiers) table for
 the full breakdown and when to escalate to `web-audit` or `zap-run --mode full`.
+
+The `--active` tier also:
+
+- tests **boolean-based blind SQL injection** when a quote shows no SQL error — it
+  reports only when a true condition reproduces the page and a false one changes it
+  (baseline fetched twice, false result reproduced, echoed payload ignored);
+- **discovers hidden parameters**: common names plus names the page uses in links
+  or scripts are sent in one request with unique markers, and any name the page
+  reflects is actively tested even though no link exposed it;
+- with `--render`, checks **DOM-based XSS** through the URL fragment on pages whose
+  inline scripts read `location`/`document.URL` and write to `innerHTML`,
+  `document.write`, `eval` and similar sinks. The browser stays inside the same
+  origin guards as rendering; sources that live only in external bundles are not
+  analyzed.
 
 `--crawl` defaults to 50 pages and depth 3; use `--max-pages` and `--max-depth`
 to adjust those budgets. KODA deduplicates URLs and applies a separate request

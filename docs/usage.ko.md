@@ -100,6 +100,19 @@ python3 -m security_scanner net-scan --host 10.0.0.10 --default-creds-url https:
 수 있습니다. 전체 단계표와 `web-audit`·`zap-run --mode full`로의 확대 기준은
 [web-scan 점검 단계](security/WEB_AUDIT.ko.md#web-scan-점검-단계티어)를 보세요.
 
+`--active` 단계는 추가로 다음을 점검합니다.
+
+- **Boolean 기반 블라인드 SQL 삽입**: 따옴표로 SQL 오류가 보이지 않을 때 참·거짓
+  조건을 비교합니다. 참 조건이 기준 페이지를 재현하고 거짓 조건만 응답을 바꿀 때만
+  보고합니다(기준 페이지 2회 수신, 거짓 결과 재현 확인, 반사된 페이로드 제외).
+- **숨은 파라미터 발견**: 공통 이름과 페이지의 링크·스크립트에서 쓰는 이름을 고유
+  마커와 함께 한 번의 요청으로 보내고, 페이지가 반사한 이름은 링크에 없어도 능동
+  점검합니다.
+- `--render`와 함께 쓰면 **DOM 기반 XSS**: 인라인 스크립트가 `location`/`document.URL`을
+  읽어 `innerHTML`·`document.write`·`eval` 등에 쓰는 페이지를 URL 프래그먼트로
+  점검합니다. 브라우저는 렌더링과 같은 origin 경계 안에서만 동작하며, 외부 번들에만
+  있는 source는 분석하지 않습니다.
+
 `--crawl`의 기본 상한은 50페이지·깊이 3이며 `--max-pages`와 `--max-depth`로
 조정할 수 있습니다. KODA는 중복 URL을 제거하고 별도의 요청 안전 한도를
 적용합니다. 페이지·깊이·요청 상한, 응답 읽기 제한, 렌더링 실패 때문에 확인하지
@@ -217,6 +230,38 @@ python3 -m security_scanner scan --target . --ai-triage --ai-remediate --llm-tim
 baseline 파일이 없으면 아무것도 숨기지 않습니다. web-scan/net-scan findings는
 상위 `attack-path.*`(예: SSRF→메타데이터 자격탈취, Docker API 노출→호스트 탈취)로
 상관되어 end-to-end 영향이 우선순위화됩니다.
+
+## Python 소스 분석과 정적·동적 교차확증
+
+Python 파일은 라인 룰 위에 구문 분석(표준 라이브러리 `ast`) 기반 taint 엔진으로
+판정합니다. 별칭, f-string, 문자열 결합/`format`/`%`, 보조 함수의 반환값, import
+별칭을 따라가고, 숫자 변환, `shlex.quote`, `basename`/`secure_filename`, 스캐너의
+validate*/escape* sanitizer, 허용 목록·`re.fullmatch` 가드를 인식합니다. 엔진이
+sink가 안전함을 증명할 때만 라인 finding을 제거하고, 요청 → sink 흐름을 증명할 때만
+확정합니다. 판단할 수 없는 경우는 라인 엔진 결과를 그대로 둡니다. 함수 *매개변수*로
+전달되는 taint(예: FastAPI 라우트 인자)는 추적하지 않으며 `needs_review` 후보로 남습니다.
+
+`tests/test_python_taint_bench.py`가 엔진 이후에 작성한 held-out 세트를 포함한 라벨
+코퍼스로 이를 측정합니다(확정 기준 precision 1.00, recall 0.96; held-out F1은 라인
+룰만 0.50 → 0.95). 표는 직접 실행해 확인합니다:
+
+```bash
+python3 tests/test_python_taint_bench.py
+```
+
+`correlate`는 소스 점검 보고서와 웹 점검 보고서를 교차확증합니다. 같은 약점(SQL 삽입,
+명령어·템플릿 삽입, XSS, 경로 조작, SSRF, 오픈 리다이렉트)으로 일치하는 finding은
+교차확증되고, 코드 파일이 선언한 라우트 경로가 점검 URL과 일치하면(Flask/FastAPI
+데코레이터, Django `path()`, Express) 동일 엔드포인트로 표시됩니다 — 우선 조치 대상입니다:
+
+```bash
+python3 -m security_scanner scan --target . --format json --output code.json
+python3 -m security_scanner web-scan --url https://staging.example.com --crawl --active --format json --output web.json
+python3 -m security_scanner correlate --source code.json --web web.json
+```
+
+보고서는 정적만 탐지된 약점(동적 재현 시험 권장)과 동적만 탐지된 약점(이 소스
+트리에서 sink 위치 미확인)도 함께 나열합니다.
 
 - [한국어 문서 인덱스](README.md)
 - [English CLI and local usage](usage.md)
