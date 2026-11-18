@@ -468,6 +468,28 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
 
+    if args.command == "correlate":
+        from .correlate import correlate as correlate_findings
+        from .correlate import load_findings, render_markdown
+
+        try:
+            result = correlate_findings(
+                load_findings(expand_path(args.source, Path.cwd())),
+                load_findings(expand_path(args.web, Path.cwd())),
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(f"Correlate error: {exc}", file=sys.stderr)
+            return 2
+        content = json_dumps(result) if args.format == "json" else render_markdown(result, language=args.language)
+        write_report(content, expand_path(str(args.output), Path.cwd()) if args.output else None)
+        s = result["summary"]
+        print(
+            f"Correlate: {s['corroborated']} corroborated weakness(es) "
+            f"({s['same_endpoint']} same endpoint), {s['static_only']} static-only, {s['dynamic_only']} dynamic-only.",
+            file=sys.stderr,
+        )
+        return 0
+
     if args.command == "manifest":
         from .manifest import (
             compare_manifest_to_target,
@@ -1392,6 +1414,15 @@ def build_parser() -> argparse.ArgumentParser:
     diff_reports.add_argument("--output", type=Path, help="diff report output path")
     diff_reports.add_argument("--format", choices=("markdown", "json"), default="markdown", help="diff report format")
     diff_reports.add_argument("--language", choices=("en", "ko"), default="ko", help="diff report language")
+
+    correlate_parser = subparsers.add_parser(
+        "correlate", help="cross-confirm a source-scan report with a web-scan report (same weakness / endpoint)"
+    )
+    correlate_parser.add_argument("--source", required=True, help="JSON report from `scan` (code findings)")
+    correlate_parser.add_argument("--web", required=True, help="JSON report from `web-scan` (live findings)")
+    correlate_parser.add_argument("--output", type=Path, help="correlation report output path")
+    correlate_parser.add_argument("--format", choices=("markdown", "json"), default="markdown", help="report format")
+    correlate_parser.add_argument("--language", choices=("en", "ko"), default="ko", help="report language")
 
     manifest = subparsers.add_parser("manifest", help="create or compare deployment file manifests")
     manifest_subparsers = manifest.add_subparsers(dest="manifest_command", required=True)
