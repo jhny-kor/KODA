@@ -113,6 +113,7 @@ class LinuxPortalStoreTests(unittest.TestCase):
         self.assertEqual(identity_from_headers(headers, TEST_GATEWAY_PROOF).display, "admin")
         with self.assertRaises(IdentityError):
             identity_from_headers(headers)
+
         with self.assertRaises(IdentityError):
             identity_from_headers({key: value for key, value in headers.items() if key != "X-KODA-Gateway-Proof"}, TEST_GATEWAY_PROOF)
         duplicated = Message()
@@ -124,6 +125,40 @@ class LinuxPortalStoreTests(unittest.TestCase):
         headers["X-KODA-Identity-Expires"] = "2000-01-01T00:00:00+00:00"
         with self.assertRaises(IdentityError):
             identity_from_headers(headers, TEST_GATEWAY_PROOF)
+
+    def test_discard_preserves_legacy_shared_input_file(self):
+        upload_root = Path(self.tmp.name) / "uploads"
+        upload_root.mkdir()
+        source = upload_root / "shared.py"
+        source.write_text("print(1)\n")
+        other = self.store.create_project("legacy path owner")
+        own_id = self.store.add_input(self.project, source.name, source)
+        other_id = self.store.add_input(other, source.name, source)
+        self.store.discard_input(own_id, project_id=self.project, actor=self.admin, upload_root=upload_root)
+        self.assertTrue(source.is_file())
+        self.assertEqual(Path(self.store.input(other_id)["path"]), source)
+        with self.assertRaises(KeyError):
+            self.store.input(own_id)
+
+    def test_source_coverage_keeps_counts_when_report_samples_are_limited(self):
+        from security_scanner.linux_portal import _analysis_stages
+        from security_scanner.reporting import _source_analysis_payload
+        from security_scanner.source_analysis import SourceAnalysisSummary, SourceManifest, StrategyExecution
+
+        paths = tuple(f"src/part{index:03}.py" for index in range(300))
+        manifest = SourceManifest(Path(self.tmp.name), (), "manifest-id", paths)
+        source = _source_analysis_payload(SourceAnalysisSummary(manifest=manifest, strategies=(
+            StrategyExecution("control", status="NOT_RUN", expected_files=paths),
+        )))
+        self.assertEqual(source["manifest"]["unhashed_file_count"], len(paths))
+        self.assertEqual(source["manifest"]["digest"], "manifest-id")
+        self.assertTrue(source["manifest"]["file_lists_truncated"])
+        self.assertLess(len(source["manifest"]["unhashed_files"]), len(paths))
+        self.assertEqual(source["strategies"][0]["expected_file_count"], len(paths))
+        self.assertFalse(source["strategies"][0]["negative_coverage_certified"])
+        stage = _analysis_stages({"source_analysis": source}, "source")["source"]
+        self.assertEqual(stage["status"], "warning")
+        self.assertIn("300", stage["warning"])
 
     def test_upload_quota_reservations_serialize_across_store_instances(self):
         root = Path(self.tmp.name) / "inputs"
@@ -530,9 +565,11 @@ class LinuxPortalStoreTests(unittest.TestCase):
         source = {key: value for key, value in first["snapshot"].items() if key in {
             "gitlab_mapping_id", "gitlab_project_id", "gitlab_commit_sha",
         }}
-        def create(_):
+        def create(index):
             store = PortalStore(Path(self.tmp.name) / "portal.sqlite3")
-            return store.create_scan(self.admin, self.project, self.input_id, "local", "all", source_snapshot=source)
+            return store.create_scan(self.admin, self.project, self.input_id, "local", "all", source_snapshot={
+                **source, "gitlab_commit_sha": f"{index:040x}",
+            })
         with ThreadPoolExecutor(max_workers=4) as pool:
             runs = list(pool.map(create, range(4)))
         self.assertEqual(sorted(run["snapshot"]["gitlab_result_version"] for run in runs), [2, 3, 4, 5])
@@ -1298,15 +1335,16 @@ class LinuxPortalHttpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             server = create_portal_server("127.0.0.1", 0, db_path=Path(root) / "portal.sqlite3",
                                           input_dir=Path(root) / "inputs", gateway_proof=TEST_GATEWAY_PROOF,
-                                          upload_quota_bytes=8)
+                                          upload_quota_bytes=16)
             server.portal_store.bootstrap(self.admin)
             project = server.portal_store.create_project("quota", self.admin)
+            other = server.portal_store.create_project("other-quota", self.admin)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                def upload(body):
+                def upload(body, project_id=project):
                     request = urllib.request.Request(
-                        f"http://127.0.0.1:{server.server_port}/koda/api/v1/projects/{project}/inputs?name=input.bin",
+                        f"http://127.0.0.1:{server.server_port}/koda/api/v1/projects/{project_id}/inputs?name=input.bin",
                         data=body, method="POST", headers={**self.headers(), "Content-Type": "application/octet-stream"},
                     )
                     try:
@@ -1341,6 +1379,22 @@ class LinuxPortalHttpTests(unittest.TestCase):
                     self.assertEqual(caught.exception.code, 502)
                     caught.exception.close()
                     self.assertEqual(download.call_args.kwargs["max_bytes"], 3)
+                self.assertEqual(upload(b"6789")[1]["code"], "upload_quota_exceeded")
+                other_status, other_upload = upload(b"12345678", other)
+                self.assertEqual(other_status, 201)
+                for project_id, expected in ((project, 404), (other, 200)):
+                    delete = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/koda/api/v1/projects/{project_id}/inputs/{other_upload['input_id']}",
+                        method="DELETE", headers=self.headers(),
+                    )
+                    if expected == 404:
+                        with self.assertRaises(urllib.error.HTTPError) as caught:
+                            urllib.request.urlopen(delete, timeout=10)
+                        self.assertEqual(caught.exception.code, expected)
+                        caught.exception.close()
+                    else:
+                        with urllib.request.urlopen(delete, timeout=10) as response:
+                            self.assertEqual(response.status, expected)
                 self.assertEqual(upload(b"6789")[1]["code"], "upload_quota_exceeded")
                 server.portal_store.discard_input(first["input_id"])
                 self.assertEqual(upload(b"6789")[0], 201)
@@ -1599,7 +1653,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual(saved["snapshot"]["gitlab_path_with_namespace"], "group/demo")
         self.assertEqual(saved["snapshot"]["tracker_service_id"], "service-1")
         before = set((Path(self.tmp.name) / "inputs").glob("*.tar.gz"))
-        with patch("security_scanner.linux_portal.resolve_gitlab_ref", return_value="a" * 40), patch(
+        with patch("security_scanner.linux_portal.resolve_gitlab_ref", return_value="b" * 40), patch(
             "security_scanner.linux_portal.download_gitlab_archive", side_effect=fake_download
         ), patch.object(self.server.portal_store, "add_input", side_effect=ValueError("database rejected input")):
             status, _ = self.request("/koda/api/v1/scans", method="POST", headers=self.headers(), payload={

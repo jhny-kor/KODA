@@ -235,7 +235,7 @@ def _next(store, worker_id):
                 row = store.schedule_run(lease["schedule_run_id"])
                 job = _public_job(json.loads(lease["context_json"]), row, lease["lease_token"])
             return {"settings": settings, "job": job}
-        if not settings["enabled"] or store.has_active_manual_work():
+        if not settings["enabled"]:
             return {"settings": settings, "job": None}
         targets = store.list_schedule_targets(enabled_only=True)
         now = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
@@ -269,14 +269,16 @@ def _next(store, worker_id):
             token = secrets.token_urlsafe(32)
             with store._db() as db:
                 db.execute("BEGIN IMMEDIATE")
-                if (store._manual_work_busy(db)
-                    or db.execute("SELECT 1 FROM scan_runs WHERE status IN ('running','cancelling')").fetchone()
-                    or db.execute("SELECT 1 FROM schedule_api_lease").fetchone()
-                    or db.execute("SELECT 1 FROM schedule_runs WHERE status IN ('running','cancelling')").fetchone()):
-                    db.execute("ROLLBACK")
+                current = db.execute("SELECT settings_json FROM schedule_worker_settings WHERE settings_id=1").fetchone()
+                if (not current or not json.loads(current[0]).get("enabled")
+                    or store._schedule_api_busy(db)
+                    or db.execute("SELECT 1 FROM schedule_runs WHERE status IN ('running','cancelling')").fetchone()
+                    or store._schedule_waits_for_manual(db, row["schedule_run_id"])):
+                    db.execute("COMMIT")
                     return {"settings": settings, "job": None}
                 db.execute("INSERT INTO schedule_api_lease VALUES(1,?,?,?,?)", (worker_id, token, row["schedule_run_id"], json.dumps(context)))
                 db.execute("UPDATE schedule_runs SET status='running',stage='collecting',cleanup_status='pending',mode=?,config_version=?,started_at=?,updated_at=? WHERE schedule_run_id=?", (row["mode"], row["config_version"], store._now(), store._now(), row["schedule_run_id"]))
+                db.execute("DELETE FROM schedule_turn WHERE schedule_run_id=?", (row["schedule_run_id"],))
                 db.execute("COMMIT")
             return {"settings": settings, "job": _public_job(context, store.schedule_run(row["schedule_run_id"]), token)}
         return {"settings": settings, "job": None}

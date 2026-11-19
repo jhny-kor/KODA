@@ -1,8 +1,7 @@
 """Bounded, read-only OpenSSH transport for scheduled inspections.
 
-The scheduler owns orchestration; this module owns the untrusted remote
-boundary.  It never invokes a remote script and never follows a local path
-outside the caller supplied destination.
+The scheduler owns orchestration. This module sends a fixed collection helper
+and bounds the remote output written to the caller supplied destination.
 """
 from __future__ import annotations
 
@@ -15,6 +14,7 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
+from importlib.resources import files as package_files
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Protocol
 
@@ -51,6 +51,12 @@ class RemoteCollector(Protocol):
 
 _HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:-]*\Z")
 _USER = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
+_REMOTE_HELPER = package_files(__package__).joinpath("_schedule_ssh_remote.py").read_text(encoding="utf-8")
+_REMOTE_PYTHON = (
+    "command -v python3 >/dev/null 2>&1 || { "
+    "printf '%s\\n' 'scheduled source collection requires Python 3.7 or later' >&2; exit 125; }; "
+)
+_STDERR_LIMIT = 64 * 1024
 _PERMANENT = (
     "permission denied", "authentication failed", "host key verification failed",
     "remote host identification has changed", "could not resolve hostname",
@@ -91,6 +97,26 @@ def _safe_relative_path(path: str) -> str:
     if ".." in parts or any(part in {"", "."} for part in parts):
         raise RemoteTransportError("invalid remote file path")
     return path
+
+
+def _validate_remote_root(root: str) -> str:
+    if not root.startswith("/") or any(ord(char) < 32 for char in root):
+        raise ValueError("remote directory must be an absolute path")
+    if ".." in root.split("/"):
+        raise ValueError("remote directory must not contain parent components")
+    return root
+
+
+def _collection_command(target: dict, operation: str, *arguments: str) -> list[str]:
+    root = _validate_remote_root(str(target.get("remote_directory", "")))
+    remote_command = _REMOTE_PYTHON + shlex.join(
+        ["exec", "python3", "-I", "-S", "-c", _REMOTE_HELPER, operation, root, *arguments]
+    )
+    return ["ssh", *_ssh_options(target), _remote_name(target), remote_command]
+
+
+def _retain_stderr(diagnostics: bytearray, chunk: bytes) -> None:
+    diagnostics.extend(chunk[:_STDERR_LIMIT - len(diagnostics)])
 
 
 def _excluded(path: str, patterns: Iterable[str]) -> bool:
@@ -173,7 +199,7 @@ class OpenSSHCollector:
                 if stream is not None:
                     stream.close()
 
-    def _read(self, process: subprocess.Popen, *, limit: int, timeout: float,
+    def _read(self, process: subprocess.Popen, diagnostics: bytearray, *, limit: int, timeout: float,
               cancel: Callable[[], bool] | None = None,
               on_chunk: Callable[[bytes], None] | None = None,
               retain: bool = True) -> bytes:
@@ -185,9 +211,8 @@ class OpenSSHCollector:
         streams = [stream]
         if error_stream is not None:
             streams.append(error_stream)
-        stderr_size = 0
         try:
-            while True:
+            while streams:
                 if cancel and cancel():
                     raise InterruptedError("scheduled collection cancelled")
                 remaining = deadline - self._clock()
@@ -209,47 +234,34 @@ class OpenSSHCollector:
                             if retain and len(output) > limit:
                                 raise RemoteLimitError("remote manifest output limit exceeded")
                     elif chunk:
-                        stderr_size += len(chunk)
-                        if stderr_size > 64 * 1024:
-                            # Keep draining, but never retain hostile diagnostics.
-                            stderr_size = 64 * 1024
-                    elif ready_stream in streams:
+                        _retain_stderr(diagnostics, chunk)
+                    else:
                         streams.remove(ready_stream)
-                if stream not in streams:
-                    break
             return bytes(output)
         except BaseException:
             self._stop(process)
             raise
 
-    def _finish(self, process: subprocess.Popen) -> None:
+    def _finish(self, process: subprocess.Popen, diagnostics: bytearray) -> None:
         code = process.wait(timeout=2)
-        stderr = b""
-        if process.stderr is not None:
-            stderr = process.stderr.read(64 * 1024) or b""
         if code:
-            message = stderr.decode("utf-8", "replace")[:1000]
-            error = RemotePermanentError(message) if any(x in message.lower() for x in _PERMANENT) else RemoteTransportError(message or f"ssh exited {code}")
-            raise error
+            message = diagnostics.decode("utf-8", "replace")[:1000].strip() or f"ssh exited {code}"
+            if code == 125 or any(marker in message.lower() for marker in _PERMANENT):
+                raise RemotePermanentError(message)
+            raise RemoteTransportError(message)
 
     def test_connection(self, target: dict) -> None:
         process = self._start(["ssh", *_ssh_options(target), _remote_name(target), "true"])
+        diagnostics = bytearray()
         try:
-            self._read(process, limit=4096, timeout=self._timeout(target))
-            self._finish(process)
+            self._read(process, diagnostics, limit=4096, timeout=self._timeout(target))
+            self._finish(process, diagnostics)
         finally:
             self._stop(process)
 
     def list_files(self, target: dict, *, cancel: Callable[[], bool] | None = None) -> list[RemoteFile]:
-        root = str(target.get("remote_directory", ""))
-        if not root.startswith("/") or any(c in root for c in "\x00\r\n"):
-            raise ValueError("remote directory must be an absolute path")
         excludes = [str(item).strip().strip("/") for item in target.get("exclude_paths", []) if str(item).strip()]
-        prune = ""
-        if excludes:
-            paths = " -o ".join(f"-path {shlex.quote(root.rstrip('/') + '/' + item)}" for item in excludes)
-            prune = f" \\( {paths} \\) -prune -o"
-        command_text = f"find -P {shlex.quote(root)}{prune} -type f -printf '%P\\t%s\\t%T@\\n'"
+        command = _collection_command(target, "list", *excludes)
         max_files = int(target.get("max_files", 200_000))
         files: list[RemoteFile] = []
 
@@ -280,13 +292,14 @@ class OpenSSHCollector:
                 partial[:] = rest
                 parse(line.rstrip(b"\r"))
 
-        process = self._start(["ssh", *_ssh_options(target), _remote_name(target), command_text])
+        process = self._start(command)
+        diagnostics = bytearray()
         try:
-            self._read(process, limit=self._manifest_limit(target), timeout=self._timeout(target),
+            self._read(process, diagnostics, limit=self._manifest_limit(target), timeout=self._timeout(target),
                        cancel=cancel, on_chunk=consume, retain=False)
+            self._finish(process, diagnostics)
             if partial:
                 parse(bytes(partial).rstrip(b"\r"))
-            self._finish(process)
         finally:
             self._stop(process)
         files.sort(key=lambda item: item.relative_path)
@@ -297,23 +310,10 @@ class OpenSSHCollector:
         relative = _safe_relative_path(remote_file.relative_path)
         if remote_file.size < 0:
             raise ValueError("invalid remote file size")
-        root = str(target.get("remote_directory", ""))
-        if not root.startswith("/") or any(c in root for c in "\x00\r\n"):
-            raise ValueError("remote directory must be absolute")
-        remote_path = root.rstrip("/") + "/" + relative
-        quoted_root, quoted_path = shlex.quote(root), shlex.quote(remote_path)
-        # Resolve both paths remotely and require the regular file to remain
-        # under the configured root.  `find -P` prevents directory traversal;
-        # this second check closes the final-file symlink/race window.
-        remote_command = (
-            f"root=$(realpath -e -- {quoted_root}) || exit 125; "
-            f"file=$(realpath -e -- {quoted_path}) || exit 125; "
-            f"case $file in $root/*) test ! -L {quoted_path} || exit 125; "
-            f"exec cat -- {quoted_path};; *) exit 125;; esac"
-        )
-        command = ["ssh", *_ssh_options(target), _remote_name(target), remote_command]
+        command = _collection_command(target, "fetch", relative)
         destination.parent.mkdir(parents=True, exist_ok=True)
         process = self._start(command)
+        diagnostics = bytearray()
         digest = hashlib.sha256()
         written = 0
         rate = int(target.get("transfer_rate_bytes_per_sec", os.environ.get("KODA_SCHEDULE_RATE_BYTES", 5 * 1024 * 1024)))
@@ -330,7 +330,7 @@ class OpenSSHCollector:
                 streams.append(error_stream)
             with destination.open("wb") as output:
                 deadline = self._clock() + self._timeout(target)
-                while True:
+                while streams:
                     if cancel and cancel():
                         raise InterruptedError("scheduled collection cancelled")
                     remaining = deadline - self._clock()
@@ -342,7 +342,9 @@ class OpenSSHCollector:
                     for ready_stream in ready:
                         chunk = os.read(ready_stream.fileno(), 64 * 1024)
                         if ready_stream is not stream:
-                            if not chunk and ready_stream in streams:
+                            if chunk:
+                                _retain_stderr(diagnostics, chunk)
+                            else:
                                 streams.remove(ready_stream)
                             continue
                         if not chunk:
@@ -367,9 +369,7 @@ class OpenSSHCollector:
                             if deadline - self._clock() <= 0:
                                 raise TimeoutError("remote file transfer timed out")
                             self._sleep(min(delay, 0.25))
-                    if stream not in streams:
-                        break
-            self._finish(process)
+            self._finish(process, diagnostics)
             if written != remote_file.size:
                 raise RemoteTransportError(f"remote file size changed: expected {remote_file.size}, got {written}")
             return digest.hexdigest()

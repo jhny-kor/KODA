@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import copy
+import hashlib
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "platforms" / "shared" / "python"))
@@ -43,6 +46,78 @@ class SourceAnalysisTests(unittest.TestCase):
             manifest = SourceManifest.build(root, files)
             self.assertEqual([entry[0] for entry in manifest.files], ["a.java", "b.java"])
             self.assertEqual(manifest.digest, SourceManifest.build(root, files).digest)
+
+    def test_manifest_hashes_with_bounded_reads_and_aggregate_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first, second = root / "First.java", root / "Second.java"
+            first.write_bytes(b"class First {}")
+            second.write_bytes(b"class Second {}")
+            real_fdopen = os.fdopen
+            sizes = []
+
+            class CheckedReader:
+                def __init__(self, source):
+                    self.source = source
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.source.close()
+
+                def fileno(self):
+                    return self.source.fileno()
+
+                def read(self, size):
+                    sizes.append(size)
+                    return self.source.read(size)
+
+            def bounded_open(*args, **kwargs):
+                return CheckedReader(real_fdopen(*args, **kwargs))
+
+            with patch("security_scanner.source_analysis.MAX_MANIFEST_BYTES", 20), \
+                    patch("security_scanner.source_analysis.MANIFEST_HASH_CHUNK_BYTES", 4), \
+                    patch("security_scanner.source_analysis.os.fdopen", side_effect=bounded_open):
+                manifest = SourceManifest.build(root, (second, first))
+            self.assertEqual(manifest.files, (("First.java", 14, hashlib.sha256(b"class First {}").hexdigest()),))
+            self.assertEqual(manifest.unhashed_files, ("Second.java",))
+            self.assertGreater(len(sizes), 1)
+            self.assertTrue(all(0 < size <= 4 for size in sizes))
+            self.assertEqual(sum(sizes), 14)
+
+    def test_oversized_source_file_is_not_reported_as_analyzed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Small.java").write_text("class Small {}", encoding="utf-8")
+            (root / "Large.java").write_text("class Large {}" + "\n" * 20, encoding="utf-8")
+            result = SecurityScanner(ScannerConfig(
+                targets=(TargetConfig("root", root, categories=("code",), max_file_size_bytes=24),),
+                standard="sw-dev-security-49",
+            )).scan()
+        self.assertEqual(result.source_analysis.manifest.unhashed_files, ("Large.java",))
+        self.assertTrue(any(warning.startswith("Source manifest omitted 1 file") for warning in result.warnings))
+        strategy = next(s for s in result.source_analysis.strategies
+                        if s.reason == "source_manifest_files_unhashed" and s.analyzed_files)
+        self.assertIn("Large.java", strategy.expected_files)
+        self.assertEqual(strategy.analyzed_files, ("Small.java",))
+        self.assertFalse(result.source_analysis.coverage_complete)
+
+    def test_manifest_counts_non_source_paths_when_bounding_the_walk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "one.bin").touch()
+            (root / "two.bin").touch()
+            with patch("security_scanner.source_analysis.MAX_MANIFEST_TREE_ENTRIES", 1):
+                with self.assertRaisesRegex(ConfigError, "inventory limit"):
+                    enumerate_source_files(root)
+
+    def test_manifest_missing_inventory_file_is_not_treated_as_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = SourceManifest.build(root, (root / "removed.java",))
+            self.assertEqual(manifest.files, ())
+            self.assertEqual(manifest.unhashed_files, ("removed.java",))
 
     def test_explicit_symlink_target_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

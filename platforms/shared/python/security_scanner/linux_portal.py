@@ -10,7 +10,6 @@ import hmac
 import io
 import json
 import os
-import queue
 import re
 import subprocess
 import threading
@@ -51,7 +50,7 @@ from .portal_integrations import (
     test_gitlab_configuration,
     test_gitlab_write_configuration,
 )
-from .portal_store import SCOPED_SCAN_PERMISSIONS, SCREEN_PERMISSIONS, PortalStore, UploadQuotaExceeded, VersionConflict
+from .portal_store import SCOPED_SCAN_PERMISSIONS, SCREEN_PERMISSIONS, PortalStore, ScanAdmissionError, UploadQuotaExceeded, VersionConflict
 from .tracker_subject_sync import TrackerSubjectSynchronizer, fetch_tracker_users
 from .portal_views import (
     PERMISSION_METADATA,
@@ -492,8 +491,13 @@ def _analysis_stages(result: dict, scan_scope: str = "all") -> dict[str, dict[st
         "library": {"library"},
         "source": {"source"},
     }.get(scan_scope, {"source", "library", "quality"})
+    source = {"status": "completed" if "source" in active_groups else "skipped", "finding_count": counts["source"]}
+    manifest = (result.get("source_analysis") or {}).get("manifest") or {}
+    omitted_count = manifest.get("unhashed_file_count", len(manifest.get("unhashed_files") or []))
+    if omitted_count and "source" in active_groups:
+        source.update(status="warning", warning=f"해시를 확인하지 못한 소스 파일 {omitted_count}개가 있어 점검 범위가 일부 제한됩니다.")
     return {
-        "source": {"status": "completed" if "source" in active_groups else "skipped", "finding_count": counts["source"]},
+        "source": source,
         "library": {
             "status": library_status if "library" in active_groups else "skipped",
             "finding_count": counts["library"],
@@ -513,7 +517,7 @@ class _PortalWorker:
         if role not in {"all", "scan", "delivery"}:
             raise ValueError("invalid portal worker role")
         self.store, self.role, self.isolated = store, role, isolated
-        self.jobs: queue.Queue[tuple[str, str] | None] = queue.Queue()
+        self.wakeup = threading.Event()
         self.stop_event = threading.Event()
         self.ready_event = threading.Event()
         self.thread = threading.Thread(target=self._work, name="koda-portal-worker-" + role, daemon=True)
@@ -526,7 +530,9 @@ class _PortalWorker:
     def enqueue(self, run_id: str) -> None:
         if not self.available:
             raise RuntimeError("scan worker unavailable")
-        self.jobs.put(("scan", run_id))
+        # SQLite owns the queue. Coalesce notifications so sustained work does
+        # not retain one in-memory entry per already-processed run.
+        self.wakeup.set()
 
     def _work(self) -> None:
         from .portal_worker import (ScanSupervisor, data_root, ensure_delivery_queue,
@@ -582,6 +588,7 @@ class _PortalWorker:
                 scheduled_check = 0
                 summary_check = 0
                 while not self.stop_event.is_set():
+                    self.wakeup.clear()
                     if self.role != "delivery":
                         run_id = self.store.next_queued_manual_run()
                         if run_id is not None:
@@ -602,12 +609,7 @@ class _PortalWorker:
                         # HTTP dashboard requests never build their summaries.
                         migrated = self.store.backfill_result_summaries(limit=1)
                         summary_check = time.monotonic() + (.25 if migrated else 30)
-                    try:
-                        job = self.jobs.get(timeout=.25)
-                    except queue.Empty:
-                        continue
-                    if job is None:
-                        break
+                    self.wakeup.wait(.25)
         finally:
             self.ready_event.clear()
             self.stop_event.set()
@@ -620,8 +622,8 @@ class _PortalWorker:
 
     def close(self) -> None:
         self.stop_event.set()
+        self.wakeup.set()
         if self.available:
-            self.jobs.put(None)
             self.thread.join(timeout=12 if self.isolated else 5)
 
 
@@ -871,7 +873,7 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
             safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(str(name)).name)[:180] or "input.bin"
             temporary = uploads / f".upload-{os.urandom(12).hex()}"
             target = uploads / f"{os.urandom(8).hex()}-{safe_name}"
-            reservation_id, _ = store.reserve_upload(uploads, temporary, target, length, upload_quota_bytes)
+            reservation_id, _ = store.reserve_upload(uploads, temporary, target, length, upload_quota_bytes, project_id=project_id)
             digest, remaining = hashlib.sha256(), length
             try:
                 with temporary.open("xb") as output:
@@ -1599,11 +1601,18 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                         mapping = store.gitlab_repository(payload.pop("gitlab_repository_id"), payload["project_id"])
                         ref_type, ref_name = payload.pop("ref_type"), payload.pop("ref_name")
                         commit_sha = resolve_gitlab_ref(mapping["gitlab_project_id"], ref_type, ref_name, gitlab_settings_dir)
+                        source_snapshot = {
+                            "gitlab_mapping_id": mapping["mapping_id"], "gitlab_project_id": mapping["gitlab_project_id"],
+                            "gitlab_ref_type": ref_type, "gitlab_ref_name": ref_name, "gitlab_commit_sha": commit_sha,
+                            "gitlab_instance_url": str(gitlab_configuration(gitlab_settings_dir).get("url") or "").rstrip("/"),
+                        }
+                        store.check_gitlab_scan_admission(**payload, source_snapshot=source_snapshot)
                         target = uploads / f"{os.urandom(16).hex()}.tar.gz"
                         input_id = ""
                         temporary = target.with_name("." + target.name + ".part")
                         reservation_id, allowance = store.reserve_upload(
                             uploads, temporary, target, MAX_INPUT_BYTES, upload_quota_bytes, exact=False,
+                            project_id=payload["project_id"],
                         )
                         try:
                             digest, _ = download_gitlab_archive(
@@ -1621,13 +1630,9 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                         finally:
                             store.release_upload(reservation_id)
                         payload["input_id"] = input_id
-                        payload["source_snapshot"] = {
-                            "gitlab_mapping_id": mapping["mapping_id"],
-                            "gitlab_project_id": mapping["gitlab_project_id"],
+                        payload["source_snapshot"] = source_snapshot | {
                             "gitlab_path_with_namespace": mapping["path_with_namespace"],
-                            "gitlab_ref_type": ref_type, "gitlab_ref_name": ref_name,
-                            "gitlab_commit_sha": commit_sha, "gitlab_archive_sha256": digest,
-                            "gitlab_instance_url": str(gitlab_configuration(gitlab_settings_dir).get("url") or "").rstrip("/"),
+                            "gitlab_archive_sha256": digest,
                             "gitlab_archive_root": archive_root,
                             "gitlab_default_branch": mapping["default_branch"],
                             "gitlab_fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -1879,6 +1884,8 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
                 return self._json(409, {"code": "version_conflict", "detail": str(exc)})
             except UploadQuotaExceeded:
                 return self._json(413, {"code": "upload_quota_exceeded", "max_bytes": upload_quota_bytes})
+            except ScanAdmissionError as exc:
+                return self._json(409 if exc.code == "scan_already_active" else 429, {"code": exc.code, "detail": str(exc)})
             except PermissionError:
                 return self._json(403, {"code": "forbidden"})
             except KeyError:
@@ -1897,6 +1904,20 @@ def create_portal_server(host="127.0.0.1", port=8765, language="ko", db_path=Non
             if not authenticated:
                 return
             identity, subject = authenticated
+            input_match = re.fullmatch(r"/koda/api/v1/projects/([0-9a-f-]+)/inputs/([0-9a-f-]+)", path)
+            if input_match:
+                project_id, input_id = input_match.groups()
+                if not self._project(identity, project_id, "input.manage"):
+                    return self._json(404, {"code": "not_found"})
+                try:
+                    store.discard_input(input_id, project_id=project_id, actor=identity.subject_id, upload_root=uploads)
+                    return self._json(200, {"ok": True})
+                except KeyError:
+                    return self._json(404, {"code": "not_found"})
+                except ValueError:
+                    return self._json(409, {"code": "input_in_use"})
+                except OSError:
+                    return self._json(503, {"code": "input_cleanup_unavailable"})
             server_match = re.fullmatch(r"/koda/api/v1/admin/server-connections/([A-Za-z0-9._-]+)", path)
             if server_match:
                 if not self._admin(subject):

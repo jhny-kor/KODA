@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import os
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Callable
 
@@ -11,11 +12,15 @@ from . import git_changes, reachability
 from .checks import code_patterns, configuration, dependencies, prevention, screen_quality, secrets
 from .checks.common import clear_read_text_cache, is_text_candidate, normalized_relpath, read_text_lines
 from .checks.host import HostScanOptions, check_host
+from .config import ConfigError
 from .dependency_inventory import components_from_file, queryable_osv_components, unique_components
 from .discovery import discover_projects
 from .ignore import filter_ignored_findings
 from .models import DependencyComponent, Finding, ScanResult, ScannerConfig, TargetConfig
-from .source_analysis import AnalyzerRun, SourceAnalysisSummary, SourceManifest, enumerate_source_files, is_source_file, source_languages
+from .source_analysis import (
+    MAX_MANIFEST_FILES, AnalyzerRun, SourceAnalysisSummary, SourceInventoryBudget,
+    SourceManifest, is_source_file, iter_source_files, source_languages,
+)
 from .sarif_import import SarifImportError, import_sarif, load_sarif
 from .osv_vulnerabilities import query_osv_findings
 
@@ -130,10 +135,14 @@ class SecurityScanner:
         sarif_warnings: tuple[str, ...] = ()
         manifest = None
         manifest_root = self.effective_targets[0].path if self.effective_targets else Path.cwd()
-        manifest_files: tuple[Path, ...] = ()
         if source_profile or self.config.source_analyzer or self.config.source_analyzer_sarif:
-            manifest_root, manifest_files = self._source_manifest_inputs()
-            manifest = SourceManifest.build(manifest_root, manifest_files)
+            manifest_root, file_byte_limits = self._source_manifest_inputs()
+            manifest = SourceManifest.build(manifest_root, file_byte_limits, file_byte_limits=file_byte_limits)
+            if manifest.unhashed_files:
+                self.warnings.append(
+                    f"Source manifest omitted {len(manifest.unhashed_files)} file(s) that exceeded "
+                    "the hashing budget, changed during hashing, or could not be read."
+                )
         if self.config.source_analyzer or self.config.source_analyzer_sarif:
             if self.config.source_analyzer_sarif:
                 try:
@@ -323,27 +332,33 @@ class SecurityScanner:
             self.warnings.append(f"Ignored {ignored} finding(s) using KODA ignore rules for: {target.path}")
         return filtered, components
 
-    def _source_manifest_inputs(self) -> tuple[Path, tuple[Path, ...]]:
-        paths = tuple(target.path.resolve() for target in self.effective_targets if not target.path.is_symlink())
-        if not paths:
+    def _source_manifest_inputs(self) -> tuple[Path, dict[Path, int]]:
+        targets = [(target, target.path.resolve()) for target in self.effective_targets if not target.path.is_symlink()]
+        if not targets:
             root = self.effective_targets[0].path.parent.resolve() if self.effective_targets else Path.cwd()
-            return root, ()
-        if len(paths) == 1 and paths[0].is_file():
-            return paths[0], paths if (is_source_file(paths[0]) or is_text_candidate(paths[0])) else ()
+            return root, {}
         roots: list[Path] = []
-        files: list[Path] = []
-        for path in paths:
-            if path.is_file():
-                roots.append(path.parent)
-                if is_source_file(path) or is_text_candidate(path):
-                    files.append(path)
-            else:
-                roots.append(path)
-                files.extend(item for item in enumerate_source_files(path, exclude=DEFAULT_EXCLUDE_DIRS) if is_source_file(item) or is_text_candidate(item))
-        if not roots:
-            return Path.cwd(), ()
-        common = Path(os.path.commonpath([str(path) for path in roots])).resolve()
-        return common, tuple(dict.fromkeys(files))
+        limits: dict[Path, int] = {}
+        inventory = SourceInventoryBudget()
+        for target, path in targets:
+            directory = path.is_dir()
+            roots.append(path if directory or len(targets) == 1 else path.parent)
+            # SW49 coverage uses whole-project context, even when the report
+            # displays changed findings only.
+            selected = None if self.config.standard == "sw-dev-security-49" else self._changed_files(target)
+            exclude_path = None
+            if directory and target.exclude_globs:
+                exclude_path = partial(self._matches_exclude, root=path, patterns=target.exclude_globs)
+            for item in iter_source_files(path, exclude=DEFAULT_EXCLUDE_DIRS,
+                                          exclude_path=exclude_path, budget=inventory):
+                if selected is not None and item not in selected:
+                    continue
+                if not (is_source_file(item) or is_text_candidate(item)):
+                    continue
+                limits[item] = max(limits.get(item, 0), target.max_file_size_bytes)
+                if len(limits) > MAX_MANIFEST_FILES:
+                    raise ConfigError(f"Source manifest file limit exceeded ({MAX_MANIFEST_FILES})")
+        return Path(os.path.commonpath(roots)).resolve(), limits
 
     @staticmethod
     def _merge_findings(findings: tuple[Finding, ...]) -> tuple[Finding, ...]:

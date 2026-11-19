@@ -1286,7 +1286,9 @@ def build_sw49_strategy_executions(
     """
     from .source_analysis import StrategyExecution, source_languages
 
-    files = tuple(entry[0] for entry in getattr(manifest, "files", ()))
+    hashed = tuple(entry[0] for entry in getattr(manifest, "files", ()))
+    unhashed = frozenset(getattr(manifest, "unhashed_files", ()))
+    files = tuple(sorted(set(hashed) | unhashed)) if unhashed else hashed
     selected_categories = set(scanned_categories)
     analyzer_by_name = {str(getattr(run, "analyzer", "")).lower(): run for run in analyzer_runs}
     strategies = []
@@ -1298,6 +1300,8 @@ def build_sw49_strategy_executions(
             if not control.supported_languages
             or any(language in control.supported_languages for language in source_languages(Path(path)))
         )
+        analyzed_files = tuple(path for path in applicable_files if path not in unhashed) if unhashed else applicable_files
+        manifest_incomplete = len(analyzed_files) < len(applicable_files)
         for strategy_id in row["required_strategies"]:
             definition = SW49_STRATEGY_REGISTRY[strategy_id]
             kind = definition["kind"]
@@ -1315,7 +1319,9 @@ def build_sw49_strategy_executions(
                     reason = "pre_generated_sarif_positive_only" if getattr(run, "output_origin", "") == "pre_generated" else "negative_rule_coverage_not_certified"
                     if sarif_warnings:
                         reason = "sarif_rule_coverage_incomplete"
-                strategies.append(StrategyExecution(official_id, language="Java", profile_id=str(definition["profile_id"] or ""), strategy=strategy_id, status=status, analyzer_run_id=str(getattr(run, "run_id", "")) if run else "", required_rule_ids=required_rules, expected_files=applicable_files, analyzed_files=applicable_files if status == "PARTIAL" else (), reason=reason, manifest_digest=str(getattr(manifest, "digest", ""))))
+                    if manifest_incomplete:
+                        reason = "source_manifest_files_unhashed"
+                strategies.append(StrategyExecution(official_id, language="Java", profile_id=str(definition["profile_id"] or ""), strategy=strategy_id, status=status, analyzer_run_id=str(getattr(run, "run_id", "")) if run else "", required_rule_ids=required_rules, expected_files=applicable_files, analyzed_files=analyzed_files if status == "PARTIAL" else (), reason=reason, manifest_digest=str(getattr(manifest, "digest", ""))))
                 continue
             if not required_rules:
                 status = "NOT_APPLICABLE" if control.supported_languages and not applicable_files else "NOT_RUN"
@@ -1325,7 +1331,10 @@ def build_sw49_strategy_executions(
             rules_selected = all(_rule_scanner_category(rule_id) in selected_categories for rule_id in required_rules)
             status = "PARTIAL" if rules_selected and applicable_files else ("NOT_RUN" if not rules_selected else "NOT_APPLICABLE")
             reason = "local_source_rules_are_partial" if status == "PARTIAL" else ("no_applicable_source_files" if status == "NOT_APPLICABLE" else "required_scanner_category_not_selected")
-            strategies.append(StrategyExecution(official_id, strategy=strategy_id, status=status, required_rule_ids=required_rules, present_rule_ids=required_rules if status == "PARTIAL" else (), requested_rule_ids=required_rules if status == "PARTIAL" else (), executed_rule_ids=required_rules if status == "PARTIAL" else (), expected_files=applicable_files, analyzed_files=applicable_files if status == "PARTIAL" else (), reason=reason, manifest_digest=str(getattr(manifest, "digest", ""))))
+            if status == "PARTIAL" and manifest_incomplete:
+                status = "PARTIAL" if analyzed_files else "NOT_RUN"
+                reason = "source_manifest_files_unhashed"
+            strategies.append(StrategyExecution(official_id, strategy=strategy_id, status=status, required_rule_ids=required_rules, present_rule_ids=required_rules if status == "PARTIAL" else (), requested_rule_ids=required_rules if status == "PARTIAL" else (), executed_rule_ids=required_rules if status == "PARTIAL" else (), expected_files=applicable_files, analyzed_files=analyzed_files if status == "PARTIAL" else (), reason=reason, manifest_digest=str(getattr(manifest, "digest", ""))))
     return tuple(strategies)
 
 

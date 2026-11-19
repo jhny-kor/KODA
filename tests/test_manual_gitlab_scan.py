@@ -208,15 +208,18 @@ class ManualGitLabModeHttpTests(unittest.TestCase):
         with patch.object(type(self.server.portal_worker), "available", new_callable=PropertyMock, return_value=True), \
              patch.object(self.server.portal_worker, "enqueue"), \
              patch("security_scanner.linux_portal.resolve_gitlab_ref", return_value="a" * 40) as resolve, \
-             patch("security_scanner.linux_portal.download_gitlab_archive", side_effect=fake_download):
-            for mode in ("changed", "full", None):
-                submitted = dict(payload)
-                if mode is not None:
-                    submitted["gitlab_scan_mode"] = mode
+             patch("security_scanner.linux_portal.download_gitlab_archive", side_effect=fake_download) as download:
+            for mode in ("changed", "full"):
+                submitted = {**payload, "gitlab_scan_mode": mode}
                 status, run = self.request("/koda/api/v1/scans", method="POST", headers=self.headers(analyst), payload=submitted)
                 self.assertEqual(status, 202, run)
                 saved = self.server.portal_store.run(run["run_id"])
-                self.assertEqual(saved["snapshot"]["requested_scan_mode"], mode or "full")
+                self.assertEqual(saved["snapshot"]["requested_scan_mode"], mode)
+            status, duplicate = self.request("/koda/api/v1/scans", method="POST", headers=self.headers(analyst), payload=payload)
+            self.assertEqual((status, duplicate["code"], download.call_count), (409, "scan_already_active", 2))
+            self.server.portal_store.complete_run(run["run_id"], result={"findings": []})
+            status, default_run = self.request("/koda/api/v1/scans", method="POST", headers=self.headers(analyst), payload=payload)
+            self.assertEqual((status, default_run["snapshot"]["requested_scan_mode"]), (202, "full"))
             resolve.reset_mock()
             for mode in ("", "invalid", None, [], True):
                 status, _ = self.request("/koda/api/v1/scans", method="POST", headers=self.headers(analyst), payload={**payload, "gitlab_scan_mode": mode})

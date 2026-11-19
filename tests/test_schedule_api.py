@@ -83,6 +83,7 @@ class ScheduleApiTests(unittest.TestCase):
         save_settings(self.store, {'enabled': False})
         self.assertIsNone(self.next())
         save_settings(self.store, {'enabled': True})
+        self.server.portal_worker.close()
         path = self.root / 'manual.py'
         path.write_text('print(1)')
         input_id = self.store.add_input(self.project, path.name, path)

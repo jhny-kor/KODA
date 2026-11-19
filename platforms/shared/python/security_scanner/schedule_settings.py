@@ -106,6 +106,8 @@ def save_settings(store, payload: dict, actor: str | None = None) -> dict:
             "ON CONFLICT(settings_id) DO UPDATE SET settings_json=excluded.settings_json,version=excluded.version,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
             (json.dumps(settings, sort_keys=True), version, now, actor),
         )
+        if not settings["enabled"]:
+            db.execute("DELETE FROM schedule_turn")
         store._audit_db(db, actor, "schedule_worker_settings.updated", None, {"version": version, "enabled": settings["enabled"]})
         db.execute("COMMIT")
         return settings | {"version": version, "updated_at": now}

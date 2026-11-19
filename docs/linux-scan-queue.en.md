@@ -14,9 +14,11 @@ Running an amd64 test image is separate from deploying an operational server.
   requests are skipped.
 - A started scheduled job owns the slot through collection, analysis, and source
   cleanup. Manual requests arriving during that job wait until cleanup finishes.
-- At the next dispatch, the existing manual-priority policy remains. Schedules run
-  in their existing due-time/configured order after the manual queue drains.
-  Continuous manual requests can delay schedules; this is not a combined FIFO.
+- Each project can have up to four active manual scans, including queued scans.
+  An identical request for the same input and settings is rejected while active.
+- When a ready scheduler requests its turn, previously admitted manual scans run
+  first. Later requests wait for the scheduled job. Manual scans resume after 120
+  seconds if the scheduler stops renewing its turn.
 - Disabling schedules prevents new scheduled jobs. A job that already owns the slot
   finishes; use cancellation to stop a current job.
 - Page reads, authentication, and ordinary uploads are not globally serialized.

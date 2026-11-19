@@ -7,7 +7,7 @@ import json
 import os
 import re
 import zipfile
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, fields, is_dataclass
 from functools import lru_cache
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -60,6 +60,26 @@ SEVERITY_SECURITY_SCORES = {
 _KODA_LOGO_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 5 6v5c0 4.6 2.8 8.2 7 10 4.2-1.8 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg>'
 
 
+def _source_file_lists(value: object, lists: dict[str, str]) -> dict:
+    data = dict(value) if isinstance(value, dict) else {field.name: getattr(value, field.name) for field in fields(value)}
+    for key, count_key in lists.items():
+        values = data.get(key)
+        if not isinstance(values, (tuple, list)):
+            continue
+        data.setdefault(count_key, len(values))
+        sample = []
+        remaining = 32 * 1024
+        for entry in values[:256]:
+            remaining -= len(json.dumps(_json_safe(entry), ensure_ascii=True)) + 1
+            if remaining < 0:
+                break
+            sample.append(entry)
+        if len(sample) < len(values):
+            data["file_lists_truncated"] = True
+        data[key] = sample
+    return data
+
+
 def _source_analysis_payload(value: object) -> dict[str, object]:
     """Serialize the immutable source-analysis summary without rebuilding it.
 
@@ -73,7 +93,7 @@ def _source_analysis_payload(value: object) -> dict[str, object]:
         if hasattr(value, "to_dict"):
             raw = value.to_dict()
         elif is_dataclass(value):
-            raw = asdict(value)
+            raw = {field.name: getattr(value, field.name) for field in fields(value)}
         elif isinstance(value, dict):
             raw = dict(value)
         elif hasattr(value, "__dict__"):
@@ -87,6 +107,16 @@ def _source_analysis_payload(value: object) -> dict[str, object]:
         report_findings = raw.pop("report_findings", ())
         raw["all_finding_count"] = len(all_findings) if isinstance(all_findings, (list, tuple)) else 0
         raw["report_finding_count"] = len(report_findings) if isinstance(report_findings, (list, tuple)) else 0
+        manifest = raw.get("manifest")
+        if is_dataclass(manifest) or isinstance(manifest, dict):
+            raw["manifest"] = _source_file_lists(manifest, {"files": "file_count", "unhashed_files": "unhashed_file_count"})
+        strategies = raw.get("strategies")
+        if isinstance(strategies, (tuple, list)):
+            raw["strategies"] = [
+                _source_file_lists(strategy, {"expected_files": "expected_file_count", "analyzed_files": "analyzed_file_count"})
+                if is_dataclass(strategy) or isinstance(strategy, dict) else strategy
+                for strategy in strategies
+            ]
     return _json_safe(raw) if isinstance(raw, dict) else {"value": str(raw)}
 
 

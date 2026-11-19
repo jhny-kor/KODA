@@ -10,6 +10,9 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 
+from .archive_input import BoundedZipFile, validate_zip_directory
+from .config import ConfigError
+
 
 ARCHIVE_SUFFIXES = (".jar", ".war", ".ear")
 MAX_COMPRESSION_RATIO = 1_000
@@ -201,15 +204,13 @@ def _walk_archive(
     artifacts.append(artifact)
     if artifact.archive_type not in {"jar", "war", "ear"}:
         return
-    if not _bounded_zip_directory(artifact.payload, budget.max_entries - budget.entries):
-        warnings.append(f"Archive central-directory limit exceeded: {artifact.location.display()}")
-        return
     try:
-        with zipfile.ZipFile(BytesIO(artifact.payload)) as archive:
+        source = BytesIO(artifact.payload)
+        if not validate_zip_directory(source, max_members=budget.max_entries - budget.entries,
+                                      max_metadata_bytes=MAX_CENTRAL_DIRECTORY_BYTES):
+            raise zipfile.BadZipFile("File is not a zip file")
+        with BoundedZipFile(source) as archive:
             members = archive.infolist()
-            if len(members) > budget.max_entries - budget.entries:
-                warnings.append(f"Archive entry limit exceeded: {artifact.location.display()}")
-                return
             budget.entries += len(members)
             for member in members:
                 if _unsafe_member(member):
@@ -267,21 +268,10 @@ def _walk_archive(
                     artifacts=artifacts,
                     warnings=warnings,
                 )
-    except (OSError, ValueError, zipfile.BadZipFile, EOFError) as exc:
+    except ConfigError:
+        warnings.append(f"Archive central-directory limit exceeded: {artifact.location.display()}")
+    except (OSError, ValueError, zipfile.BadZipFile, EOFError, NotImplementedError) as exc:
         warnings.append(f"Corrupt ZIP skipped: {artifact.location.display()}: {exc}")
-
-
-def _bounded_zip_directory(payload: bytes, remaining_entries: int) -> bool:
-    # ZipFile materializes the whole central directory before callers can inspect
-    # infolist(), so reject oversized metadata before constructing ZipFile.
-    tail = payload[-(65_535 + 22):]
-    marker = tail.rfind(b"PK\x05\x06")
-    if marker < 0 or len(tail) - marker < 22:
-        return True  # ZipFile will report a corrupt archive.
-    entries = int.from_bytes(tail[marker + 10:marker + 12], "little")
-    directory_bytes = int.from_bytes(tail[marker + 12:marker + 16], "little")
-    return (entries != 0xFFFF and directory_bytes != 0xFFFF_FFFF
-            and entries <= remaining_entries and directory_bytes <= MAX_CENTRAL_DIRECTORY_BYTES)
 
 
 def _is_java_archive_name(name: str) -> bool:

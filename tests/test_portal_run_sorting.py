@@ -28,7 +28,10 @@ class RunSortingTests(unittest.TestCase):
 
     def run_row(self, actor, project=None):
         project = project or self.project
-        return self.store.create_scan(actor, project, self.input_ids[project], 'local', 'all', 'source')
+        target = self.root / f'{uuid.uuid4()}.py'
+        target.write_text('print(1)')
+        input_id = self.store.add_input(project, target.name, target, actor)
+        return self.store.create_scan(actor, project, input_id, 'local', 'all', 'source')
 
     def test_owner_is_exact_and_filtered_before_count_and_pages(self):
         rows = [self.run_row(self.actor), self.run_row(self.other), self.run_row(self.actor)]

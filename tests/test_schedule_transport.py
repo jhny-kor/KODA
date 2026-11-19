@@ -1,3 +1,6 @@
+import hashlib
+import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -5,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from security_scanner.schedule_transport import (
-    OpenSSHCollector, RemoteFile, RemoteLimitError, RemoteTransportError,
+    OpenSSHCollector, RemoteFile, RemoteLimitError, RemotePermanentError, RemoteTransportError,
     _retryable_remote_error,
 )
 
@@ -21,6 +24,10 @@ def script_popen(script: str):
     def factory(_command, **kwargs):
         return __import__("subprocess").Popen([sys.executable, "-c", script], **kwargs)
     return factory
+
+
+def local_remote_shell(command, **kwargs):
+    return subprocess.Popen(["/bin/sh", "-c", command[-1]], **kwargs)
 
 
 def target(**extra):
@@ -63,9 +70,14 @@ class ScheduleTransportTests(unittest.TestCase):
         self.assertTrue(_retryable_remote_error(RuntimeError("Connection reset")))
 
     def test_remote_path_and_account_are_rejected_before_process_start(self):
-        collector = OpenSSHCollector(popen=child_popen(b""))
+        def unexpected_process(*args, **kwargs):
+            self.fail("invalid settings reached SSH")
+
+        collector = OpenSSHCollector(popen=unexpected_process)
         with self.assertRaises(ValueError):
             collector.list_files(target(username="bad;id"))
+        with self.assertRaises(ValueError):
+            collector.list_files(target(remote_directory="/srv/../app"))
         with self.assertRaises(RemoteTransportError):
             collector.fetch(target(), RemoteFile("../secret", 0, 1), Path("/tmp/nope"))
 
@@ -82,16 +94,66 @@ class ScheduleTransportTests(unittest.TestCase):
                 target(timeout_seconds=1), RemoteFile("a.txt", 10, 1), Path(tempfile.gettempdir()) / "koda-slow")
         self.assertLess(time.monotonic() - started, 2.5)
 
-    def test_excludes_are_or_pruned_in_remote_find_command(self):
-        commands = []
-        def factory(command, **kwargs):
-            commands.append(command[-1])
-            return __import__("subprocess").Popen(
-                [sys.executable, "-c", "import sys;sys.stdout.write('a.txt\\t1\\t1\\n')"], **kwargs)
-        OpenSSHCollector(popen=factory).list_files(target(exclude_paths=["build", "vendor"]))
-        self.assertIn("-o", commands[0])
-        self.assertIn("/srv/app/build", commands[0])
-        self.assertIn("/srv/app/vendor", commands[0])
+    def test_remote_helper_lists_and_fetches_literal_paths_and_prunes_excludes(self):
+        collector = OpenSSHCollector(popen=local_remote_shell)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / "checkout [one]'s"
+            source = root / "src" / "파일 one's.py"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"print('sample')\n")
+            for name in ("build", "vendor-1"):
+                ignored = root / name
+                ignored.mkdir()
+                (ignored / "unsupported\tname").touch()
+            settings = target(remote_directory=str(root) + "/./", exclude_paths=["build", "vendor-*"])
+            files = collector.list_files(settings)
+            self.assertEqual([item.relative_path for item in files], ["src/파일 one's.py"])
+            self.assertEqual(files[0].mtime, source.stat().st_mtime)
+            destination = root.parent / "copy"
+            digest = collector.fetch(settings, files[0], destination)
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            self.assertEqual(digest, hashlib.sha256(source.read_bytes()).hexdigest())
+
+    def test_remote_helper_skips_links_and_accepts_only_regular_fetches(self):
+        collector = OpenSSHCollector(popen=local_remote_shell)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / "checkout"
+            source = root / "src" / "data.txt"
+            source.parent.mkdir(parents=True)
+            source.write_text("sample", encoding="utf-8")
+            (root / "alias.txt").symlink_to(source)
+            (root / "alias-dir").symlink_to(source.parent, target_is_directory=True)
+            os.mkfifo(root / "pipe")
+            settings = target(remote_directory=str(root))
+            self.assertEqual([item.relative_path for item in collector.list_files(settings)], ["src/data.txt"])
+            destination = root.parent / "copy"
+            for name in ("alias.txt", "alias-dir/data.txt", "src", "pipe"):
+                with self.subTest(name=name):
+                    with self.assertRaises(RemotePermanentError):
+                        collector.fetch(settings, RemoteFile(name, 0, 0), destination)
+                    self.assertFalse(destination.exists())
+
+    def test_remote_helper_rejects_a_link_in_the_configured_root(self):
+        collector = OpenSSHCollector(popen=local_remote_shell)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "checkout" / "src"
+            source.mkdir(parents=True)
+            (root / "alias").symlink_to(source.parent, target_is_directory=True)
+            for path in (root / "alias", root / "alias" / "src"):
+                with self.subTest(path=path):
+                    settings = target(remote_directory=str(path))
+                    with self.assertRaises(RemotePermanentError):
+                        collector.list_files(settings)
+
+    def test_remote_helper_reports_missing_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def no_python(command, **kwargs):
+                return local_remote_shell(command, env={**os.environ, "PATH": directory}, **kwargs)
+
+            collector = OpenSSHCollector(popen=no_python)
+            with self.assertRaisesRegex(RemotePermanentError, "requires Python 3.7 or later"):
+                collector.list_files(target())
 
     def test_transfer_rate_is_enforced(self):
         started = time.monotonic()

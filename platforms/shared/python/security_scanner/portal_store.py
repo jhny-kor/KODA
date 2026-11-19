@@ -48,7 +48,15 @@ class UploadQuotaExceeded(ValueError):
     pass
 
 
+class ScanAdmissionError(ValueError):
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+
+
 MAX_UPLOAD_FILES = 10_000
+MAX_PROJECT_MANUAL_SCANS = 4
+SCHEDULE_TURN_SECONDS = 120  # The idle collector polls every 60 seconds.
 
 # Result blobs can contain many megabytes of source context. Metadata queries
 # deliberately name their columns so adding a result column never bloats them.
@@ -131,7 +139,7 @@ class PortalStore:
                   reservation_id TEXT PRIMARY KEY, root TEXT NOT NULL,
                   temporary_path TEXT NOT NULL, target_path TEXT NOT NULL,
                   reserved_bytes INTEGER NOT NULL, created_at TEXT NOT NULL,
-                  owner_lock INTEGER NOT NULL DEFAULT 0);
+                  owner_lock INTEGER NOT NULL DEFAULT 0, project_id TEXT);
                 CREATE TABLE IF NOT EXISTS rule_policies(
                   project_id TEXT NOT NULL, version INTEGER NOT NULL,
                   rules_json TEXT NOT NULL, hash TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -239,6 +247,10 @@ class PortalStore:
                   FOREIGN KEY(target_id) REFERENCES schedule_targets(target_id),
                   FOREIGN KEY(run_id) REFERENCES scan_runs(run_id));
                 CREATE INDEX IF NOT EXISTS idx_schedule_runs_target ON schedule_runs(target_id,scheduled_for DESC);
+                CREATE TABLE IF NOT EXISTS schedule_turn(
+                  slot INTEGER PRIMARY KEY CHECK(slot=1), schedule_run_id TEXT NOT NULL,
+                  manual_cutoff TEXT NOT NULL, expires_at TEXT NOT NULL,
+                  FOREIGN KEY(schedule_run_id) REFERENCES schedule_runs(schedule_run_id) ON DELETE CASCADE);
                 CREATE TABLE IF NOT EXISTS schedule_files(
                   target_id TEXT NOT NULL, relative_path TEXT NOT NULL, size INTEGER NOT NULL,
                   mtime REAL NOT NULL, sha256 TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -247,9 +259,15 @@ class PortalStore:
             )
             input_columns = {row[1] for row in db.execute("PRAGMA table_info(inputs)")}
             reservation_columns = {row[1] for row in db.execute("PRAGMA table_info(upload_reservations)")}
-            if "owner_lock" not in reservation_columns:
-                # Legacy reservations have no reliable owner liveness signal.
-                db.execute("ALTER TABLE upload_reservations ADD COLUMN owner_lock INTEGER NOT NULL DEFAULT 0")
+            if not {"owner_lock", "project_id"} <= reservation_columns:
+                db.execute("BEGIN IMMEDIATE")
+                reservation_columns = {row[1] for row in db.execute("PRAGMA table_info(upload_reservations)")}
+                if "owner_lock" not in reservation_columns:
+                    # Legacy reservations have no reliable owner liveness signal.
+                    db.execute("ALTER TABLE upload_reservations ADD COLUMN owner_lock INTEGER NOT NULL DEFAULT 0")
+                if "project_id" not in reservation_columns:
+                    db.execute("ALTER TABLE upload_reservations ADD COLUMN project_id TEXT")
+                db.execute("COMMIT")
             if "registered_by" not in input_columns:
                 db.execute("ALTER TABLE inputs ADD COLUMN registered_by TEXT")
                 for event in db.execute("SELECT subject_id,detail_json FROM audit_events WHERE action='input.created' ORDER BY id"):
@@ -270,8 +288,11 @@ class PortalStore:
                 "CREATE INDEX IF NOT EXISTS idx_scan_runs_visible_created ON scan_runs(deleted_at,created_at DESC);"
                 "CREATE INDEX IF NOT EXISTS idx_scan_runs_input_status ON scan_runs(input_id,status);"
                 "CREATE INDEX IF NOT EXISTS idx_scan_runs_status_created ON scan_runs(status,created_at);"
+                "CREATE INDEX IF NOT EXISTS idx_scan_runs_project_active ON scan_runs(project_id) "
+                "WHERE status IN ('queued','running','cancelling');"
                 "CREATE INDEX IF NOT EXISTS idx_schedule_runs_run ON schedule_runs(run_id);"
                 "CREATE INDEX IF NOT EXISTS idx_inputs_project_created ON inputs(project_id,created_at DESC);"
+                "CREATE INDEX IF NOT EXISTS idx_inputs_path ON inputs(path);"
                 "CREATE INDEX IF NOT EXISTS idx_memberships_subject ON memberships(subject_id,project_id);"
             )
             tracker_columns = {row[1] for row in db.execute("PRAGMA table_info(tracker_deliveries)")}
@@ -898,8 +919,9 @@ class PortalStore:
             raise ValueError("schedule target field is too long")
         if any(any(ord(char) < 32 for char in value) for value in (host, username, ssh_key_ref, known_hosts_file, remote_directory)):
             raise ValueError("schedule target fields contain an invalid control character")
-        if source_kind == "server" and not remote_directory.startswith("/"):
-            raise ValueError("remote directory must be an absolute path")
+        if source_kind == "server":
+            from .schedule_transport import _validate_remote_root
+            remote_directory = _validate_remote_root(remote_directory)
         if source_kind == "server" and (not Path(ssh_key_ref).expanduser().is_absolute() or not Path(known_hosts_file).expanduser().is_absolute()):
             raise ValueError("SSH key and known-hosts paths must be absolute")
         port = int(config.get("port", 22))
@@ -1222,9 +1244,10 @@ class PortalStore:
         now = self._now()
         with self._lock, self._db() as db:
             db.execute("BEGIN IMMEDIATE")
-            if (self._manual_work_busy(db) or self._schedule_api_busy(db)
-                or db.execute("SELECT 1 FROM scan_runs WHERE status IN ('running','cancelling') LIMIT 1").fetchone()):
-                db.execute("ROLLBACK")
+            if (self._schedule_api_busy(db)
+                or db.execute("SELECT 1 FROM schedule_runs WHERE status IN ('running','cancelling') LIMIT 1").fetchone()
+                or self._schedule_waits_for_manual(db, schedule_run_id)):
+                db.execute("COMMIT")
                 return False
             changed = db.execute(
                 "UPDATE schedule_runs SET status='running',stage='listing',run_id=NULL,files_total=0,"
@@ -1233,6 +1256,8 @@ class PortalStore:
                 "WHERE schedule_run_id=? AND status='queued' AND NOT EXISTS(SELECT 1 FROM schedule_runs WHERE status IN ('running','cancelling'))",
                 (now, now, str(schedule_run_id)),
             ).rowcount
+            if changed:
+                db.execute("DELETE FROM schedule_turn WHERE schedule_run_id=?", (str(schedule_run_id),))
             db.execute("COMMIT")
         return bool(changed)
 
@@ -1258,10 +1283,45 @@ class PortalStore:
             return self._manual_work_busy(db)
 
     @staticmethod
-    def _next_manual_run(db) -> str | None:
+    def _schedule_turn(db, now: str):
+        return db.execute(
+            "SELECT w.schedule_run_id,w.manual_cutoff FROM schedule_turn w JOIN schedule_runs r USING(schedule_run_id) "
+            "JOIN schedule_targets t USING(target_id) WHERE w.slot=1 AND w.expires_at>? AND r.status='queued' AND t.enabled=1",
+            (now,),
+        ).fetchone()
+
+    def _schedule_waits_for_manual(self, db, schedule_run_id: str) -> bool:
+        """Keep earlier manual requests ahead of a ready collector, then give it a turn."""
+        if not db.execute(
+            "SELECT 1 FROM schedule_runs r JOIN schedule_targets t USING(target_id) "
+            "WHERE r.schedule_run_id=? AND r.status='queued' AND t.enabled=1", (str(schedule_run_id),),
+        ).fetchone():
+            return True
+        now = self._now()
+        turn = self._schedule_turn(db, now)
+        if turn and turn["schedule_run_id"] != str(schedule_run_id):
+            return True
+        cutoff = turn["manual_cutoff"] if turn else now
+        waiting = db.execute(
+            "SELECT 1 FROM scan_runs WHERE (status IN ('running','cancelling') "
+            "OR (status='queued' AND cancel_requested=0 AND created_at<=? "
+            "AND json_extract(snapshot_json,'$.source_type') IS NOT 'scheduled_server')) LIMIT 1", (cutoff,),
+        ).fetchone()
+        if waiting:
+            expiry = (dt.datetime.fromisoformat(now) + dt.timedelta(seconds=SCHEDULE_TURN_SECONDS)).isoformat()
+            db.execute(
+                "INSERT INTO schedule_turn VALUES(1,?,?,?) ON CONFLICT(slot) DO UPDATE SET "
+                "schedule_run_id=excluded.schedule_run_id,manual_cutoff=excluded.manual_cutoff,expires_at=excluded.expires_at",
+                (str(schedule_run_id), cutoff, expiry),
+            )
+        return bool(waiting)
+
+    def _next_manual_run(self, db) -> str | None:
+        turn = self._schedule_turn(db, self._now())
+        cutoff = turn["manual_cutoff"] if turn else None
         rows = db.execute(
             "SELECT run_id,snapshot_json FROM scan_runs WHERE status='queued' AND cancel_requested=0 "
-            "ORDER BY created_at,rowid"
+            "AND (? IS NULL OR created_at<=?) ORDER BY created_at,rowid", (cutoff, cutoff),
         )
         for row in rows:
             if json.loads(row["snapshot_json"]).get("source_type") != "scheduled_server":
@@ -1458,9 +1518,11 @@ class PortalStore:
         return requested in permissions or (requested == LEGACY_PROJECT_PERMISSION and bool(permissions & SCREEN_PERMISSIONS))
 
     def reserve_upload(self, root: str | Path, temporary: str | Path, target: str | Path,
-                       maximum_bytes: int, quota_bytes: int, *, exact: bool = True) -> tuple[str, int]:
+                       maximum_bytes: int, quota_bytes: int, *, exact: bool = True,
+                       project_id: str | None = None) -> tuple[str, int]:
         """Reserve capacity before writing. The SQLite write lock serializes competing uploads."""
-        root = Path(root).resolve()
+        supplied_root = Path(root)
+        root = supplied_root.resolve()
         temporary, target = Path(temporary).resolve(), Path(target).resolve()
         if temporary.parent != root or target.parent != root or temporary == target:
             raise ValueError("upload paths must be direct children of the input directory")
@@ -1485,6 +1547,9 @@ class PortalStore:
             reservations = db.execute("SELECT * FROM upload_reservations WHERE root=?", (str(root),)).fetchall()
             reserved_paths = {path for row in reservations for path in (row["temporary_path"], row["target_path"])}
             used = sum(row["reserved_bytes"] for row in reservations)
+            project_reservations = [row for row in reservations if project_id is not None and row["project_id"] == project_id]
+            project_used = sum(row["reserved_bytes"] for row in project_reservations)
+            project_count = len(project_reservations)
             # Include legacy and orphan files; terminal inputs whose source was
             # deleted no longer consume disk. Active writes are charged at their
             # full reservation instead of their changing on-disk size.
@@ -1498,8 +1563,24 @@ class PortalStore:
                 file_count += 1
                 if file_count >= MAX_UPLOAD_FILES:
                     raise UploadQuotaExceeded("portal input file count quota exceeded")
-                used += path.stat().st_size
+                try:
+                    size = path.stat().st_size
+                except FileNotFoundError:
+                    file_count -= 1
+                    continue
+                used += size
+                if project_id is not None and db.execute(
+                    "SELECT 1 FROM inputs WHERE project_id=? AND path IN (?,?,?) LIMIT 1",
+                    (project_id, str(path), str(supplied_root / path.name), os.path.relpath(path)),
+                ).fetchone():
+                    project_count += 1
+                    project_used += size
             available = max(0, quota_bytes - used)
+            if project_id is not None:
+                # Keep half the shared byte and entry budgets available to other projects.
+                if project_count >= max(1, MAX_UPLOAD_FILES // 2):
+                    raise UploadQuotaExceeded("project input file count quota exceeded")
+                available = min(available, max(0, max(1, quota_bytes // 2) - project_used))
             allowance = maximum_bytes if exact else min(maximum_bytes, available)
             if allowance > available or allowance == 0:
                 raise UploadQuotaExceeded("portal input storage quota exceeded")
@@ -1510,9 +1591,9 @@ class PortalStore:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 db.execute(
                     "INSERT INTO upload_reservations"
-                    "(reservation_id,root,temporary_path,target_path,reserved_bytes,created_at,owner_lock) "
-                    "VALUES(?,?,?,?,?,?,1)",
-                    (reservation_id, str(root), str(temporary), str(target), allowance, self._now()),
+                    "(reservation_id,root,temporary_path,target_path,reserved_bytes,created_at,owner_lock,project_id) "
+                    "VALUES(?,?,?,?,?,?,1,?)",
+                    (reservation_id, str(root), str(temporary), str(target), allowance, self._now(), project_id),
                 )
                 db.execute("COMMIT")
             except BaseException:
@@ -1608,8 +1689,11 @@ class PortalStore:
         with self._lock, self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             if reservation_id:
-                reservation = db.execute("SELECT target_path FROM upload_reservations WHERE reservation_id=?", (reservation_id,)).fetchone()
-                if not reservation or reservation["target_path"] != str(path.resolve()):
+                reservation = db.execute("SELECT target_path,project_id,reserved_bytes FROM upload_reservations WHERE reservation_id=?", (reservation_id,)).fetchone()
+                path = path.resolve()
+                if (not reservation or reservation["target_path"] != str(path)
+                        or reservation["project_id"] not in (None, str(project_id))
+                        or path.stat().st_size > reservation["reserved_bytes"]):
                     raise ValueError("upload reservation does not match input")
             db.execute("INSERT INTO inputs(input_id,project_id,name,path,content_hash,created_at,registered_by) VALUES(?,?,?,?,?,?,?)", (input_id, str(project_id), name[:255], str(path), content_hash, self._now(), actor))
             self._audit_db(db, actor, "input.created", project_id, {"input_id": input_id, "name": name[:255], "sha256": content_hash})
@@ -1663,6 +1747,37 @@ class PortalStore:
             self._audit_db(db, actor, "rule_policy.updated", project_id, {"version": version})
             db.execute("COMMIT")
         return {"version": version, "hash": digest, "disabled_rules": json.loads(encoded)}
+
+    @staticmethod
+    def _check_scan_admission(db, project_id: str, snapshot: dict) -> None:
+        active = db.execute(
+            "SELECT snapshot_json FROM scan_runs WHERE project_id=? AND status IN ('queued','running','cancelling') "
+            "AND json_extract(snapshot_json,'$.source_type') IS NOT 'scheduled_server' LIMIT ?",
+            (project_id, MAX_PROJECT_MANUAL_SCANS),
+        ).fetchall()
+        options = ("scan_scope", "standard", "standard_category", "rule_policy_version", "source_type")
+        source_keys = (
+            ("gitlab_instance_url", "gitlab_mapping_id", "gitlab_commit_sha", "gitlab_ref_type", "gitlab_ref_name", "requested_scan_mode")
+            if snapshot.get("gitlab_mapping_id") else ("input_id",)
+        )
+        for row in active:
+            existing = json.loads(row["snapshot_json"])
+            if all(existing.get(field) == snapshot.get(field) for field in options + source_keys):
+                raise ScanAdmissionError("scan_already_active", "동일한 점검이 이미 대기 중이거나 실행 중입니다.")
+        if len(active) >= MAX_PROJECT_MANUAL_SCANS:
+            raise ScanAdmissionError("project_scan_queue_full", "프로젝트의 대기 및 실행 점검 수 한도에 도달했습니다.")
+
+    def check_gitlab_scan_admission(self, project_id: str, standard: str, standard_category: str,
+                                    scan_scope: str, gitlab_scan_mode: str, source_snapshot: dict) -> None:
+        """Reject already active requests before downloading, then recheck at admission."""
+        if scan_scope == "library":
+            standard, standard_category = "local", "all"
+        with self._db() as db:
+            policy = db.execute("SELECT max(version) FROM rule_policies WHERE project_id=?", (project_id,)).fetchone()
+            self._check_scan_admission(db, project_id, source_snapshot | {
+                "standard": standard, "standard_category": standard_category, "scan_scope": scan_scope,
+                "rule_policy_version": policy[0], "source_type": "manual_gitlab", "requested_scan_mode": gitlab_scan_mode,
+            })
 
     def create_scan(
         self,
@@ -1748,6 +1863,8 @@ class PortalStore:
                 if not mapping or snapshot.get("gitlab_project_id") != mapping["gitlab_project_id"]:
                     raise ValueError("invalid GitLab repository mapping for scan")
                 snapshot.update(source_type="manual_gitlab", requested_scan_mode=gitlab_scan_mode or "full")
+            self._check_scan_admission(db, str(project_id), snapshot)
+            if snapshot.get("gitlab_mapping_id"):
                 # Allocate under BEGIN IMMEDIATE; tombstoned runs still reserve
                 # their version so deletion/restart cannot reuse a result branch.
                 day = dt.datetime.fromisoformat(now).astimezone(dt.timezone(dt.timedelta(hours=9))).date()
@@ -2812,22 +2929,37 @@ class PortalStore:
         with self._lock, self._db() as db:
             self._audit_db(db, subject_id, action, None, detail)
 
-    def discard_input(self, input_id: str) -> None:
-        """Remove an unqueued input created while preparing a remote scan."""
+    def discard_input(self, input_id: str, *, project_id: str | None = None, actor: str | None = None,
+                      upload_root: Path | None = None) -> None:
+        """Remove an unused input without racing scan admission on another connection."""
         with self._lock, self._db() as db:
-            row = db.execute("SELECT path FROM inputs WHERE input_id=?", (str(input_id),)).fetchone()
-            if not row:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT path,project_id FROM inputs WHERE input_id=?", (str(input_id),)).fetchone()
+            if not row or (project_id is not None and row["project_id"] != project_id):
+                if project_id is not None:
+                    raise KeyError("input not found")
                 return
             if db.execute("SELECT 1 FROM scan_runs WHERE input_id=?", (str(input_id),)).fetchone():
                 raise ValueError("input is already used by a scan")
+            if row["path"]:
+                path = Path(row["path"])
+                resolved = path.resolve()
+                if upload_root is not None:
+                    if path.is_symlink() or resolved.parent != upload_root.resolve() or path.is_dir():
+                        raise KeyError("input not found")
+                shared = db.execute(
+                    "SELECT 1 FROM inputs WHERE input_id<>? AND path IN (?,?,?) LIMIT 1",
+                    (str(input_id), str(path), str(resolved), os.path.relpath(resolved)),
+                ).fetchone()
+                if not shared:
+                    if path.is_dir():
+                        shutil.rmtree(path, ignore_errors=False)
+                    else:
+                        path.unlink(missing_ok=True)
             db.execute("DELETE FROM inputs WHERE input_id=?", (str(input_id),))
-        if not row["path"]:
-            return
-        path = Path(row["path"])
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=False)
-        else:
-            path.unlink(missing_ok=True)
+            if actor is not None:
+                self._audit_db(db, actor, "input.discarded", row["project_id"], {"input_id": str(input_id)})
+            db.execute("COMMIT")
 
     def _audit_db(self, db, subject_id, action, project_id, detail) -> None:
         db.execute(

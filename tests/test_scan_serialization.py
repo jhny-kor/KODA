@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from security_scanner.linux_portal import _PortalWorker
-from security_scanner.portal_store import PortalStore
+from security_scanner.portal_store import MAX_PROJECT_MANUAL_SCANS, PortalStore, ScanAdmissionError
 from security_scanner.schedule_api import _ensure, _next
 from security_scanner.schedule_settings import save_settings
 
@@ -80,6 +80,34 @@ class ScanSerializationTests(unittest.TestCase):
         self.store.complete_run(winner['run_id'], result={'findings': []})
         self.assertTrue(self.other.mark_run_running(loser['run_id']))
 
+    def test_admission_serializes_duplicate_and_keeps_another_project_available(self):
+        source = self.root / 'shared.py'
+        source.write_text('print(1)\n')
+        input_id = self.store.add_input(self.project, source.name, source)
+
+        def submit(store):
+            try:
+                return store.create_scan(self.admin, self.project, input_id, 'local', 'all', 'source')['run_id']
+            except ScanAdmissionError as exc:
+                return exc.code
+
+        admitted = self.race(lambda: submit(self.store), lambda: submit(self.other))
+        self.assertEqual(admitted.count('scan_already_active'), 1)
+        for _ in range(MAX_PROJECT_MANUAL_SCANS - 1):
+            self.manual()
+        with self.assertRaises(ScanAdmissionError) as caught:
+            self.manual()
+        self.assertEqual(caught.exception.code, 'project_scan_queue_full')
+
+        other_project = self.store.create_project('independent')
+        other_source = self.root / 'independent.py'
+        other_source.write_text('print(2)\n')
+        other_input = self.other.add_input(other_project, other_source.name, other_source)
+        unrelated = self.other.create_scan(self.admin, other_project, other_input, 'local', 'all', 'source')
+        self.assertEqual(unrelated['status'], 'queued')
+        self.store.request_cancel(next(run for run in admitted if run != 'scan_already_active'))
+        self.assertEqual(self.manual()['status'], 'queued')
+
     def test_manual_claim_wins_over_schedule_when_manual_is_queued(self):
         scheduled, manual = self.scheduled(), self.manual()
         outcomes = self.race(
@@ -112,16 +140,38 @@ class ScanSerializationTests(unittest.TestCase):
         scheduled = self.scheduled()
         # Reproduce a second process accepting a manual request after the API's
         # initial manual-priority check, but before its lease transaction.
-        original = self.store.has_active_manual_work
+        from security_scanner.schedule_api import _job_context
+
         added = []
-        def arriving_manual():
-            prior = original()
+        def arriving_manual(*args):
             added.append(self.manual())
             self.assertTrue(self.other.mark_run_running(added[-1]['run_id']))
-            return prior
-        with patch.object(self.store, 'has_active_manual_work', side_effect=arriving_manual):
+            return _job_context(*args)
+        with patch('security_scanner.schedule_api._job_context', side_effect=arriving_manual):
             self.assertIsNone(_next(self.store, 'collector')['job'])
         self.assertEqual(self.store.schedule_run(scheduled['schedule_run_id'])['status'], 'queued')
+
+    def test_waiting_collector_gets_turn_before_later_manual_requests(self):
+        scheduled, first = self.scheduled(), self.manual()
+        self.assertIsNone(_next(self.store, 'collector')['job'])
+        later = self.manual()
+        self.assertTrue(self.other.mark_run_running(first['run_id']))
+        self.store.complete_run(first['run_id'], result={'findings': []})
+        self.assertFalse(self.other.mark_run_running(later['run_id']))
+        self.assertEqual(_next(self.store, 'collector')['job']['schedule_run_id'], scheduled['schedule_run_id'])
+        self.finish_schedule(scheduled)
+        self.assertTrue(self.other.mark_run_running(later['run_id']))
+
+    def test_expired_collector_turn_does_not_hold_manual_queue(self):
+        scheduled, first = self.scheduled(), self.manual()
+        self.assertFalse(self.other.claim_schedule_run(scheduled['schedule_run_id']))
+        later = self.manual()
+        self.assertTrue(self.store.mark_run_running(first['run_id']))
+        self.store.complete_run(first['run_id'], result={'findings': []})
+        self.assertFalse(self.store.mark_run_running(later['run_id']))
+        with self.store._db() as db:
+            db.execute("UPDATE schedule_turn SET expires_at='2000-01-01T00:00:00+00:00'")
+        self.assertTrue(self.store.mark_run_running(later['run_id']))
 
     def test_cancelled_queue_releases_priority_but_running_cancel_retains_slot(self):
         queued = self.manual()

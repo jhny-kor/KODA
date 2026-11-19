@@ -17,6 +17,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
+from .archive_input import open_bounded_tar
+from .config import ConfigError
 from .schedule_api import configured_json_bytes
 
 MAX_GITLAB_PROJECTS = 50_000
@@ -435,12 +437,12 @@ def resolve_gitlab_ref(project_id: int, ref_type: str, ref_name: str, settings_d
 def gitlab_archive_root(path: Path) -> str:
     """Return the top-level directory observed in GitLab's tar archive."""
     try:
-        with tarfile.open(path, mode="r:gz") as archive:
+        with open_bounded_tar(path, mode="r:gz") as archive:
             for member in archive:
                 parts = [part for part in str(member.name).split("/") if part]
                 if parts:
                     return parts[0]
-    except (OSError, tarfile.TarError) as exc:
+    except (OSError, tarfile.TarError, ConfigError) as exc:
         raise IntegrationError("GitLab 저장소 압축파일의 루트를 확인할 수 없습니다") from exc
     raise IntegrationError("GitLab 저장소 압축파일에 파일이 없습니다")
 

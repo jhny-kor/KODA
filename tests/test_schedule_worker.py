@@ -289,7 +289,11 @@ class ScheduleWorkerTests(unittest.TestCase):
         with patch.object(runner, "_disk_available", return_value=False), patch.object(runner, "_analyze") as analyze:
             self.assertEqual(runner.run_once(dt.datetime(2026, 9, 7, 2, tzinfo=dt.timezone(dt.timedelta(hours=9)))), [])
             analyze.assert_not_called()
-        with patch.object(self.store, "has_active_manual_work", return_value=True), patch.object(runner, "_analyze") as analyze:
+        path = Path(self.tmp.name) / 'pending-manual.py'
+        path.write_text('print(1)\n')
+        pending = self.store.add_input(self.project, path.name, path)
+        self.store.create_scan(self.admin, self.project, pending, 'local', 'all', 'source')
+        with patch.object(runner, "_analyze") as analyze:
             self.assertEqual(runner.run_once(scheduled_for="2026-09-07"), [])
             analyze.assert_not_called()
 

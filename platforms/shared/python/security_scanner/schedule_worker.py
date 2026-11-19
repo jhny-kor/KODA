@@ -63,8 +63,7 @@ def schedule_probe_target(payload: dict) -> dict:
         raise ValueError("schedule probe connection fields are required")
     if any(any(char in value for char in "\x00\r\n") for value in values.values()):
         raise ValueError("schedule probe fields contain an invalid control character")
-    if not values["remote_directory"].startswith("/"):
-        raise ValueError("remote directory must be an absolute path")
+    values["remote_directory"] = _validate_remote_root(values["remote_directory"])
     if not Path(values["ssh_key_ref"]).expanduser().is_absolute() or not Path(values["known_hosts_file"]).expanduser().is_absolute():
         raise ValueError("SSH key and known-hosts paths must be absolute")
     try:
@@ -95,6 +94,7 @@ def schedule_probe_target(payload: dict) -> dict:
 
 
 from .schedule_transport import (
+    _validate_remote_root,
     OpenSSHCollector, RemoteFile, RemoteCollector,
     _ssh_options as _ssh_options,
     _remote_name as _remote_name,
@@ -185,7 +185,7 @@ class ScheduleRunner:
             self.store.begin_schedule_run(target["target_id"], scheduled_for, self._mode(target, scheduled_for), target["config_version"])
         results = []
         for target in targets:
-            if self.store.has_active_manual_work() or self.store.has_active_schedule_work():
+            if self.store.has_active_schedule_work():
                 break
             if not self._disk_available(int(target["max_bytes"]) * 3):
                 break
@@ -193,6 +193,8 @@ class ScheduleRunner:
             if current and current["status"] in {"completed", "failed", "cancelled"}:
                 continue
             result = self.run_target(target, scheduled_for=scheduled_for)
+            if result["status"] == "queued":
+                break
             results.append(result)
             if result.get("started_at") and os.environ.get("KODA_SCHEDULE_NO_SLEEP") != "1":
                 self._sleep(float(os.environ.get("KODA_SCHEDULE_GAP_SECONDS", "30")))

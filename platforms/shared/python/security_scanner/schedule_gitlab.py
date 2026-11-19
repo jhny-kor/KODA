@@ -10,13 +10,13 @@ import hashlib
 import http.client
 import json
 import shutil
-import tarfile
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
+from .archive_input import IMPLICIT_DIRECTORY_ALLOWANCE, _reserve_nodes, open_bounded_tar
 from .schedule_api import API_PREFIX, _OPENER
 from .schedule_transport import RemoteFile, RemoteLimitError, RemotePermanentError, RemoteTransientError, RemoteTransportError, _safe_relative_path
 
@@ -112,19 +112,16 @@ class GitLabCollector:
         max_files = int(target.get("max_files", 200_000))
         max_bytes = int(target.get("max_bytes", 0))
         expanded = 0
-        entries = 0
         entry_limit = min(1_000_000, max(max_files + 1024, max_files * 2))
+        node_budget = {"nodes": 0}
         prefix = None
         root = None
         selected_seen = False
         self.hashes = {}
-        with tarfile.open(self._archive, mode="r|gz") as archive:
+        with open_bounded_tar(self._archive, mode="r:gz", max_members=entry_limit, max_bytes=max_bytes) as archive:
             for member in archive:
                 if cancel and cancel():
                     raise InterruptedError("scheduled collection cancelled")
-                entries += 1
-                if entries > entry_limit:
-                    raise RemoteLimitError("GitLab archive entry count limit exceeded")
                 name = str(member.name)
                 if not name or name.startswith("/") or "\\" in name:
                     raise RemoteTransportError("invalid GitLab archive member path")
@@ -154,6 +151,7 @@ class GitLabCollector:
                 if len(files) >= max_files:
                     raise RemoteLimitError("GitLab source file count limit exceeded")
                 destination = extracted / relative
+                _reserve_nodes(extracted, destination, node_budget, entry_limit + IMPLICIT_DIRECTORY_ALLOWANCE)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if shutil.disk_usage(self.cache_dir).free < int(target.get("min_free_bytes", 0) or 0) + size:
                     raise RemoteLimitError("local disk free-space limit exceeded")

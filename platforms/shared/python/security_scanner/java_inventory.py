@@ -8,7 +8,9 @@ from io import BytesIO
 from typing import Iterable
 from urllib.parse import quote
 
-from .java_archives import ArchiveArtifact, ArchiveScan
+from .archive_input import BoundedZipFile, validate_zip_directory
+from .config import ConfigError
+from .java_archives import DEFAULT_MAX_ENTRIES, MAX_CENTRAL_DIRECTORY_BYTES, ArchiveArtifact, ArchiveScan
 from .xml_safe import XmlInputError, parse_xml
 
 
@@ -23,6 +25,7 @@ class _MetadataLimit(Exception):
 @dataclass(slots=True)
 class _MetadataBudget:
     remaining: int = MAX_METADATA_TOTAL_BYTES
+    remaining_entries: int = DEFAULT_MAX_ENTRIES
 
     def read(self, archive: zipfile.ZipFile, name: str) -> bytes:
         limit = min(MAX_METADATA_MEMBER_BYTES, self.remaining)
@@ -103,7 +106,12 @@ def identify_archive(artifact: ArchiveArtifact, *, metadata_budget: _MetadataBud
     status = "unresolved"
     metadata_limited = False
     try:
-        with zipfile.ZipFile(BytesIO(artifact.payload)) as archive:
+        stream = BytesIO(artifact.payload)
+        if not validate_zip_directory(stream, max_members=metadata_budget.remaining_entries,
+                                      max_metadata_bytes=MAX_CENTRAL_DIRECTORY_BYTES):
+            raise zipfile.BadZipFile("File is not a zip file")
+        with BoundedZipFile(stream) as archive:
+            metadata_budget.remaining_entries -= len(archive.infolist())
             names = sorted(name for name in archive.namelist() if not name.endswith("/"))
             properties = next((name for name in names if _is_pom_properties(name)), None)
             if properties:
@@ -138,7 +146,9 @@ def identify_archive(artifact: ArchiveArtifact, *, metadata_budget: _MetadataBud
                             source, status = "manifest", "resolved"
                     except _MetadataLimit:
                         metadata_limited = True
-    except (OSError, ValueError, zipfile.BadZipFile, UnicodeError, XmlInputError, zlib.error):
+    except ConfigError:
+        metadata_limited = True
+    except (OSError, ValueError, zipfile.BadZipFile, UnicodeError, XmlInputError, zlib.error, NotImplementedError):
         source = "filename-unresolved"
 
     if status == "unresolved" and metadata_limited:
