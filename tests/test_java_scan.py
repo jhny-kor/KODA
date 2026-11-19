@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import io
+import re
 import socket
 import stat
 import subprocess
@@ -477,10 +478,12 @@ class JavaScanTests(unittest.TestCase):
         self.assertIn('class="final-version"', main_html)
         self.assertIn("최종 버전", main_html)
         self.assertIn('href="server-library-report.html"', detail_html)
-        self.assertRegex(
+        evidence_link = re.search(
+            r'class="vulnerability-report-link" href="server-vulnerability-details\.html#([^"]+)" target="_blank" rel="noopener noreferrer"',
             detail_html,
-            r'class="vulnerability-report-link" href="server-vulnerability-details\.html#[^"]+" target="_blank" rel="noopener noreferrer"',
         )
+        self.assertIsNotNone(evidence_link)
+        self.assertIn(f'id="{evidence_link[1]}"', vulnerability_details_html)
         self.assertIn("라이브러리 취약점 상세", detail_html)
         self.assertIn('class="library"', detail_html)
         self.assertIn("CVE 설명", detail_html)
