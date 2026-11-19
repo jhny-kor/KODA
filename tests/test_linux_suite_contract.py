@@ -640,6 +640,34 @@ KODA_RBAC_CATALOG_VERSION=koda-rbac-v1
         self.assertIn('error_page 500 = @koda_auth_unavailable;', api_location)
         self.assertNotIn('error_page 500 502 503 504 = @koda_auth_unavailable;', api_location)
 
+    def test_tracker_file_upload_routes_allow_at_least_five_minutes(self) -> None:
+        expected = {
+            '= /api/v1/sbom-runs': ('5122m', '600s', '600s', '1h'),
+            '= /api/v1/vulnerability-data-bundles/upload': ('2049m', '600s', '600s', '600s'),
+            '= /api/v1/compatibility-data/import': ('64065536', '300s', '300s', '300s'),
+            '= /api/v1/upgrade-batches/import': ('1m', '300s', '300s', '300s'),
+            '~ ^/api/v1/sbom-runs/[^/]+/vex-import$': ('64k', '300s', '300s', '300s'),
+            '= /api/v1/vulnerability-intelligence/import-csv': ('65m', '300s', '300s', '300s'),
+            '~ ^/api/v1/(package-metadata/import|vulnerability-intelligence/import)$': ('65m', '300s', '300s', '600s'),
+        }
+        for route, (size, body_timeout, send_timeout, read_timeout) in expected.items():
+            with self.subTest(route=route):
+                location = self.gateway.split(f'location {route} {{', 1)[1].split('\n    }', 1)[0]
+                self.assertIn(f'client_max_body_size {size};', location)
+                self.assertIn(f'client_body_timeout {body_timeout};', location)
+                self.assertIn(f'proxy_send_timeout {send_timeout};', location)
+                self.assertIn(f'proxy_read_timeout {read_timeout};', location)
+                self.assertIn('proxy_request_buffering off;', location)
+
+    def test_legacy_offline_intelligence_import_limits_body_and_retains_buffering(self) -> None:
+        location = self.gateway.split('location = /api/v1/offline-intelligence/import {', 1)[1].split('\n    }', 1)[0]
+        server = self.gateway.split('server {', 1)[1].split('location', 1)[0]
+        self.assertIn('client_max_body_size 501m;', server)
+        self.assertIn('client_max_body_size 64k;', location)
+        self.assertNotIn('proxy_request_buffering', location)
+        for directive in ('client_body_timeout', 'proxy_send_timeout', 'proxy_read_timeout'):
+            self.assertIn(f'{directive} 300s;', location)
+
     def test_gateway_proof_is_provisioned_and_overwrites_client_header(self) -> None:
         self.assertIn('proxy_set_header X-KODA-Gateway-Proof "";', self.gateway)
         self.assertEqual(self.gateway.count('proxy_set_header X-KODA-Gateway-Proof ${KODA_GATEWAY_PROOF};'), 3)

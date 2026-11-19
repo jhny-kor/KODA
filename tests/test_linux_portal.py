@@ -2050,7 +2050,7 @@ class LinuxPortalHttpTests(unittest.TestCase):
         self.assertEqual(self.server.portal_store.list_inputs(project_id)[0]["name"], "demo.zip")
         status, scan_page = self.request("/koda/scans/new", headers=self.headers())
         self.assertEqual(status, 200)
-        self.assertIn("최대 2 GiB", scan_page)
+        self.assertIn("최대 2 GB", scan_page)
         self.assertNotIn("최대 1 GB", scan_page)
         self.assertIn("application/octet-stream", scan_page)
         self.assertIn("/koda/api/v1/vulnerability-db", scan_page)
@@ -2237,13 +2237,20 @@ class LinuxPortalHttpTests(unittest.TestCase):
         target = Path(self.tmp.name) / "unsafe.py"
         target.write_text("password = 'secret'\n", encoding="utf-8")
         input_id = self.server.portal_store.add_input(project, target.name, target, self.admin)
-        run = self.server.portal_store.create_scan(self.admin, project, input_id, "local", "all")
+        run = self.server.portal_store.create_scan(self.admin, project, input_id, "local", "all", scan_scope="source")
         result = {
             "scan": {"path": target.name, "kind": "source", "standard": "local", "standard_category": "all"},
             "findings": [{"rule_id": "secret.literal", "title": "하드코딩된 비밀정보", "severity": "high", "category": "security", "path": target.name, "line": 1}],
             "components": [],
         }
         self.server.portal_store.complete_run(run["run_id"], result=result)
+
+        status, result_page = self.request(f"/koda/runs/{run['run_id']}", headers=self.headers())
+        self.assertEqual(status, 200)
+        self.assertIn("보고서 보기", result_page)
+        for label in ("CycloneDX 1.6", "SPDX 2.3 (JSON)", "국정원 NIS-SBOM 1.0 (CSV)"):
+            self.assertNotIn(f">{label}</a>", result_page)
+        self.assertIn(">Markdown</a>", result_page)
 
         request = urllib.request.Request(
             self.base + f"/koda/api/v1/runs/{run['run_id']}/report?format=html",
@@ -2292,6 +2299,8 @@ class LinuxPortalHttpTests(unittest.TestCase):
         status, result_page = self.request(f"/koda/runs/{run['run_id']}", headers=self.headers())
         self.assertEqual(status, 200)
         self.assertIn("라이브러리 취약점 보고서", result_page)
+        for label in ("CycloneDX 1.6", "SPDX 2.3 (JSON)", "국정원 NIS-SBOM 1.0 (CSV)"):
+            self.assertIn(f">{label}</a>", result_page)
         status, main = self.request(f"/koda/api/v1/runs/{run['run_id']}/report.html", headers=self.headers())
         self.assertEqual(status, 200)
         self.assertIn("Java 라이브러리 취약점 요약", main)
