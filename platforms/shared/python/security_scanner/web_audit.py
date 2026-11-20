@@ -2535,7 +2535,18 @@ def _zap_scenario_result(
 def _finding_control(rule_id: str) -> str | None:
     direct = {
         "web.reflected-xss-verified": "web.xss",
+        "web.xss-js-context": "web.xss",
+        "web.stored-xss": "web.xss",
         "web.sql-injection-error-verified": "web.sql-injection",
+        "web.sql-injection-time-blind": "web.sql-injection",
+        "web.sql-injection-exploited": "web.sql-injection",
+        "web.ssti-verified": "web.code-injection",
+        "web.ssti-exploited": "web.code-injection",
+        "web.command-injection-time-blind": "web.code-injection",
+        "web.command-injection-oob": "web.code-injection",
+        "web.command-injection-exploited": "web.code-injection",
+        "web.ssrf-oob-verified": "web.ssrf",
+        "web.ssrf-cloud-metadata": "web.ssrf",
         "web.path-traversal-lfi": "web.file-download",
         "web.form-missing-csrf-token": "web.csrf",
         "web.http-trace-enabled": "web.http-methods",

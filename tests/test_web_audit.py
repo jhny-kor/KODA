@@ -27,6 +27,7 @@ from security_scanner.web_audit import (
     approve_request,
     build_approval_request,
     canonical_json,
+    _finding_control,
     _finding_payload,
     _perform_authentication,
     _read_bounded,
@@ -820,6 +821,25 @@ class WebAuditTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(safe))
         self.assertNotIn("headers", safe)
         self.assertNotIn("raw", safe)
+
+    def test_verified_findings_map_to_their_kisa_control(self) -> None:
+        # Regression: high-severity active findings must credit their own
+        # control, not fall through to the web.information-disclosure catch-all.
+        cases = {
+            "web.xss-js-context": "web.xss",
+            "web.stored-xss": "web.xss",
+            "web.sql-injection-time-blind": "web.sql-injection",
+            "web.sql-injection-exploited": "web.sql-injection",
+            "web.ssti-verified": "web.code-injection",
+            "web.ssti-exploited": "web.code-injection",
+            "web.command-injection-time-blind": "web.code-injection",
+            "web.command-injection-oob": "web.code-injection",
+            "web.command-injection-exploited": "web.code-injection",
+            "web.ssrf-oob-verified": "web.ssrf",
+            "web.ssrf-cloud-metadata": "web.ssrf",
+        }
+        for rule_id, control_id in cases.items():
+            self.assertEqual(_finding_control(rule_id), control_id, rule_id)
 
     def test_explicit_not_applicable_is_preserved(self) -> None:
         profile = _profile("https://example.test")
