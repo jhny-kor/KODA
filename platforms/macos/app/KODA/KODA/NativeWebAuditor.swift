@@ -48,7 +48,7 @@ enum NativeWebAuditor {
                         completed = false; warnings.append("크롤 깊이 한도로 일부 발견 경로를 점검하지 못했습니다.")
                     }
                 }
-            } catch { note(error, context: "경로 점검 중단"); break }
+            } catch { note(error, context: "경로 점검 중단"); if WebAuditError.stopsRun(error) { break } }
         }
         if !queue.isEmpty { completed = false; warnings.append("페이지·깊이 한도로 일부 발견 경로를 점검하지 못했습니다.") }
 
@@ -76,7 +76,7 @@ enum NativeWebAuditor {
                         status: isBuiltin && rule.confirmed && differentiated ? .vulnerable : .needsReview,
                         endpoint: url.absoluteString,
                         evidence: "HTTP \(response.status); rule \(rule.id); negative control \(differentiated ? "different" : "not differentiated"); SHA256 \(digest(response.body))"))
-                } catch { note(error, context: "규칙 점검 중단"); break }
+                } catch { note(error, context: "규칙 점검 중단"); if WebAuditError.stopsRun(error) { break } }
             }
         }
 
@@ -94,7 +94,7 @@ enum NativeWebAuditor {
                         observations += NativeWebAuditRules.inspect(response: response)
                         observations += NativeWebAuditRules.inspectAPI(response: response,
                             isNegative: plan.invalidRequestIndices.contains(index), expectation: plan.responseExpectations[index])
-                    } catch { note(error, context: "API 검사 중단"); break }
+                    } catch { note(error, context: "API 검사 중단"); if WebAuditError.stopsRun(error) { break } }
                 }
                 if allowWrites {
                     for step in profile.apiWriteCleanup {

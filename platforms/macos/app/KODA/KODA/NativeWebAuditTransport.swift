@@ -171,9 +171,9 @@ actor WebAuditTransport {
         let now = ProcessInfo.processInfo.systemUptime
         let deadline = started + profile.limits.maxDuration - (isCleanup ? 0 : cleanupSeconds)
         let requestLimit = profile.limits.maxRequests - (isCleanup ? 0 : cleanupRequests)
-        guard now < deadline, metrics.requests < requestLimit else { throw WebAuditError.budget("requests or duration") }
+        guard now < deadline, metrics.requests < requestLimit else { throw WebAuditError.budgetExhausted("requests or duration") }
         let slot = max(now, nextSlot)
-        guard slot < deadline else { throw WebAuditError.budget("duration") }
+        guard slot < deadline else { throw WebAuditError.budgetExhausted("duration") }
         // Reserve both counters before the first suspension: concurrent callers cannot overspend.
         metrics.requests += 1
         nextSlot = slot + 1 / profile.limits.requestsPerSecond
@@ -181,7 +181,7 @@ actor WebAuditTransport {
         try Task.checkCancellation()
         guard !stopped else { throw WebAuditError.blocked("transport stopped") }
         let remaining = deadline - ProcessInfo.processInfo.systemUptime
-        guard remaining > 0 else { throw WebAuditError.budget("duration") }
+        guard remaining > 0 else { throw WebAuditError.budgetExhausted("duration") }
         let session: URLSession
         if let existing = sessions[actor] { session = existing }
         else {

@@ -217,14 +217,29 @@ struct WebAuditReport: Codable, Sendable {
 }
 
 enum WebAuditError: Error, LocalizedError {
-    case invalidProfile(String), blocked(String), budget(String), responseTooLarge, invalidResponse
+    case invalidProfile(String), blocked(String), budget(String), budgetExhausted(String), responseTooLarge, invalidResponse
     var errorDescription: String? {
         switch self {
         case .invalidProfile(let message): return "웹 프로필 오류: \(message)"
         case .blocked(let message): return "웹 요청 차단: \(message)"
         case .budget(let message): return "웹 점검 한도: \(message)"
+        case .budgetExhausted(let message): return "웹 점검 예산 소진: \(message)"
         case .responseTooLarge: return "응답 크기 한도 초과"
         case .invalidResponse: return "HTTP 응답을 확인할 수 없습니다."
+        }
+    }
+
+    // One request failing (per-request timeout, oversize payload, a network error,
+    // or a per-target policy block) lets the audit skip that target and keep
+    // scanning its other independent targets. Only global budget exhaustion, a
+    // stopped transport, or cancellation mean every later request would fail too,
+    // so those — and only those — stop the run.
+    static func stopsRun(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        switch error as? WebAuditError {
+        case .budgetExhausted: return true
+        case .blocked("transport stopped"): return true
+        default: return false
         }
     }
 }
