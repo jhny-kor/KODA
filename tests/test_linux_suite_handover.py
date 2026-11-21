@@ -258,8 +258,7 @@ class HandoverTests(unittest.TestCase):
                 with self.assertRaisesRegex(h.Failure, message):
                     host.recheck_legacy_gateway()
 
-    def test_legacy_migration_can_leave_a_finished_nonrestarting_grype_import_in_place(self):
-        env_file, runner = self.legacy_gateway_fixture()
+    def add_finished_grype_import(self, runner):
         importer = {
             'Id': 'id-grype', 'Name': '/koda-grype-db-import',
             'State': {'Running': False, 'Status': 'exited', 'ExitCode': 0, 'StartedAt': 'first'},
@@ -267,6 +266,64 @@ class HandoverTests(unittest.TestCase):
             'Mounts': [{'Type': 'volume', 'Name': 'qa-vuln-data', 'RW': True}],
         }
         runner.containers.append(importer)
+        return importer
+
+    def test_regular_handover_only_ignores_a_successful_inert_grype_import(self):
+        env_file = self.prefix / 'tracker/.env'
+        runner = FixtureRunner(self.prefix)
+        importer = self.add_finished_grype_import(runner)
+        host = h.Host(self.prefix, env_file, runner)
+        self.assertFalse(host.migrate_legacy_gateway_proof)
+        self.assertNotIn('id-grype', {container['id'] for container in host.original})
+        host.recheck_retired_grype_import()
+
+        rejected_states = (
+            ({'ExitCode': 1}, '정지'),
+            ({'Running': True, 'Status': 'running'}, '실행 중'),
+            ({'Restarting': True, 'Status': 'restarting'}, '재시작 중'),
+        )
+        for state, status in rejected_states:
+            with self.subTest(state=state), mock.patch.dict(importer['State'], state):
+                with self.assertRaisesRegex(h.Failure, rf'koda-grype-db-import \[{status}\]'):
+                    h.Host(self.prefix, env_file, runner)
+        with mock.patch.dict(importer['HostConfig']['RestartPolicy'], {'Name': 'always'}):
+            with self.assertRaisesRegex(h.Failure, r'koda-grype-db-import \[정지\]'):
+                h.Host(self.prefix, env_file, runner)
+        other_mount = {'Type': 'volume', 'Name': 'qa-tracker-artifacts', 'RW': True}
+        with mock.patch.dict(importer, {'Mounts': importer['Mounts'] + [other_mount]}):
+            with self.assertRaisesRegex(h.Failure, 'tracker-artifacts, vuln-data'):
+                h.Host(self.prefix, env_file, runner)
+        self.assertFalse(any(call[:2] in (['docker', 'stop'], ['docker', 'rm']) for call in runner.calls))
+
+    def test_regular_backup_cannot_complete_if_finished_grype_import_ran_again(self):
+        runner = FixtureRunner(self.prefix)
+        importer = self.add_finished_grype_import(runner)
+        host = h.Host(self.prefix, self.prefix / 'tracker/.env', runner)
+        original_run = runner.run
+
+        def backup_commands(args, **kwargs):
+            if args[:2] == ['docker', 'run']:
+                if kwargs.get('output') is not None:
+                    importer['State']['StartedAt'] = 'second'
+                return subprocess.CompletedProcess(args, 0, b'0\n', b'')
+            if args[:2] == ['docker', 'stop']:
+                self.assertNotEqual(args[-1], importer['Id'])
+                return subprocess.CompletedProcess(args, 0, b'', b'')
+            return original_run(args, **kwargs)
+
+        destination = self.root / 'backups'
+        with (mock.patch.object(runner, 'run', side_effect=backup_commands),
+              mock.patch.object(h, 'backup_postgres'),
+              mock.patch.object(h.shutil, 'disk_usage', return_value=mock.Mock(free=2 * 1024**3))):
+            with self.assertRaisesRegex(h.Failure, '반입 작업의 상태가 바뀌었습니다'):
+                h.backup_host(host, destination)
+        checkpoint, = destination.glob('*/checkpoint.json')
+        self.assertEqual(json.loads(checkpoint.read_text())['phase'], 'writers-stopped')
+        self.assertFalse((checkpoint.parent / 'manifest.sha256').exists())
+
+    def test_legacy_migration_can_leave_a_finished_nonrestarting_grype_import_in_place(self):
+        env_file, runner = self.legacy_gateway_fixture()
+        importer = self.add_finished_grype_import(runner)
         host = h.Host(self.prefix, env_file, runner, migrate_legacy_gateway_proof=True)
         self.assertNotIn('id-grype', {container['id'] for container in host.original})
         host.recheck_retired_grype_import()
@@ -596,7 +653,8 @@ class Cleaner:
 
     def test_failed_inner_preflight_stops_update_before_backup(self):
         args=self.signed_release(fail_preflight=True)
-        host=type('HostFixture',(),{'env':dict(os.environ),'runner':h.Runner(),'prefix':self.prefix,'env_file':self.prefix/'tracker/.env'})()
+        host=type('HostFixture',(),{'env':dict(os.environ),'runner':h.Runner(),'prefix':self.prefix,
+                                   'env_file':self.prefix/'tracker/.env','exited_grype_import':None})()
         with mock.patch.object(h.sys,'platform','linux'),mock.patch.object(h,'Host',return_value=host),mock.patch.object(h,'backup_host') as backup,contextlib.redirect_stderr(io.StringIO()):
             result=h.main(['update','--prefix',str(self.prefix),'--archive',str(args.archive),'--release-public-key',str(args.release_public_key)],host.runner)
         self.assertEqual(result,2); backup.assert_not_called()

@@ -426,7 +426,7 @@ SELECT json_build_object(
             else:
                 targets = shared_write_mounts(item, self.volumes, portal_data)
                 if targets:
-                    if self.migrate_legacy_gateway_proof and retired_grype_import(item, targets):
+                    if retired_grype_import(item, targets):
                         identity = stopped_container_identity(item)
                         if self.exited_grype_import is None:
                             self.exited_grype_import = identity
@@ -623,8 +623,7 @@ def backup_host(host, root, *, hold=False):
             with (folder/(key+'.tar.gz')).open('xb') as output:
                 os.fchmod(output.fileno(),0o600)
                 host.runner.run(host.volume_command(host.volumes[key],cache=key=='tracker-artifacts'),env=host.env,output=output)
-        if host.migrate_legacy_gateway_proof:
-            host.recheck_retired_grype_import()
+        host.recheck_retired_grype_import()
         checkpoint.update(phase='complete',databaseName=database,databaseUser=username,
                           stopped=stopped,criticalHashes=host.critical)
         private_json(folder/'checkpoint.json',checkpoint)
@@ -778,7 +777,7 @@ def main(argv=None,runner=None):
         else:
             host=Host(args.prefix,args.env_file or args.prefix/'tracker/.env',runner,
                       migrate_legacy_gateway_proof=args.migrate_legacy_gateway_proof)
-            if args.migrate_legacy_gateway_proof and host.exited_grype_import:
+            if host.exited_grype_import:
                 print('기존 Grype 반입 작업은 정상 종료됐고 자동 재시작이 꺼져 있습니다. 컨테이너 기록을 보존합니다.',flush=True)
             if args.migrate_legacy_gateway_proof and not args.retire_dependency_track and host.dependency_track_removal_targets():
                 detail = ('이 반입본이 제거하는 기존 Dependency-Track 리소스가 있습니다. '
