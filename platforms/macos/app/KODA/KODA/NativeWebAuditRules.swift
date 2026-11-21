@@ -27,7 +27,8 @@ enum NativeWebAuditRules {
         if response.url.scheme == "http" {
             add("passive.http", "web.plaintext-transmission", "평문 HTTP 응답", "HTTP 응답을 관측했습니다. 민감정보 전달 여부를 확인하세요.")
         }
-        if html && response.status < 400 {
+        // Page-protection headers matter on rendered pages, not on redirect hops.
+        if html && (200..<300).contains(response.status) {
             if response.header("content-security-policy").isEmpty {
                 add("passive.csp", "web.xss", "Content-Security-Policy 미관측", "HTML 응답에 CSP 헤더가 없습니다. XSS 발생을 입증하지 않습니다.")
             }

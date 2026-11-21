@@ -36,6 +36,16 @@ enum NativeWebAuditor {
             do {
                 let response = try await transport.send(WebAuditRequest(url: url), actor: "primary")
                 observations += NativeWebAuditRules.inspect(response: response)
+                // The transport never follows redirects; the crawler does, but only inside the profile's scope.
+                if (300..<400).contains(response.status), let location = URL(string: response.header("location"), relativeTo: url)?.absoluteURL {
+                    if withinScope(location, profile: profile) {
+                        if !visited.contains(location.absoluteString) { queue.insert((location, depth), at: 0) }
+                    } else {
+                        completed = false
+                        warnings.append("\(url.absoluteString) 응답이 점검 범위 밖(\(location.absoluteString))으로 리다이렉트되어 따라가지 않았습니다. 대상 URL을 이동한 주소로 지정하세요.")
+                    }
+                    continue
+                }
                 if profile.active {
                     var targets = NativeWebAuditRules.queryTarget(url).map { [$0] } ?? []
                     if corsChecked.insert(url.path).inserted {

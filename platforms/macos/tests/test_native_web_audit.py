@@ -179,6 +179,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 computed = re.sub(r"\{\{(\d{1,4})\*(\d{1,4})\}\}",
                                   lambda match: str(int(match[1]) * int(match[2])), value)
                 self.reply(text="<html><body>" + computed + "</body></html>")
+        elif path == "/hop":
+            self.reply(302, "moved", {"Location": "/deep"})
         elif path.startswith("/deep"):
             self.deep(path, query, body)
         elif path == "/marker":
@@ -444,6 +446,14 @@ class NativeWebAuditTests(unittest.TestCase):
         self.assertFalse(any(item["method"] == "POST" for item in requests), requests)
         self.assertFalse(report["completed"])
         self.assertTrue(any("POST 폼 1개" in warning for warning in report["warnings"]), report["warnings"])
+
+    def test_entry_redirect_is_followed_inside_scope(self):
+        profile = self.deep_profile()
+        profile["target"] = self.url + "/hop"
+        report, _ = self.audit(profile)
+        paths = {urlsplit(item["endpoint"]).path for item in report["observations"]
+                 if item["ruleID"] == "active.path-traversal"}
+        self.assertEqual(paths, {"/deep/view"}, report)
 
     def test_post_forms_are_probed_only_with_state_change_approval(self):
         report, _ = self.audit(self.deep_profile(allowStateChanges=True,
