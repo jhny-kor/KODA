@@ -17,6 +17,7 @@ final class NativeWebAuditViewModel: ObservableObject {
     @Published var reportURL: URL?
     @Published var requestLimit = 300
     @Published var timeLimit = 120
+    @Published var requestTimeout = 10
     private var imported: WebAuditProfile?
     private var task: Task<Void, Never>?
     private var accessedURLs: [URL] = []
@@ -49,6 +50,7 @@ final class NativeWebAuditViewModel: ObservableObject {
                 // An imported file cannot grant authority on the operator's behalf.
                 authorized = false
                 requestLimit = profile.limits.maxRequests; timeLimit = Int(profile.limits.maxDuration)
+                requestTimeout = max(1, Int(profile.limits.requestTimeout.rounded()))
                 profileName = url.lastPathComponent
                 status = "프로필 로드: 계정 \(profile.accounts.count) · 리소스 \(profile.resources.count) · 시나리오 \(profile.scenarios.count) · 추가 규칙 \(profile.rules.count)"
                 if let path = profile.apiSpecPath {
@@ -84,6 +86,9 @@ final class NativeWebAuditViewModel: ObservableObject {
         profile.target = target.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.authorized = authorized; profile.active = active && !readOnlyDistribution
         profile.limits.maxRequests = requestLimit; profile.limits.maxDuration = Double(timeLimit)
+        // One request may use at most a third of the run, so a few stalls cannot consume the whole audit.
+        requestTimeout = min(requestTimeout, max(1, timeLimit / 3))
+        profile.limits.requestTimeout = Double(requestTimeout)
         if !authorization.isEmpty { profile.headers["Authorization"] = authorization }
         if !secondAuthorization.isEmpty {
             profile.accounts.removeAll { $0.id == "secondary" }
@@ -147,6 +152,7 @@ struct NativeWebAuditView: View {
                     HStack {
                         Stepper("최대 요청 \(model.requestLimit)건", value: $model.requestLimit, in: 10...5000, step: 10)
                         Stepper("최대 \(model.timeLimit)초", value: $model.timeLimit, in: 10...3600, step: 10)
+                        Stepper("요청당 \(model.requestTimeout)초", value: $model.requestTimeout, in: 1...120, step: 5)
                     }
                 }.padding(.top, 8)
             }.disabled(model.running)

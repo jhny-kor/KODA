@@ -19,6 +19,11 @@ actor WebAuditTransport {
     private var sessions: [String: URLSession] = [:]
     private var cookies: [String: [HTTPCookie]] = [:]
     private var stopped = false
+    /// Consecutive timeouts/connection failures. A target that answers nothing gets no further load.
+    private var silentFailures = 0
+    /// Responses actually received; zero means no control could be judged at all.
+    private(set) var answered = 0
+    private static let unresponsiveAfter = 3
     private let actorHeaders: [String: [String: String]]
 
     nonisolated static func origin(_ url: URL) -> String {
@@ -145,6 +150,8 @@ actor WebAuditTransport {
     private func perform(_ input: WebAuditRequest, actor: String, isCleanup: Bool) async throws -> WebAuditResponse {
         try Task.checkCancellation()
         guard !stopped else { throw WebAuditError.blocked("transport stopped") }
+        // Cleanup still gets its reserved attempt; everything else stops once the target has gone silent.
+        guard isCleanup || silentFailures < Self.unresponsiveAfter else { throw WebAuditError.targetUnresponsive(silentFailures) }
         guard let identityHeaders = actorHeaders[actor] else { throw WebAuditError.blocked("unknown actor") }
         guard Self.origin(input.url) == targetOrigin, input.url.user == nil, input.url.password == nil,
               input.url.fragment == nil else { throw WebAuditError.blocked("origin mismatch") }
@@ -236,11 +243,17 @@ actor WebAuditTransport {
                 return first
             }
         } catch is CancellationError { throw CancellationError() }
-        catch let error as WebAuditError { throw error }
+        catch let error as WebAuditError {
+            if case .budget("request deadline") = error { silentFailures += 1 }
+            throw error
+        }
         catch {
             if Task.isCancelled { throw CancellationError() }
-            throw WebAuditError.blocked("HTTP transport failed")
+            silentFailures += 1
+            throw WebAuditError.blocked("HTTP transport failed (\(Self.describe(error)))")
         }
+        silentFailures = 0
+        answered += 1
         metrics.receivedBytes += response.body.count
         let incoming = HTTPCookie.cookies(withResponseHeaderFields: response.headers, for: input.url)
         var jar = cookies[actor] ?? []
@@ -250,6 +263,21 @@ actor WebAuditTransport {
         }
         cookies[actor] = jar
         return response
+    }
+
+    /// The operator needs the network-level cause (DNS, TCP, TLS) to tell a blocked IP from a slow page.
+    nonisolated static func describe(_ error: Error) -> String {
+        guard let url = error as? URLError else { return "네트워크 오류" }
+        switch url.code {
+        case .timedOut: return "서버 연결 시간 초과 — 방화벽·IP 차단 가능성"
+        case .cannotConnectToHost: return "서버가 연결을 거부"
+        case .cannotFindHost, .dnsLookupFailed: return "DNS 조회 실패"
+        case .networkConnectionLost: return "연결이 중간에 끊김"
+        case .notConnectedToInternet: return "인터넷 연결 없음"
+        case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate,
+             .serverCertificateNotYetValid, .serverCertificateHasUnknownRoot, .clientCertificateRejected: return "TLS 연결 실패"
+        default: return "URLError \(url.code.rawValue)"
+        }
     }
 
     private nonisolated static func identifier(_ value: String) -> Bool {

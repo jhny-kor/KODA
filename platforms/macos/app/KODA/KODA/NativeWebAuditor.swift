@@ -206,6 +206,7 @@ enum NativeWebAuditor {
         }
         if Task.isCancelled { completed = false; warnings.append("취소 후 미실행 항목은 안전 판정에 포함하지 않습니다.") }
         let metrics = await transport.snapshot()
+        let reachedTarget = await transport.answered > 0
         await transport.shutdown()
         observations = Array(Set(observations.map { redactor.clean($0) })).sorted {
             ($0.controlID, $0.ruleID, $0.endpoint) < ($1.controlID, $1.ruleID, $1.endpoint)
@@ -217,6 +218,7 @@ enum NativeWebAuditor {
             if related.contains(where: { $0.status == .vulnerable }) { status = .vulnerable; reason = "응답·대조 또는 명시적 권한 oracle에서 취약 증거 확인" }
             else if !related.isEmpty { status = .needsReview; reason = "자동 탐지 후보의 실제 보안 영향을 확인해야 합니다." }
             else if passed.contains(id) { status = completed ? .pass : .needsReview; reason = completed ? "선언한 시나리오·기대 응답만 검증 완료. 항목 전체의 안전을 보장하지 않습니다." : "실행 공백이 있어 완료 판정 보류" }
+            else if !reachedTarget { status = .notScanned; reason = "대상 서버로부터 응답을 하나도 받지 못해 점검하지 못했습니다. 실행 공백의 네트워크 원인을 확인하세요." }
             else { status = .notScanned; reason = "이 항목을 판정할 명시적 시나리오·충분한 증거가 없습니다." }
             return WebAuditControlResult(controlID: id, title: title, status: status, reason: reason, evidenceIDs: related.map(\.evidenceID))
         }

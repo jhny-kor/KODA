@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import html
 import re
+import socket
 import os
 from pathlib import Path
 import subprocess
@@ -136,7 +137,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
         state.record(self, body)
         path = urlsplit(self.path).path
         query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
-        if state.mode == "trap":
+        if state.mode == "silent":
+            time.sleep(1.0)  # longer than the profile's request timeout: the client sees no answer
+            self.reply(text="too late")
+        elif state.mode == "trap":
             self.reply(text="redirect target")
         elif path == "/redirect":
             self.reply(302, "redirect", {"Location": state.trap_url + "/caught"})
@@ -454,6 +458,28 @@ class NativeWebAuditTests(unittest.TestCase):
         paths = {urlsplit(item["endpoint"]).path for item in report["observations"]
                  if item["ruleID"] == "active.path-traversal"}
         self.assertEqual(paths, {"/deep/view"}, report)
+
+    def test_silent_target_stops_after_three_unanswered_requests(self):
+        self.server.state.mode = "silent"
+        profile = self.deep_profile()
+        profile["limits"]["requestTimeout"] = 0.3
+        report, _ = self.audit(profile)
+        self.assertFalse(report["completed"])
+        self.assertLessEqual(len(self.server.state.requests), 3, self.server.state.requests)
+        self.assertTrue(any("연속 3회 응답하지 않아" in warning for warning in report["warnings"]), report["warnings"])
+        self.assertLess(report["metrics"]["elapsed"], 5, report["metrics"])
+
+    def test_refused_connection_names_the_network_cause(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed_port = probe.getsockname()[1]
+        report, _ = self.audit(self.profile(target=f"http://127.0.0.1:{closed_port}/"))
+        self.assertFalse(report["completed"])
+        self.assertTrue(any("서버가 연결을 거부" in warning for warning in report["warnings"]), report["warnings"])
+        self.assertTrue(any("연속 3회" in warning for warning in report["warnings"]), report["warnings"])
+        # Every control says the target never answered, not that evidence was merely insufficient.
+        self.assertTrue(all(control["status"] == "NOT_SCANNED" and "응답을 하나도 받지 못해" in control["reason"]
+                            for control in report["controls"]), report["controls"])
 
     def test_post_forms_are_probed_only_with_state_change_approval(self):
         report, _ = self.audit(self.deep_profile(allowStateChanges=True,

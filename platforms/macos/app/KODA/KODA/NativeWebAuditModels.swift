@@ -218,8 +218,11 @@ struct WebAuditReport: Codable, Sendable {
 
 enum WebAuditError: Error, LocalizedError {
     case invalidProfile(String), blocked(String), budget(String), budgetExhausted(String), responseTooLarge, invalidResponse
+    case targetUnresponsive(Int)
     var errorDescription: String? {
         switch self {
+        case .targetUnresponsive(let count):
+            return "대상 서버가 연속 \(count)회 응답하지 않아 이후 요청을 보내지 않았습니다. 같은 PC의 브라우저 접속 여부, 방화벽·WAF의 IP 차단, 요청 타임아웃 설정을 확인하세요."
         case .invalidProfile(let message): return "웹 프로필 오류: \(message)"
         case .blocked(let message): return "웹 요청 차단: \(message)"
         case .budget(let message): return "웹 점검 한도: \(message)"
@@ -237,7 +240,7 @@ enum WebAuditError: Error, LocalizedError {
     static func stopsRun(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         switch error as? WebAuditError {
-        case .budgetExhausted: return true
+        case .budgetExhausted, .targetUnresponsive: return true
         case .blocked("transport stopped"): return true
         default: return false
         }
