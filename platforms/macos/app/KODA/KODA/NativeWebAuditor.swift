@@ -23,8 +23,12 @@ enum NativeWebAuditor {
             warnings.append(redactor.clean("\(context): \(error.localizedDescription)"))
         }
 
+        // Active probing is deduplicated per path (CORS, discovery) and per path+method+field set (fuzzing).
+        var probed = Set<String>(), corsChecked = Set<String>(), discoveredOn = Set<String>(), skippedPostForms = Set<String>()
+        let postAllowed = profile.allowStateChanges && profile.allowedMethods.contains("POST")
+
         // A matched HTTP response is evidence, never proof that an entire control is safe.
-        while !queue.isEmpty && visited.count < profile.limits.maxPages {
+        crawl: while !queue.isEmpty && visited.count < profile.limits.maxPages {
             if Task.isCancelled { completed = false; warnings.append("점검이 취소되었습니다."); break }
             let (url, depth) = queue.removeFirst()
             guard visited.insert(url.absoluteString).inserted else { continue }
@@ -33,9 +37,27 @@ enum NativeWebAuditor {
                 let response = try await transport.send(WebAuditRequest(url: url), actor: "primary")
                 observations += NativeWebAuditRules.inspect(response: response)
                 if profile.active {
-                    let result = await NativeWebAuditRules.probe(url: url, transport: transport, active: true)
-                    observations += result.observations
-                    if !result.warnings.isEmpty { completed = false; warnings += result.warnings }
+                    var targets = NativeWebAuditRules.queryTarget(url).map { [$0] } ?? []
+                    if corsChecked.insert(url.path).inserted {
+                        do { observations += try await NativeWebAuditRules.probeCORS(url: url, transport: transport) }
+                        catch { note(error, context: "CORS 검사 미완료"); if WebAuditError.stopsRun(error) { break crawl } }
+                    }
+                    if response.header("content-type").lowercased().contains("html"), (200..<300).contains(response.status) {
+                        for form in NativeWebAuditRules.formTargets(html: response.text, page: url) where withinScope(form.url, profile: profile) {
+                            if form.method == "POST" && !postAllowed { skippedPostForms.insert(form.signature) } else { targets.append(form) }
+                        }
+                        if discoveredOn.insert(url.path).inserted {
+                            do {
+                                if let found = try await NativeWebAuditRules.discoverParameters(page: url, html: response.text, transport: transport) { targets.append(found) }
+                            } catch { note(error, context: "숨은 매개변수 탐색 미완료"); if WebAuditError.stopsRun(error) { break crawl } }
+                        }
+                    }
+                    for target in targets where probed.insert(target.signature).inserted {
+                        progress?("능동 검사: \(target.method) \(redactor.clean(target.url.path))")
+                        let result = await NativeWebAuditRules.probe(target, transport: transport)
+                        observations += result.observations
+                        if !result.warnings.isEmpty { completed = false; warnings += result.warnings }
+                    }
                 }
                 if response.header("content-type").lowercased().contains("html") {
                     let discovered = links(in: response.text, relativeTo: url).filter { withinScope($0, profile: profile) && !visited.contains($0.absoluteString) }
@@ -51,6 +73,10 @@ enum NativeWebAuditor {
             } catch { note(error, context: "경로 점검 중단"); if WebAuditError.stopsRun(error) { break } }
         }
         if !queue.isEmpty { completed = false; warnings.append("페이지·깊이 한도로 일부 발견 경로를 점검하지 못했습니다.") }
+        if !skippedPostForms.isEmpty {
+            completed = false
+            warnings.append("상태 변경(POST) 승인이 없어 POST 폼 \(skippedPostForms.count)개의 입력값은 능동 검사하지 않았습니다.")
+        }
 
         if !Task.isCancelled {
             // Reviewed data-only rules. A randomized control prevents SPA fallback/soft-404 matches.

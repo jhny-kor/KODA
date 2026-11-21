@@ -179,6 +179,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 computed = re.sub(r"\{\{(\d{1,4})\*(\d{1,4})\}\}",
                                   lambda match: str(int(match[1]) * int(match[2])), value)
                 self.reply(text="<html><body>" + computed + "</body></html>")
+        elif path.startswith("/deep"):
+            self.deep(path, query, body)
         elif path == "/marker":
             self.reply(text="KODA_CONFIRMED_FIXTURE_MARKER")
         elif path == "/leak":
@@ -210,6 +212,41 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.reply(text="<!doctype html><html><body>fixture home</body></html>")
         elif state.mode == "soft404":
             self.reply(text="<!doctype html><html><body>Please sign in to continue</body></html>")
+        else:
+            self.reply(404, "fixture not found")
+
+    def deep(self, path, query, body):
+        """Inputs a crawler only reaches through forms, hidden names, or non-error oracles."""
+        value = {name: values[0] for name, values in query.items()}
+        if path == "/deep":
+            self.reply(text='<a href="/deep/form">f</a><a href="/deep/hidden">h</a><a href="/deep/item?id=1">i</a>'
+                            '<a href="/deep/view?path=a.txt">v</a><a href="/deep/api">a</a>')
+        elif path == "/deep/form":
+            self.reply(text='<form action="/deep/find"><input name="term"><input type="hidden" name="csrf" value="t"></form>'
+                            '<form action="/deep/login" method="post"><input name="u"><input type="password" name="p"></form>'
+                            '<form action="/deep/note" method="post"><textarea name="memo"></textarea></form>')
+        elif path == "/deep/find":
+            term = value.get("term", "")
+            if term.count("'") % 2:
+                self.reply(500, "You have an error in your SQL syntax")
+            else:
+                self.reply(text="<p>results " + term + "</p>")
+        elif path == "/deep/note":
+            memo = parse_qs(body.decode("utf-8", "replace")).get("memo", [""])[0]
+            self.reply(text="<p>memo " + memo + "</p>")
+        elif path == "/deep/hidden":
+            self.reply(text="<p>mode " + value.get("debug", "off") + "</p>")
+        elif path == "/deep/item":
+            raw = value.get("id", "")
+            denied = raw.endswith((" AND 1=2", "' AND '1'='2"))
+            self.reply(text="<p>no item</p>" if denied or not raw.startswith("1") else "<p>Widget alpha catalogue entry</p>")
+        elif path == "/deep/view":
+            name = value.get("path", "")
+            self.reply(text="root:x:0:0:root:/root:/bin/sh" if name.endswith("../etc/passwd") else "file " + html.escape(name))
+        elif path == "/deep/api":
+            origin = self.headers.get("Origin", "")
+            self.reply(text='{"user":"a"}', headers={"Access-Control-Allow-Origin": origin,
+                                                    "Access-Control-Allow-Credentials": "true"} if origin else {})
         else:
             self.reply(404, "fixture not found")
 
@@ -384,6 +421,37 @@ class NativeWebAuditTests(unittest.TestCase):
             self.assertEqual(observations.get(rule, {}).get("status"), "NEEDS_REVIEW", report)
         normal, _ = self.audit(self.profile(target=self.url + "/strict?q=sample", active=True))
         self.assertFalse(any(item["ruleID"].startswith("active.") for item in normal["observations"]), normal)
+
+    def deep_profile(self, **updates):
+        limits = {"maxRequests": 600, "maxDuration": 25, "requestsPerSecond": 20, "requestTimeout": 2,
+                  "maxResponseBytes": 200_000, "maxUploadBytes": 10_000, "maxPages": 8, "maxDepth": 2}
+        return self.profile(target=self.url + "/deep", active=True, limits=limits, **updates)
+
+    def test_crawl_probes_forms_hidden_names_blind_sqli_traversal_and_cors(self):
+        report, _ = self.audit(self.deep_profile())
+        found = {(item["ruleID"], urlsplit(item["endpoint"]).path): item for item in report["observations"]}
+        for rule, path in (("active.sql-boolean-blind", "/deep/item"), ("active.path-traversal", "/deep/view"),
+                           ("active.cors-reflection-credentials", "/deep/api")):
+            self.assertEqual(found.get((rule, path), {}).get("status"), "VULNERABLE", report)
+        for rule, path in (("active.reflection", "/deep/find"), ("active.sql-error", "/deep/find"),
+                           ("active.reflection", "/deep/hidden")):
+            self.assertIn((rule, path), found, report)
+        # An echoing page is not a boolean oracle, and the login form is never submitted.
+        self.assertNotIn(("active.sql-boolean-blind", "/deep/hidden"), found, report)
+        requests = self.server.state.requests
+        self.assertFalse(any(item["path"].startswith("/deep/login") for item in requests), requests)
+        # POST forms change state: without approval they are reported as a gap, never sent.
+        self.assertFalse(any(item["method"] == "POST" for item in requests), requests)
+        self.assertFalse(report["completed"])
+        self.assertTrue(any("POST 폼 1개" in warning for warning in report["warnings"]), report["warnings"])
+
+    def test_post_forms_are_probed_only_with_state_change_approval(self):
+        report, _ = self.audit(self.deep_profile(allowStateChanges=True,
+                                                 allowedMethods=["GET", "HEAD", "OPTIONS", "POST"]))
+        posted = [item for item in report["observations"]
+                  if item["ruleID"] == "active.reflection" and item["method"] == "POST"]
+        self.assertEqual([urlsplit(item["endpoint"]).path for item in posted], ["/deep/note"], report)
+        self.assertFalse(any("POST 폼" in warning for warning in report["warnings"]), report["warnings"])
 
     def test_soft404_does_not_become_confirmed_sensitive_path_exposure(self):
         self.server.state.mode = "soft404"
