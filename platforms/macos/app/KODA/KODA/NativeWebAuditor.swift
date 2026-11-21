@@ -3,8 +3,20 @@ import CryptoKit
 
 /// Native macOS audit coordinator. Every network operation goes through one budgeted transport.
 enum NativeWebAuditor {
-    static func run(profile: WebAuditProfile, apiSpecData: Data? = nil,
+    static func run(profile original: WebAuditProfile, apiSpecData: Data? = nil, harData: Data? = nil,
                     progress: (@Sendable (String) -> Void)? = nil) async throws -> WebAuditReport {
+        var profile = original
+        var har = NativeWebAuditHAR.Plan()
+        if let harData {
+            har = try NativeWebAuditHAR.load(data: harData) { withinScope($0, profile: original) }
+            // The recorded browser session fills in only what the operator did not set, and only where the
+            // transport would accept credentials (HTTPS or loopback); the redactor below learns these values.
+            if let base = URL(string: original.target), base.scheme?.lowercased() == "https" || WebAuditTransport.loopback(base) {
+                for (name, value) in har.session where !profile.headers.keys.contains(where: { $0.lowercased() == name }) {
+                    profile.headers[name == "cookie" ? "Cookie" : "Authorization"] = value
+                }
+            }
+        }
         let transport = try WebAuditTransport(profile: profile)
         var observations: [WebAuditObservation] = []
         var warnings: [String] = []
@@ -14,6 +26,8 @@ enum NativeWebAuditor {
         var visited = Set<String>()
         guard let base = URL(string: profile.target) else { throw WebAuditError.invalidProfile("invalid URL") }
         queue.append((base, 0))
+        // Recorded pages go ahead of anything the crawler discovers.
+        queue += har.pages.map { ($0, 0) }
         let redactor = WebAuditRedactor(profile: profile)
         let profileHash = SHA256.hash(data: try profile.encoded()).map { String(format: "%02x", $0) }.joined()
 
@@ -81,6 +95,22 @@ enum NativeWebAuditor {
                     }
                 }
             } catch { note(error, context: "경로 점검 중단"); if WebAuditError.stopsRun(error) { break } }
+        }
+        if harData != nil {
+            progress?("HAR 요청 \(har.inScope)건 · 페이지 \(har.pages.count) · POST \(har.targets.count)")
+            if har.inScope == 0 { completed = false; warnings.append("HAR에 점검 범위 안의 요청이 없습니다. 대상 URL과 HAR 기록의 주소가 같은지 확인하세요.") }
+            if har.unsafeMethods > 0 { completed = false; warnings.append("HAR의 PUT·PATCH·DELETE 요청 \(har.unsafeMethods)개는 데이터 변경 위험으로 재전송하지 않았습니다.") }
+            let pending = har.targets.filter { !probed.contains($0.signature) }
+            if !profile.active || !postAllowed {
+                if !pending.isEmpty { completed = false; warnings.append("능동 검사·상태 변경(POST) 승인이 없어 HAR의 POST 요청 \(pending.count)개는 재전송하지 않았습니다.") }
+            } else {
+                for target in pending where !Task.isCancelled && probed.insert(target.signature).inserted {
+                    progress?("능동 검사(HAR): POST \(redactor.clean(target.url.path))")
+                    let result = await NativeWebAuditRules.probe(target, transport: transport)
+                    observations += result.observations
+                    if !result.warnings.isEmpty { completed = false; warnings += result.warnings }
+                }
+            }
         }
         if !queue.isEmpty { completed = false; warnings.append("페이지·깊이 한도로 일부 발견 경로를 점검하지 못했습니다.") }
         if !skippedPostForms.isEmpty {

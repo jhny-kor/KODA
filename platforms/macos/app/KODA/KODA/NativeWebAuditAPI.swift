@@ -370,3 +370,77 @@ enum NativeWebAuditAPI {
         }
     }
 }
+
+/// Browser-recorded traffic (HAR 1.2, DevTools "Save all as HAR"). In-scope GET pages seed the crawler and
+/// form/JSON POST bodies become probe targets, so logged-in and script-generated requests are covered too.
+enum NativeWebAuditHAR {
+    struct Plan: Sendable {
+        var pages: [URL] = []
+        var targets: [NativeWebAuditRules.ProbeTarget] = []
+        /// Latest recorded Cookie / Authorization for the target origin (lowercased names).
+        var session: [String: String] = [:]
+        var unsafeMethods = 0
+        var inScope = 0
+    }
+
+    private static let staticExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "css", "js", "mjs", "map",
+                                                        "woff", "woff2", "ttf", "otf", "mp4", "webm", "mp3", "pdf"]
+
+    static func load(data: Data, inScope: (URL) -> Bool) throws -> Plan {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let entries = (root["log"] as? [String: Any])?["entries"] as? [[String: Any]] else {
+            throw WebAuditError.invalidProfile("HAR file has no log.entries")
+        }
+        var plan = Plan(), pages = Set<String>()
+        func safe(_ value: String) -> Bool { !value.contains(where: { $0 == "\r" || $0 == "\n" || $0 == "\0" }) }
+        for entry in entries {
+            guard let request = entry["request"] as? [String: Any], let raw = request["url"] as? String,
+                  var parts = URLComponents(string: raw) else { continue }
+            parts.fragment = nil
+            guard let url = parts.url, inScope(url) else { continue }
+            plan.inScope += 1
+            var headers: [String: String] = [:], cookies: [String] = []
+            for header in request["headers"] as? [[String: Any]] ?? [] {
+                guard let name = (header["name"] as? String)?.lowercased(), let value = header["value"] as? String, safe(value) else { continue }
+                if name == "cookie" { cookies.append(value) }
+                else if name == "authorization" { plan.session[name] = value }
+                // Only custom X- headers (CSRF tokens, X-Requested-With); transport-level headers are rebuilt.
+                else if name.hasPrefix("x-"), name.range(of: "^[a-z0-9-]+$", options: .regularExpression) != nil { headers[name] = value }
+            }
+            if !cookies.isEmpty { plan.session["cookie"] = cookies.joined(separator: "; ") }
+            switch (request["method"] as? String ?? "GET").uppercased() {
+            case "GET":
+                if !staticExtensions.contains(url.pathExtension.lowercased()), pages.insert(url.absoluteString).inserted { plan.pages.append(url) }
+            case "POST":
+                guard let post = request["postData"] as? [String: Any], let text = post["text"] as? String else { continue }
+                let mime = (post["mimeType"] as? String ?? "").lowercased()
+                var fields: [URLQueryItem] = [], template: Data?
+                if mime.contains("json") {
+                    guard let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { continue }
+                    fields = object.keys.sorted().compactMap { key in (object[key] as? String).map { URLQueryItem(name: key, value: $0) } }
+                    template = Data(text.utf8)
+                } else if mime.contains("x-www-form-urlencoded") {
+                    fields = formDecode(text)
+                } else { continue }
+                // Same policy as HTML forms: login requests are never replayed.
+                if fields.contains(where: { $0.name.range(of: "(?i)passw|pwd", options: .regularExpression) != nil }) { continue }
+                let testable = fields.indices.filter { fields[$0].name.range(of: "(?i)csrf|xsrf|token|nonce", options: .regularExpression) == nil }
+                guard !testable.isEmpty else { continue }
+                plan.targets.append(NativeWebAuditRules.ProbeTarget(url: url, method: "POST", fields: fields, testable: Array(testable.prefix(3)),
+                                                                    source: "har", headers: headers, jsonTemplate: template))
+            case "PUT", "PATCH", "DELETE":
+                plan.unsafeMethods += 1
+            default: continue
+            }
+        }
+        return plan
+    }
+
+    static func formDecode(_ text: String) -> [URLQueryItem] {
+        text.split(separator: "&").compactMap { pair in
+            let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                .map { String($0).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String($0) }
+            return parts[0].isEmpty ? nil : URLQueryItem(name: parts[0], value: parts.count > 1 ? parts[1] : "")
+        }
+    }
+}

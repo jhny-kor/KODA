@@ -10,6 +10,7 @@ final class NativeWebAuditViewModel: ObservableObject {
     @Published var authorization = ""
     @Published var secondAuthorization = ""
     @Published var apiURL: URL?
+    @Published var harURL: URL?
     @Published var profileName = "기본 프로필"
     @Published var running = false
     @Published var status = "대상과 점검 권한을 확인하세요."
@@ -36,6 +37,16 @@ final class NativeWebAuditViewModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url {
             if url.startAccessingSecurityScopedResource() { accessedURLs.append(url) }
             apiURL = url
+        }
+    }
+
+    func chooseHAR() {
+        let panel = NSOpenPanel(); panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "har"), .json].compactMap { $0 }
+        panel.message = "브라우저 개발자 도구 Network 탭에서 저장한 HAR 파일을 선택하세요. 로그인 세션을 쓰려면 민감 정보 포함으로 내보내세요."
+        if panel.runModal() == .OK, let url = panel.url {
+            if url.startAccessingSecurityScopedResource() { accessedURLs.append(url) }
+            harURL = url
         }
     }
 
@@ -95,7 +106,7 @@ final class NativeWebAuditViewModel: ObservableObject {
             profile.accounts.append(WebAuditAccount(id: "secondary", headers: ["Authorization": secondAuthorization]))
         }
         if readOnlyDistribution { profile.allowStateChanges = false; profile.allowedMethods = ["GET", "HEAD"] }
-        let specURL = apiURL
+        let specURL = apiURL, recordedURL = harURL
         running = true; report = nil; reportURL = nil; status = "범위와 실행 한도를 검증하고 있습니다."
         task = Task { [self] in
             defer { if access { directory.stopAccessingSecurityScopedResource() }; running = false; task = nil }
@@ -105,7 +116,12 @@ final class NativeWebAuditViewModel: ObservableObject {
                     guard (try specURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 2_097_152 else { throw WebAuditError.invalidProfile("API specification too large") }
                     apiData = try Data(contentsOf: specURL)
                 }
-                let result = try await NativeWebAuditor.run(profile: profile, apiSpecData: apiData) { [weak self] message in
+                var harData: Data?
+                if let recordedURL {
+                    guard (try recordedURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) <= 100_000_000 else { throw WebAuditError.invalidProfile("HAR file too large") }
+                    harData = try Data(contentsOf: recordedURL)
+                }
+                let result = try await NativeWebAuditor.run(profile: profile, apiSpecData: apiData, harData: harData) { [weak self] message in
                     Task { @MainActor in if self?.running == true { self?.status = message } }
                 }
                 report = result
@@ -143,6 +159,9 @@ struct NativeWebAuditView: View {
                 Spacer()
                 Button("API 명세 선택", action: model.chooseAPI)
                 if let api = model.apiURL { Text(api.lastPathComponent); Button("해제") { model.apiURL = nil } }
+                Button("브라우저 기록(HAR) 선택", action: model.chooseHAR)
+                    .help("개발자 도구 → Network → Save all as HAR. 기록된 페이지와 POST·JSON 요청을 점검 대상으로 추가합니다.")
+                if let har = model.harURL { Text(har.lastPathComponent); Button("해제") { model.harURL = nil } }
             }.disabled(model.running)
             DisclosureGroup("계정과 실행 한도") {
                 VStack(alignment: .leading) {

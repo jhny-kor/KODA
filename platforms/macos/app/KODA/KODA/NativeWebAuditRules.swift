@@ -112,6 +112,9 @@ enum NativeWebAuditRules {
         var fields: [URLQueryItem]
         var testable: [Int]
         var source: String
+        /// Recorded per-request headers (e.g. X-CSRF-Token) and, for JSON APIs, the original body to vary.
+        var headers: [String: String] = [:]
+        var jsonTemplate: Data? = nil
         /// Same path, method and fuzzed names are probed once per audit.
         var signature: String {
             "\(method) \(url.path) " + testable.map { fields[$0].name }.sorted().joined(separator: ",")
@@ -232,13 +235,18 @@ enum NativeWebAuditRules {
         let nonce = "koda" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)
         func request(_ fields: [URLQueryItem]) throws -> WebAuditRequest {
             if target.method == "POST" {
-                return WebAuditRequest(url: target.url, method: "POST", headers: ["Content-Type": "application/x-www-form-urlencoded"],
+                if let template = target.jsonTemplate, var object = try JSONSerialization.jsonObject(with: template) as? [String: Any] {
+                    for field in fields { object[field.name] = field.value ?? "" }
+                    return WebAuditRequest(url: target.url, method: "POST", headers: target.headers.merging(["Content-Type": "application/json"]) { $1 },
+                                           body: try JSONSerialization.data(withJSONObject: object))
+                }
+                return WebAuditRequest(url: target.url, method: "POST", headers: target.headers.merging(["Content-Type": "application/x-www-form-urlencoded"]) { $1 },
                                        body: Data(formEncode(fields).utf8))
             }
             guard var parts = URLComponents(url: target.url, resolvingAgainstBaseURL: false) else { throw WebAuditError.invalidProfile("query URL") }
             parts.percentEncodedQuery = formEncode(fields)
             guard let url = parts.url else { throw WebAuditError.invalidProfile("query URL") }
-            return WebAuditRequest(url: url)
+            return WebAuditRequest(url: url, headers: target.headers)
         }
         func send(_ index: Int, _ value: String) async throws -> WebAuditResponse {
             var changed = items; changed[index] = URLQueryItem(name: items[index].name, value: value)
@@ -251,7 +259,7 @@ enum NativeWebAuditRules {
         do {
             let baseline = try await transport.send(request(items), actor: "primary")
             for index in target.testable {
-                let field = "\(target.source == "form" ? "폼 필드" : "매개변수") \(items[index].name)"
+                let field = "\(["form": "폼 필드", "har": "HAR 요청 필드"][target.source] ?? "매개변수") \(items[index].name)"
                 let original = items[index].value ?? ""
                 let control = try await send(index, String(nonce))
                 let reflection = "<koda-audit data-marker=\"\(nonce)\">"

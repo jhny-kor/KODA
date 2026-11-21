@@ -288,7 +288,7 @@ actor WebAuditTransport {
         let ordinary: Set<String> = ["accept", "accept-language", "accept-encoding", "user-agent", "content-type", "cache-control", "pragma"]
         return headers.keys.contains { !ordinary.contains($0.lowercased()) }
     }
-    private nonisolated static func loopback(_ url: URL) -> Bool {
+    nonisolated static func loopback(_ url: URL) -> Bool {
         ["localhost", "127.0.0.1", "::1", "[::1]"].contains(url.host?.lowercased() ?? "")
     }
     private nonisolated static func contains(_ prefix: String, _ path: String) -> Bool {

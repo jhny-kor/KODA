@@ -36,7 +36,8 @@ import Foundation
             let output = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
             let spec: Data? = CommandLine.arguments.count > 3 && CommandLine.arguments[3] != "-"
                 ? try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[3])) : nil
-            let task = Task { try await NativeWebAuditor.run(profile: profile, apiSpecData: spec) }
+            let har = try ProcessInfo.processInfo.environment["KODA_TEST_HAR"].map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
+            let task = Task { try await NativeWebAuditor.run(profile: profile, apiSpecData: spec, harData: har) }
             if CommandLine.arguments.count > 4 {
                 let trigger = CommandLine.arguments[4]
                 Task {
@@ -249,6 +250,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif path == "/deep/view":
             name = value.get("path", "")
             self.reply(text="root:x:0:0:root:/root:/bin/sh" if name.endswith("../etc/passwd") else "file " + html.escape(name))
+        elif path == "/deep/account":
+            # Nothing links here and only the recorded browser session is let in.
+            if "sid=har-session" not in self.headers.get("Cookie", ""):
+                self.reply(401, "login required")
+            else:
+                self.reply(text="<p>hello " + value.get("q", "") + "</p>")
+        elif path == "/deep/json" and self.command == "POST":
+            if "sid=har-session" not in self.headers.get("Cookie", "") or self.headers.get("X-CSRF-Token") != "t1":
+                self.reply(403, '{"error":"csrf"}')
+            else:
+                name = str(json.loads(body or b"{}").get("name", ""))
+                self.reply(text='{"error":"SQLSTATE[42000] syntax"}' if name.count("'") % 2 else '{"ok":true}')
         elif path == "/deep/api":
             origin = self.headers.get("Origin", "")
             self.reply(text='{"user":"a"}', headers={"Access-Control-Allow-Origin": origin,
@@ -303,7 +316,7 @@ class NativeWebAuditTests(unittest.TestCase):
         result.update(updates)
         return result
 
-    def audit(self, profile, spec=None, cancel_ms=None, cancel_on_slow=False, expect_error=False):
+    def audit(self, profile, spec=None, cancel_ms=None, cancel_on_slow=False, expect_error=False, har=None):
         directory = Path(tempfile.mkdtemp(prefix="run-", dir=self.root))
         profile_path = directory / "profile.json"
         profile_path.write_text(json.dumps(profile), encoding="utf-8")
@@ -312,6 +325,11 @@ class NativeWebAuditTests(unittest.TestCase):
             spec_file = directory / "openapi.json"
             spec_file.write_text(json.dumps(spec), encoding="utf-8")
             spec_path = str(spec_file)
+        extra_env = {}
+        if har is not None:
+            har_file = directory / "recorded.har"
+            har_file.write_text(json.dumps(har), encoding="utf-8")
+            extra_env["KODA_TEST_HAR"] = str(har_file)
         args = [str(self.binary), str(profile_path), str(directory), spec_path]
         if cancel_on_slow:
             signal = directory / "cancel.signal"
@@ -320,7 +338,7 @@ class NativeWebAuditTests(unittest.TestCase):
         elif cancel_ms is not None:
             args.append(str(cancel_ms))
         process = subprocess.run(args, capture_output=True, text=True, timeout=30,
-                                 env={**os.environ, "KODA_WEB_TEST_TOKEN": "Bearer " + SECRET})
+                                 env={**os.environ, "KODA_WEB_TEST_TOKEN": "Bearer " + SECRET, **extra_env})
         lines = [line for line in process.stdout.splitlines() if line.strip()]
         self.assertTrue(lines, process.stderr)
         value = json.loads(lines[-1])
@@ -450,6 +468,46 @@ class NativeWebAuditTests(unittest.TestCase):
         self.assertFalse(any(item["method"] == "POST" for item in requests), requests)
         self.assertFalse(report["completed"])
         self.assertTrue(any("POST 폼 1개" in warning for warning in report["warnings"]), report["warnings"])
+
+    def recorded_har(self):
+        session = [{"name": "Cookie", "value": "sid=har-session"}]
+        def entry(method, url, headers=(), post=None):
+            request = {"method": method, "url": url, "headers": list(headers)}
+            if post:
+                request["postData"] = {"mimeType": post[0], "text": post[1]}
+            return {"request": request}
+        return {"log": {"version": "1.2", "entries": [
+            entry("GET", self.url + "/deep/account?q=hi", session),
+            entry("POST", self.url + "/deep/json", session + [{"name": ":authority", "value": "x"},
+                                                               {"name": "X-CSRF-Token", "value": "t1"}],
+                  ("application/json", '{"name":"widget","csrf":"x","count":2}')),
+            entry("POST", self.url + "/deep/login", session, ("application/x-www-form-urlencoded", "u=a&password=b")),
+            entry("PUT", self.url + "/deep/json", session, ("application/json", '{"name":"x"}')),
+            entry("GET", self.url + "/deep/logo.png", session),
+            entry("GET", "https://third-party.example/collect?x=1"),
+        ]}}
+
+    def test_har_session_and_json_post_reach_unlinked_endpoints(self):
+        report, directory = self.audit(self.deep_profile(allowStateChanges=True,
+                                                         allowedMethods=["GET", "HEAD", "OPTIONS", "POST"]),
+                                       har=self.recorded_har())
+        found = {(item["ruleID"], urlsplit(item["endpoint"]).path, item["method"]) for item in report["observations"]}
+        self.assertIn(("active.reflection", "/deep/account", "GET"), found, report)
+        self.assertIn(("active.sql-error", "/deep/json", "POST"), found, report)
+        requests = self.server.state.requests
+        # Login, state-changing PUT and static assets are never replayed.
+        self.assertFalse(any(item["path"].startswith(("/deep/login", "/deep/logo")) or item["method"] == "PUT"
+                             for item in requests), requests)
+        self.assertTrue(any("PUT·PATCH·DELETE 요청 1개" in warning for warning in report["warnings"]), report["warnings"])
+        # The recorded session is used, never written into the evidence.
+        for name in ("audit.json", "audit.md", "audit.html"):
+            self.assertNotIn("har-session", (directory / name).read_text(encoding="utf-8"), name)
+
+    def test_har_posts_need_state_change_approval(self):
+        report, _ = self.audit(self.deep_profile(), har=self.recorded_har())
+        self.assertFalse(any(item["path"] == "/deep/json" for item in self.server.state.requests))
+        self.assertFalse(report["completed"])
+        self.assertTrue(any("HAR의 POST 요청 1개" in warning for warning in report["warnings"]), report["warnings"])
 
     def test_entry_redirect_is_followed_inside_scope(self):
         profile = self.deep_profile()
