@@ -22,7 +22,7 @@ App Store app, or production server, or provide the same vulnerability data.
 
 ## Current behavior
 
-The [126-feature OS matrix (Korean)](platform-feature-matrix.ko.md) uses macOS,
+The [134-feature OS matrix (Korean)](platform-feature-matrix.ko.md) uses macOS,
 Windows, and Linux x86_64 columns with O/X implementation cells. O does not mean
 native execution was verified, every input is detected, or an entire standard is met.
 
@@ -41,6 +41,20 @@ native execution was verified, every input is detected, or an entire standard is
 
 Rejected, unsupported, and incomplete checks are not successful scans. Syntax and
 security rescans of an AI candidate do not establish functional equivalence.
+
+## Source changes after 2026-10-11 (through 2026-11-22)
+
+These features landed after the 2026-10-11 full build and runtime verification.
+Each change was checked with its unittest and local fixtures; the 2026-10-11
+numbers below do not include them.
+
+| Area | Added behavior | Checked with |
+| --- | --- | --- |
+| macOS web audit | HAR session/request import; form, hidden-parameter, boolean-blind SQLi, path-traversal and CORS-reflection probes; in-scope redirects; stop on an unresponsive target; continue after a single failed request; CSRF and OPTIONS review; `NO_FINDING` verdict | `platforms/macos/tests/test_native_web_audit.py` (compiles the Swift sources) and the built Debug app against local HTTP fixtures |
+| Shared Python | AST taint engine with benchmark, `correlate`, `web-scan` boolean-blind SQLi, hidden parameters and DOM XSS, KISA control mapping for verified web findings | Matching `tests/` unittests and `tests/test_python_taint_bench.py` |
+| Linux portal and Suite | Per-finding AI review, archive and scheduled-source limits, 5 GiB SBOM gateway route, handover that keeps a finished Grype import record, 2026-11-20 patch | Linux portal and Suite contract unittests; production upgrades not verified |
+
+Behavior against real external services and production Suites remains as listed under [Unverified areas](#unverified-areas).
 
 ## Latest verification
 

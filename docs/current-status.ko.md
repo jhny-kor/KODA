@@ -21,7 +21,7 @@
 
 ## 기능별 현행 안내
 
-[OS별 전체 기능 구현표](platform-feature-matrix.ko.md)는 126개 기능을
+[OS별 전체 기능 구현표](platform-feature-matrix.ko.md)는 134개 기능을
 macOS·Windows·Linux x86_64 열에 O/X로 표시한다. O는 구현 여부이며 실기 검증·
 전체 보안 기준 준수·모든 입력의 탐지 성공을 의미하지 않는다.
 
@@ -40,6 +40,19 @@ macOS·Windows·Linux x86_64 열에 O/X로 표시한다. O는 구현 여부이�
 
 거부·미지원·불완전 상태는 정상 성공과 구분한다. AI 후보의 구문·보안 재점검은
 실제 기능 동등성을 증명하지 않으며 별도 검토·회귀 테스트가 필요하다.
+
+## 2026-10-11 이후 소스 변경 (2026-11-22까지)
+
+아래 기능은 2026-10-11 전체 빌드·실기 검증 뒤에 추가됐다. 각 변경은 해당
+unittest와 로컬 fixture로 확인했으며, 아래 2026-10-11 수치에는 포함되지 않는다.
+
+| 영역 | 추가된 동작 | 확인 범위 |
+| --- | --- | --- |
+| macOS 웹 정밀 점검 | HAR 세션·요청 가져오기, 폼·숨은 매개변수·불리언 블라인드 SQLi·경로 조작·CORS 반사, 범위 안 리다이렉트, 무응답 중단, 단일 요청 실패 후 계속, CSRF·OPTIONS 검토, `NO_FINDING` 판정 | `platforms/macos/tests/test_native_web_audit.py`(Swift 직접 컴파일)와 빌드한 Debug 앱, 로컬 HTTP fixture |
+| 공통 Python | AST taint 엔진·벤치마크, `correlate`, `web-scan` 불리언 블라인드 SQLi·숨은 매개변수·DOM XSS, 검증된 웹 발견의 KISA 통제 매핑 | `tests/` 해당 unittest와 `tests/test_python_taint_bench.py` |
+| Linux 포털·Suite | 발견 항목 AI 검토, 압축·예약 소스 처리 한도, 5 GiB SBOM gateway 경로, Grype import 완료 기록을 유지하는 인계, 2026-11-20 패치 | Linux 포털·Suite 계약 unittest. 운영 서버 업그레이드는 미검증 |
+
+실제 외부 서비스·운영 Suite에서의 동작은 아래 [남은 검증 범위](#남은-검증-범위)와 같다.
 
 ## 최신 검증 결과
 

@@ -45,7 +45,7 @@ offline package. Check the snapshot before using development-only commands.
 | Review local macOS AI development and proposal validation | [Local AI development guide](docs/macos-local-ai.md) |
 | Run the approval-gated 21-control web audit | [Web audit runbook](docs/security/WEB_AUDIT.md) |
 | Integrate with security tooling | [Security integration docs](docs/README.en.md#security-integrations) |
-| Compare every user-facing feature across the three operating systems | [126-feature O/X matrix (Korean)](docs/platform-feature-matrix.ko.md) |
+| Compare every user-facing feature across the three operating systems | [134-feature O/X matrix (Korean)](docs/platform-feature-matrix.ko.md) |
 | Review current build and execution evidence | [2026-10-11 validation](docs/verification-2026-10-11.md) |
 
 ## Platform support

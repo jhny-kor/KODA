@@ -6,6 +6,16 @@ KODA를 처음 쓰는 사람은 이 페이지에서 목적에 맞는 경로를 �
 제품 개요와 플랫폼 선택은 [영문 루트 README](../README.md), 실제 명령 전체는
 [CLI 및 로컬 사용법](usage.ko.md)에 있습니다.
 
+## 2026-11-15~22 추가 기능
+
+| 제품 기능 | 사용 방법 |
+| --- | --- |
+| macOS 웹 정밀 점검 확장 | 브라우저 기록(HAR)의 로그인 세션·요청으로 시작하고, 폼·숨은 매개변수·블라인드 SQLi를 검사합니다. 범위 안 리다이렉트를 따라가고, 응답이 없는 대상은 원인과 함께 중단하며, 탐지 없음(`NO_FINDING`)과 미점검을 구분합니다. [macOS 웹 정밀 점검](security/MACOS-WEB-AUDIT.ko.md) |
+| Python 오염 분석·교차확증 | Python 소스를 구문 분석 기반 taint 엔진으로 점검하고, `correlate`로 소스 점검과 웹 점검 결과를 교차 확인합니다. [Python 소스 분석과 교차확증](usage.ko.md#python-소스-분석과-정적동적-교차확증) |
+| `web-scan` 탐지 추가 | 불리언 기반 블라인드 SQLi, 숨은 매개변수 탐색, 렌더 모드의 DOM 기반 XSS를 검사합니다. [승인된 웹 점검](usage.ko.md#승인된-웹-점검) |
+| 발견 항목 AI 검토 | 포털 회차의 발견 항목별로 공통 AI 검토를 요청합니다. [발견 항목별 AI 검토](koda-web-portal.ko.md#발견-항목별-ai-검토) |
+| 2026-11-20 Suite 통합 패치 | 대용량 CycloneDX 분할 처리와 최대 5 GiB SBOM 업로드를 포함한 폐쇄망 패치입니다. [통합 패치 안내](../platforms/linux/patch/20261120/README.ko.md) |
+
 ## 2026-11-08 추가 기능
 
 | 제품 기능 | 사용 방법 |
@@ -109,7 +119,7 @@ Linux 포털을 운영할 때는 8765 포트를 직접 공개하지 말고 통�
 | [spec-beyond-static-scanner.md](spec-beyond-static-scanner.md) | 정적 스캐너를 넘어서는 구현 명세 |
 | [roadmap-ai-augmentation.md](roadmap-ai-augmentation.md) | AI 증강·자동 교정·CI/CD 로드맵 |
 | [roadmap-endpoint-security.md](roadmap-endpoint-security.md) | 엔드포인트(호스트) 보안 점검 로드맵 |
-| [platform-feature-matrix.ko.md](platform-feature-matrix.ko.md) | 126개 기능의 macOS·Windows·Linux x86_64 O/X 구현표 |
+| [platform-feature-matrix.ko.md](platform-feature-matrix.ko.md) | 134개 기능의 macOS·Windows·Linux x86_64 O/X 구현표 |
 | [verification-2026-10-11.ko.md](verification-2026-10-11.ko.md) | 현재 개발 소스의 오류 수정·전체 빌드·실제 실행 검증 결과 |
 | [linux-server-stability-plan.ko.md](linux-server-stability-plan.ko.md) | 포털 경량화·worker 격리·workspace 수명 관리의 구현과 후속 범위 |
 

@@ -1,6 +1,6 @@
 # KODA OS별 전체 기능 구현표
 
-기준일: **2026-10-11 (Asia/Seoul)**. 현재 로컬 작업 트리의 소스와 사용자에게 제공되는 실행 경로를 기준으로 한다. 기능은 메뉴·명령·포털 작업 단위로 정리했으며, 개별 탐지 규칙을 모두 별도 행으로 나열하지 않는다. **이번 GitHub 게시에는 표에 반영된 제품 소스·테스트·빌드 스크립트와 문서를 포함한다. Java 자산·바이너리·Docker 이미지·원시 로그는 제외하며 운영·App Store 배포와는 별개다.** [현재 상태](current-status.ko.md)와 [검증 기록](verification-2026-10-11.ko.md)을 함께 확인한다.
+기준일: **2026-11-22 (Asia/Seoul)**. `main`의 소스와 사용자에게 제공되는 실행 경로를 기준으로 한다. 2026-10-11 표를 그 뒤의 커밋과 대조해 바뀐 행을 고쳤다. 기능은 메뉴·명령·포털 작업 단위로 정리했으며, 개별 탐지 규칙을 모두 별도 행으로 나열하지 않는다. GitHub 게시에는 제품 소스·테스트·빌드 스크립트와 문서가 포함되며, Java 자산·바이너리·Docker 이미지·원시 로그는 제외하고 운영·App Store 배포와는 별개다. [현재 상태](current-status.ko.md)와 [검증 기록](verification-2026-10-11.ko.md)을 함께 확인한다.
 
 **O = 해당 OS의 제품 실행 경로에 구현됨. X = 해당 실행 경로에 구현되지 않음.** O는 실제 OS에서의 실행 검증 완료, 모든 입력의 탐지 성공 또는 보안 기준 전체 준수를 의미하지 않는다. 계획·체크리스트 생성은 해당 문서 생성 기능만 O로 표시한다.
 
@@ -38,11 +38,14 @@
 | 소스 — 심각도 기준 실패 게이트 | O | O | O |
 | 소스 — 이전 JSON 결과 대비 신규 발견만 실패 게이트 | X | O | O |
 | 소스 — 외부 SAST의 SARIF 결과 가져오기 | X | O | O |
+| 소스 — Python 소스의 AST 기반 오염(taint) 분석 | X | O | O |
+| 소스 — 소스 점검과 웹 점검 발견의 교차 확인 (`correlate`) | X | O | O |
 | 소스 — KODA가 CodeQL 분석을 직접 실행 | X | X | X |
 | 의존성 — OSV 온라인 취약점 조회 | O | O | O |
 | 의존성 — CISA KEV·FIRST EPSS 우선순위 보강 | O | O | O |
 | 의존성 — Python/JS import 기반 도달성 보강 | O | O | O |
 | 의존성 — 소스 manifest·lockfile의 Grype 오프라인 취약점 비교 | X | O | O |
+| 의존성 — CPE 2.3 식별자의 오프라인 NVD 조건 평가 (`cpe-scan`) | X | O | O |
 | Java — JAR/WAR/EAR 및 중첩 라이브러리 인벤토리 | O | O | O |
 | Java — Syft 기반 SBOM 생성·내장 식별기 fallback | O | O | O |
 | Java — Grype 오프라인 DB 취약점 비교 | O | O | O |
@@ -63,13 +66,18 @@
 | 웹 — 비인증/다른 계정 응답 비교 및 접근 통제 단서 | O | O | O |
 | 웹 — XSS·SQLi·SSTI·LFI·CRLF·리다이렉트 능동 검증 | O | O | O |
 | 웹 — 시간 기반 블라인드 SQLi·명령 삽입 검증 | O | O | O |
+| 웹 — 불리언 기반 블라인드 SQLi·숨은 매개변수 탐색 | O | O | O |
+| 웹 — URL 프래그먼트를 통한 DOM 기반 XSS (렌더 모드) | X | O | O |
 | 웹 — 확인된 삽입점의 제한된 읽기 전용 영향 실증 | O | O | O |
-| 웹 — OpenAPI 명세를 입력해 API/form surface 확장 | X | O | O |
+| 웹 — OpenAPI 명세를 입력해 API/form surface 확장 | O | O | O |
+| 웹 — 브라우저 기록(HAR)으로 점검 경로 추가 | O | O | O |
+| 웹 — HAR의 로그인 세션 사용·POST(JSON·폼) 요청 재전송 | O | X | X |
 | 웹 — 저장형/2차 XSS 및 JSON 쓰기 endpoint 퍼징 | X | O | O |
 | 웹 — OAST/OOB callback 기반 블라인드 SSRF/RCE 검증 | X | O | O |
 | 웹 — JWT none 알고리즘·만료 누락 점검 | O | O | O |
 | 웹 — JWT의 약한 HMAC 서명 키 확인 | X | O | O |
-| 웹 — 승인 프로필 기반 21개 통제 `web-audit` | X | O | O |
+| 웹 — 승인 프로필 기반 21개 통제 웹 정밀 점검 (`web-audit`)·KISA 통제 매핑 | O | O | O |
+| 웹 — 웹 정밀 점검의 탐지 없음(`NO_FINDING`)과 미점검 사유 구분 | O | X | X |
 | 웹 — `web-audit` 승인 서명·일회성 nonce·dry-run | X | O | O |
 | 웹 — 공격 경로 상관 분석 (`attack-path.*`) | X | O | O |
 | 웹 — ZAP baseline 계획 생성·실행 | O | O | O |
@@ -77,7 +85,7 @@
 | 네트워크 — TCP 포트·배너 점검 (`net-scan`) | X | O | O |
 | 네트워크 — 비웹 서비스 TLS·기본 자격증명 점검 | X | O | O |
 | 호스트 — OS별 보안 상태 점검 | O | O | O |
-| 호스트 — 이전 보안 상태 대비 drift 탐지 | X | O | O |
+| 호스트 — 이전 보안 상태 대비 drift 탐지 | O | O | O |
 | 호스트 — 설치 앱 인벤토리·EOL·CVE 보강 | X | O | O |
 | 결과 — 심각도·분류·규칙·파일 검색/필터 | O | O | O |
 | 결과 — HTML 메인·상세 보고서 | O | O | O |
@@ -127,6 +135,7 @@
 | 포털 — GitLab 저장소/브랜치/태그 입력·commit SHA 고정 | X | X | O |
 | 포털 — GitLab 브랜치 생성·결과/Issue 게시·재시도 | X | X | O |
 | 포털 — Tracker 결과 전송·진행 상태·재시도 | X | X | O |
+| 포털 — 발견 항목 AI 검토·공유 AI 서버 점검 요약 | X | X | O |
 | 포털 — SSH/원격 디렉터리·GitLab 예약 수집 | X | X | O |
 | 포털 — 수동·예약 FIFO 대기열·순차 검사 | X | X | O |
 | 포털 — 별도 scan/delivery worker·healthcheck | X | X | O |
@@ -143,7 +152,7 @@
 ## 표를 읽을 때 필요한 조건
 
 1. **구현과 검증:** Windows O는 소스·Full 패키징 경로 기준이다. 이번 작업에서는 Windows 실기 실행을 제외했다. macOS는 Java 포함 universal 빌드와 ARM 실행을 검증했고 Intel 실행은 미검증이다. Linux는 Apple Silicon에서 실제 amd64 컨테이너를 에뮬레이션해 실행했으며 물리 x86_64 서버의 검증은 아니다.
-2. **macOS 제품 경계:** X인 공통 CLI 기능도 Python 엔진을 별도로 실행하면 사용할 수 있다. 이 표는 네이티브 앱의 실행 경로를 기준으로 하며, 내부 helper에 Python 코드가 들어 있다는 이유만으로 모든 CLI 기능을 macOS O로 표시하지 않는다. 일반 소스 JSON·SARIF·HWPX·NIS-SBOM 직접 내보내기와 Java CLI 게이트 옵션은 네이티브 UI에 제공되지 않는다.
+2. **macOS 제품 경계:** 웹 정밀 점검(21개 통제·OpenAPI·HAR)은 Swift로 따로 구현돼 Python `web-audit`과 동작이 다르다. Python은 HAR에서 GET 경로만 가져오고 세션·POST를 재사용하지 않으며, 탐지 없이 실행된 통제를 `NEEDS_REVIEW`로 둔다. 승인 서명·nonce·dry-run은 Python `web-audit`에만 있다. X인 공통 CLI 기능도 Python 엔진을 별도로 실행하면 사용할 수 있다. 이 표는 네이티브 앱의 실행 경로를 기준으로 하며, 내부 helper에 Python 코드가 들어 있다는 이유만으로 모든 CLI 기능을 macOS O로 표시하지 않는다. 일반 소스 JSON·SARIF·HWPX·NIS-SBOM 직접 내보내기와 Java CLI 게이트 옵션은 네이티브 UI에 제공되지 않는다.
 3. **App Store판:** macOS 열의 웹 로그인·능동/침투·영향 실증·ZAP O는 직접배포판 기준이다. `KODA_APP_STORE` 빌드는 GET/HEAD 중심 읽기 전용 웹 점검으로 제한하며 ZAP와 능동 점검을 실행하지 않는다.
 4. **Windows SourceOnly:** Java·오프라인 라이브러리 도구·실시간 웹·Playwright/Chromium 자산을 제외한다. `web-audit`은 누락된 capability를 `UNSUPPORTED`로 반환한다. 표의 Windows 열은 Full 설치본을 기준으로 한다.
 5. **Linux 실행 경로:** 호스트 점검·웹/네트워크 점검·ZAP O는 해당 기능을 실행할 수 있는 호스트 CLI 경로를 포함한다. 폐쇄망 Docker 래퍼는 네트워크 차단·읽기 전용 제한 때문에 같은 기능을 그대로 허용하지 않는다. 포털/Suite O는 Tracker 계정·gateway·DB·worker 등 필요한 구성이 갖춰진 경우다.

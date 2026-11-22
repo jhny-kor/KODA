@@ -66,7 +66,7 @@ universal macOS builds/ARM execution and actual Linux amd64 container checks.
 - [Security dashboard research](security-dashboard-research.md)
 - [SW development security 49 profile](standards/sw-development-security-49.en.md)
 - [Authoritative standard mapping audit](standards/authoritative-mapping-audit.en.md)
-- [126-feature OS implementation matrix (Korean)](platform-feature-matrix.ko.md)
+- [134-feature OS implementation matrix (Korean)](platform-feature-matrix.ko.md)
 - [Build and runtime validation — 2026-10-11](verification-2026-10-11.md)
 - [Linux server stability implementation and follow-up plan (Korean)](linux-server-stability-plan.ko.md)
 
