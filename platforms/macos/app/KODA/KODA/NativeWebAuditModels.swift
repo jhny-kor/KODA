@@ -4,6 +4,8 @@ import CryptoKit
 enum WebAuditStatus: String, Codable, Sendable {
     case vulnerable = "VULNERABLE", pass = "PASS", needsReview = "NEEDS_REVIEW"
     case unsupported = "UNSUPPORTED", notApplicable = "NOT_APPLICABLE", notScanned = "NOT_SCANNED"
+    /// The automated checks for this control ran and matched nothing. Not a safety verdict.
+    case noFinding = "NO_FINDING"
 }
 
 struct WebAuditLimits: Codable, Sendable {

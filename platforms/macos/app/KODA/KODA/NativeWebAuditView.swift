@@ -200,7 +200,7 @@ struct NativeWebAuditView: View {
                     HStack {
                         Text(control.title).frame(width: 150, alignment: .leading)
                         Text(control.status.rawValue).font(.system(.caption, design: .monospaced)).frame(width: 135, alignment: .leading)
-                            .foregroundStyle(control.status == .vulnerable ? .red : (control.status == .pass ? .green : .secondary))
+                            .foregroundStyle(control.status == .vulnerable ? .red : (control.status == .pass ? .green : (control.status == .noFinding ? .blue : .secondary)))
                         Text(control.reason).font(.caption).foregroundStyle(.secondary)
                     }.tag(control.controlID)
                 }

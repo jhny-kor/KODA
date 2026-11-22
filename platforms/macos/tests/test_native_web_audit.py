@@ -225,7 +225,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def deep(self, path, query, body):
         """Inputs a crawler only reaches through forms, hidden names, or non-error oracles."""
         value = {name: values[0] for name, values in query.items()}
-        if path == "/deep":
+        if self.command == "OPTIONS":
+            self.reply(text="", headers={"Allow": "GET, POST, TRACE"})
+        elif path == "/deep":
             self.reply(text='<a href="/deep/form">f</a><a href="/deep/hidden">h</a><a href="/deep/item?id=1">i</a>'
                             '<a href="/deep/view?path=a.txt">v</a><a href="/deep/api">a</a>')
         elif path == "/deep/form":
@@ -508,6 +510,27 @@ class NativeWebAuditTests(unittest.TestCase):
         self.assertFalse(any(item["path"] == "/deep/json" for item in self.server.state.requests))
         self.assertFalse(report["completed"])
         self.assertTrue(any("HAR의 POST 요청 1개" in warning for warning in report["warnings"]), report["warnings"])
+
+    def test_controls_separate_no_finding_from_not_scanned(self):
+        report, _ = self.audit(self.deep_profile())
+        controls = {item["controlID"]: item for item in report["controls"]}
+        # Checks that ran and matched nothing say what they examined instead of claiming NOT_SCANNED.
+        self.assertEqual(controls["web.code-injection"]["status"], "NO_FINDING", controls)
+        self.assertIn("템플릿 산술식", controls["web.code-injection"]["reason"])
+        self.assertEqual(controls["web.file-download"]["status"], "VULNERABLE", controls)
+        # The token-less POST form and the advertised TRACE are review signals.
+        self.assertEqual(controls["web.csrf"]["status"], "NEEDS_REVIEW", controls)
+        self.assertEqual(controls["web.http-methods"]["status"], "NEEDS_REVIEW", controls)
+        self.assertEqual(controls["web.password-policy"]["status"], "NOT_SCANNED")
+        self.assertIn("자동 검사 대상이 아닙니다", controls["web.password-policy"]["reason"])
+        quiet = self.deep_profile()
+        quiet["active"] = False
+        passive, _ = self.audit(quiet)
+        xss = next(item for item in passive["controls"] if item["controlID"] == "web.xss")
+        self.assertEqual(xss["status"], "NOT_SCANNED")
+        self.assertIn("능동 검사가 꺼져", xss["reason"])
+        cookie = next(item for item in passive["controls"] if item["controlID"] == "web.session-management")
+        self.assertIn("Set-Cookie 응답을 관측하지 못했습니다", cookie["reason"])
 
     def test_entry_redirect_is_followed_inside_scope(self):
         profile = self.deep_profile()

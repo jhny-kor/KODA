@@ -229,8 +229,9 @@ enum NativeWebAuditRules {
         return Double(2 * shared) / Double(total) >= 0.9
     }
 
-    static func probe(_ target: ProbeTarget, transport: WebAuditTransport) async -> (observations: [WebAuditObservation], warnings: [String]) {
-        var output: [WebAuditObservation] = [], warnings: [String] = []
+    /// `tested` counts fields that went through every check, so coverage never includes an aborted field.
+    static func probe(_ target: ProbeTarget, transport: WebAuditTransport) async -> (observations: [WebAuditObservation], warnings: [String], tested: Int) {
+        var output: [WebAuditObservation] = [], warnings: [String] = [], tested = 0
         let items = target.fields
         let nonce = "koda" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)
         func request(_ fields: [URLQueryItem]) throws -> WebAuditRequest {
@@ -315,9 +316,35 @@ enum NativeWebAuditRules {
                    baseline.header("location") != destination, control.header("location") != destination {
                     add("active.redirect", "web.process-validation", "외부 URL 리다이렉트", "\(field): 외부 표식 URL이 Location에 그대로 반영되었습니다. 대상 URL로 이동하지 않았습니다.", confirmed: true)
                 }
+                tested += 1
             }
         } catch { warnings.append("능동 검사 일부 중단: \(error.localizedDescription)") }
-        return (output, warnings)
+        return (output, warnings, tested)
+    }
+
+    /// A form-encoded POST with no token-like field or header can be forged by any site. JSON bodies need a
+    /// CORS preflight, and SameSite cookies may still protect the form, so this is a review signal only.
+    static func csrfReview(_ target: ProbeTarget) -> WebAuditObservation? {
+        let pattern = "(?i)csrf|xsrf|token|nonce|authenticity"
+        guard target.method == "POST", target.jsonTemplate == nil,
+              !target.fields.contains(where: { $0.name.range(of: pattern, options: .regularExpression) != nil }),
+              !target.headers.keys.contains(where: { $0.range(of: pattern, options: .regularExpression) != nil }) else { return nil }
+        return WebAuditObservation(ruleID: "passive.csrf-token", controlID: "web.csrf", title: "CSRF 토큰 미관측 POST 요청", severity: "medium",
+            status: .needsReview, endpoint: target.url.absoluteString, method: "POST",
+            evidence: "\(target.source == "har" ? "HAR" : "HTML 폼")의 POST 요청에 토큰 형식 필드·헤더가 없습니다. SameSite 쿠키·Origin 검증 여부를 확인하세요.",
+            recommendation: "상태를 바꾸는 요청에 세션별 CSRF 토큰 또는 Origin 검증을 적용하세요.", cwe: "CWE-352")
+    }
+
+    /// OPTIONS advertises what the server accepts; TRACE is never needed, write methods may be legitimate REST.
+    static func inspectMethods(response: WebAuditResponse) -> WebAuditObservation? {
+        let allowed = response.header("allow").uppercased().split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
+        let risky = allowed.filter { ["TRACE", "TRACK", "CONNECT", "PUT", "DELETE", "PATCH"].contains($0) }
+        guard !risky.isEmpty else { return nil }
+        let trace = risky.contains("TRACE") || risky.contains("TRACK")
+        return WebAuditObservation(ruleID: "passive.http-methods", controlID: "web.http-methods", title: "불필요한 HTTP 메서드 허용 표시",
+            severity: trace ? "medium" : "low", status: .needsReview, endpoint: response.url.absoluteString, method: "OPTIONS",
+            evidence: "Allow: \(allowed.joined(separator: ", ")). 실제 처리 여부는 검증하지 않았습니다.",
+            recommendation: "서비스에 필요한 메서드만 허용하고 TRACE·TRACK은 비활성화하세요.", cwe: "CWE-749")
     }
 
     private static func matches(_ text: String, _ pattern: String) -> Bool {

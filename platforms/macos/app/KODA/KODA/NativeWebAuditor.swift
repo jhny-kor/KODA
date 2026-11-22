@@ -31,6 +31,32 @@ enum NativeWebAuditor {
         let redactor = WebAuditRedactor(profile: profile)
         let profileHash = SHA256.hash(data: try profile.encoded()).map { String(format: "%02x", $0) }.joined()
 
+        // What each control's automated checks actually examined. Only this can turn NOT_SCANNED into NO_FINDING.
+        var coverage: [String: [String: Int]] = [:]
+        func cover(_ control: String, _ what: String, _ count: Int = 1) {
+            if count > 0 { coverage[control, default: [:]][what, default: 0] += count }
+        }
+        func passive(_ response: WebAuditResponse) -> [WebAuditObservation] {
+            cover("web.error-pages", "응답 본문 상세 오류 문자열")
+            if response.header("content-type").lowercased().contains("html") { cover("web.directory-indexing", "HTML 응답 디렉터리 목록 형식") }
+            if !response.header("set-cookie").isEmpty { cover("web.session-management", "Set-Cookie 보호 속성") }
+            if response.url.scheme == "https" { cover("web.plaintext-transmission", "HTTPS 응답 HSTS·프레임 보호 헤더") }
+            return NativeWebAuditRules.inspect(response: response)
+        }
+        func record(_ result: (observations: [WebAuditObservation], warnings: [String], tested: Int)) {
+            observations += result.observations
+            if !result.warnings.isEmpty { completed = false; warnings += result.warnings }
+            for (control, what) in [("web.xss", "입력값 반사형 XSS 표식"), ("web.sql-injection", "입력값 SQL 오류·참/거짓 조건"),
+                                    ("web.file-download", "입력값 경로 조작(/etc/passwd)"), ("web.code-injection", "입력값 템플릿 산술식"),
+                                    ("web.process-validation", "입력값 외부 리다이렉트"), ("web.information-disclosure", "입력값 응답 헤더 삽입(CRLF)")] {
+                cover(control, what, result.tested)
+            }
+        }
+        func csrf(_ target: NativeWebAuditRules.ProbeTarget) {
+            cover("web.csrf", "POST 요청 CSRF 토큰 필드·헤더")
+            if let found = NativeWebAuditRules.csrfReview(target) { observations.append(found) }
+        }
+
         func note(_ error: Error, context: String) {
             completed = false
             // Transport errors may contain URLs or credentials supplied by an untrusted target.
@@ -49,7 +75,7 @@ enum NativeWebAuditor {
             progress?("웹 경로 점검 \(visited.count): \(redactor.clean(url.absoluteString))")
             do {
                 let response = try await transport.send(WebAuditRequest(url: url), actor: "primary")
-                observations += NativeWebAuditRules.inspect(response: response)
+                observations += passive(response)
                 // The transport never follows redirects; the crawler does, but only inside the profile's scope.
                 if (300..<400).contains(response.status), let location = URL(string: response.header("location"), relativeTo: url)?.absoluteURL {
                     if withinScope(location, profile: profile) {
@@ -63,11 +89,12 @@ enum NativeWebAuditor {
                 if profile.active {
                     var targets = NativeWebAuditRules.queryTarget(url).map { [$0] } ?? []
                     if corsChecked.insert(url.path).inserted {
-                        do { observations += try await NativeWebAuditRules.probeCORS(url: url, transport: transport) }
+                        do { observations += try await NativeWebAuditRules.probeCORS(url: url, transport: transport); cover("web.authorization", "경로별 임의 Origin CORS 반사") }
                         catch { note(error, context: "CORS 검사 미완료"); if WebAuditError.stopsRun(error) { break crawl } }
                     }
                     if response.header("content-type").lowercased().contains("html"), (200..<300).contains(response.status) {
                         for form in NativeWebAuditRules.formTargets(html: response.text, page: url) where withinScope(form.url, profile: profile) {
+                            if form.method == "POST" && !skippedPostForms.contains(form.signature) && !probed.contains(form.signature) { csrf(form) }
                             if form.method == "POST" && !postAllowed { skippedPostForms.insert(form.signature) } else { targets.append(form) }
                         }
                         if discoveredOn.insert(url.path).inserted {
@@ -78,9 +105,7 @@ enum NativeWebAuditor {
                     }
                     for target in targets where probed.insert(target.signature).inserted {
                         progress?("능동 검사: \(target.method) \(redactor.clean(target.url.path))")
-                        let result = await NativeWebAuditRules.probe(target, transport: transport)
-                        observations += result.observations
-                        if !result.warnings.isEmpty { completed = false; warnings += result.warnings }
+                        record(await NativeWebAuditRules.probe(target, transport: transport))
                     }
                 }
                 if response.header("content-type").lowercased().contains("html") {
@@ -100,15 +125,14 @@ enum NativeWebAuditor {
             progress?("HAR 요청 \(har.inScope)건 · 페이지 \(har.pages.count) · POST \(har.targets.count)")
             if har.inScope == 0 { completed = false; warnings.append("HAR에 점검 범위 안의 요청이 없습니다. 대상 URL과 HAR 기록의 주소가 같은지 확인하세요.") }
             if har.unsafeMethods > 0 { completed = false; warnings.append("HAR의 PUT·PATCH·DELETE 요청 \(har.unsafeMethods)개는 데이터 변경 위험으로 재전송하지 않았습니다.") }
+            for target in har.targets { csrf(target) }
             let pending = har.targets.filter { !probed.contains($0.signature) }
             if !profile.active || !postAllowed {
                 if !pending.isEmpty { completed = false; warnings.append("능동 검사·상태 변경(POST) 승인이 없어 HAR의 POST 요청 \(pending.count)개는 재전송하지 않았습니다.") }
             } else {
                 for target in pending where !Task.isCancelled && probed.insert(target.signature).inserted {
                     progress?("능동 검사(HAR): POST \(redactor.clean(target.url.path))")
-                    let result = await NativeWebAuditRules.probe(target, transport: transport)
-                    observations += result.observations
-                    if !result.warnings.isEmpty { completed = false; warnings += result.warnings }
+                    record(await NativeWebAuditRules.probe(target, transport: transport))
                 }
             }
         }
@@ -116,6 +140,17 @@ enum NativeWebAuditor {
         if !skippedPostForms.isEmpty {
             completed = false
             warnings.append("상태 변경(POST) 승인이 없어 POST 폼 \(skippedPostForms.count)개의 입력값은 능동 검사하지 않았습니다.")
+        }
+
+        if !Task.isCancelled && profile.allowedMethods.contains("OPTIONS") {
+            do {
+                let response = try await transport.send(WebAuditRequest(url: base, method: "OPTIONS"), actor: "primary")
+                // No Allow header means nothing was learned, so the control stays unjudged.
+                if !response.header("allow").isEmpty {
+                    cover("web.http-methods", "OPTIONS 응답 Allow 헤더")
+                    if let found = NativeWebAuditRules.inspectMethods(response: response) { observations.append(found) }
+                }
+            } catch { note(error, context: "HTTP 메서드 확인 미완료") }
         }
 
         if !Task.isCancelled {
@@ -128,6 +163,7 @@ enum NativeWebAuditor {
                     }
                     if isBuiltin && !withinScope(url, profile: profile) { continue }
                     let response = try await transport.send(WebAuditRequest(url: url), actor: "primary")
+                    cover(rule.controlID, "민감 경로 노출 규칙")
                     guard matches(rule, response) else { continue }
                     var differentiated = false
                     if isBuiltin {
@@ -157,7 +193,8 @@ enum NativeWebAuditor {
                     if !profile.active && plan.invalidRequestIndices.contains(index) { continue }
                     do {
                         let response = try await transport.send(request, actor: "primary")
-                        observations += NativeWebAuditRules.inspect(response: response)
+                        observations += passive(response)
+                        cover("web.process-validation", "API 명세 요청 입력 경계·응답 계약")
                         observations += NativeWebAuditRules.inspectAPI(response: response,
                             isNegative: plan.invalidRequestIndices.contains(index), expectation: plan.responseExpectations[index])
                     } catch { note(error, context: "API 검사 중단"); if WebAuditError.stopsRun(error) { break } }
@@ -241,6 +278,16 @@ enum NativeWebAuditor {
         observations = Array(Set(observations.map { redactor.clean($0) })).sorted {
             ($0.controlID, $0.ruleID, $0.endpoint) < ($1.controlID, $1.ruleID, $1.endpoint)
         }
+        let inputControls: Set = ["web.xss", "web.sql-injection", "web.file-download", "web.code-injection", "web.process-validation"]
+        // Automated checks that ran into nothing they could judge say why, instead of "not automated".
+        let unjudged = [
+            "web.http-methods": profile.allowedMethods.contains("OPTIONS") ? "OPTIONS 응답에 Allow 헤더가 없어 허용 메서드를 판정하지 못했습니다."
+                : "프로필이 OPTIONS를 허용하지 않아 허용 메서드를 확인하지 않았습니다.",
+            "web.session-management": "Set-Cookie 응답을 관측하지 못했습니다. 세션이 발급되는 경로를 HAR로 추가하거나 계정별 기대 응답을 지정하세요.",
+            "web.csrf": "검사할 POST 폼·HAR 요청을 찾지 못했습니다.",
+            "web.authorization": (profile.active ? "CORS 검사를 완료하지 못했습니다." : "능동 검사가 꺼져 있어 CORS를 검사하지 않았습니다.") +
+                " 계정별 접근 권한은 프로필의 기대 응답으로 지정하세요.",
+        ]
         let controls = WebAuditCatalog.controls.map { id, title -> WebAuditControlResult in
             let related = observations.filter { $0.controlID == id }
             let status: WebAuditStatus
@@ -248,8 +295,19 @@ enum NativeWebAuditor {
             if related.contains(where: { $0.status == .vulnerable }) { status = .vulnerable; reason = "응답·대조 또는 명시적 권한 oracle에서 취약 증거 확인" }
             else if !related.isEmpty { status = .needsReview; reason = "자동 탐지 후보의 실제 보안 영향을 확인해야 합니다." }
             else if passed.contains(id) { status = completed ? .pass : .needsReview; reason = completed ? "선언한 시나리오·기대 응답만 검증 완료. 항목 전체의 안전을 보장하지 않습니다." : "실행 공백이 있어 완료 판정 보류" }
+            else if let checks = coverage[id] {
+                status = .noFinding
+                reason = "자동 검사 탐지 없음 (" + checks.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)건" }.joined(separator: ", ") +
+                    "). 검사한 경로·입력 밖의 안전은 보장하지 않습니다."
+            }
             else if !reachedTarget { status = .notScanned; reason = "대상 서버로부터 응답을 하나도 받지 못해 점검하지 못했습니다. 실행 공백의 네트워크 원인을 확인하세요." }
-            else { status = .notScanned; reason = "이 항목을 판정할 명시적 시나리오·충분한 증거가 없습니다." }
+            else if inputControls.contains(id) {
+                status = .notScanned
+                reason = profile.active ? "검사할 입력값(쿼리·폼·HAR 요청)을 찾지 못했습니다. HAR이나 API 명세로 입력 경로를 추가하세요."
+                    : "능동 검사가 꺼져 있어 입력값을 검사하지 않았습니다."
+            }
+            else if let why = unjudged[id] { status = .notScanned; reason = why }
+            else { status = .notScanned; reason = "자동 검사 대상이 아닙니다. 프로필의 계정별 기대 응답이나 업무 시나리오로 지정해야 판정합니다." }
             return WebAuditControlResult(controlID: id, title: title, status: status, reason: reason, evidenceIDs: related.map(\.evidenceID))
         }
         return WebAuditReport(target: redactor.clean(profile.target), profileHash: profileHash, completed: completed,
@@ -335,7 +393,7 @@ enum WebAuditReportWriter {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try encoder.encode(report).write(to: directory.appendingPathComponent("audit.json"), options: .atomic)
         var markdown = "# KODA Swift 웹 정밀 점검\n\n대상: \(md(report.target))\n\n실행: \(report.completed ? "완료" : "미완료 / 확인 필요") · 요청 \(report.metrics.requests)건 · \(String(format: "%.1f", report.metrics.elapsed))초\n\n"
-        markdown += "PASS는 선언한 시나리오 범위의 기대 응답을 의미합니다. 미점검 항목은 안전으로 간주하지 않습니다.\n\n| 항목 | 판정 | 근거 |\n|---|---|---|\n"
+        markdown += "PASS는 선언한 시나리오 범위의 기대 응답을 의미합니다. NO_FINDING은 자동 검사에서 탐지가 없었다는 뜻이며, 미점검 항목과 함께 안전으로 간주하지 않습니다.\n\n| 항목 | 판정 | 근거 |\n|---|---|---|\n"
         for control in report.controls { markdown += "| \(md(control.title)) | \(control.status.rawValue) | \(md(control.reason)) |\n" }
         for item in report.observations {
             markdown += "\n## \(md(item.title)) [\(item.status.rawValue)]\n\n규칙: \(md(item.ruleID)) · 증거: \(item.evidenceID)\n\n\(md(item.method)) \(md(item.endpoint))\n\n\(md(item.evidence))\n\n\(md(item.recommendation))\n"
@@ -350,7 +408,7 @@ enum WebAuditReportWriter {
         <!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>KODA Swift 웹 점검</title>
         <style>body{font:15px system-ui;max-width:1100px;margin:36px auto;padding:0 24px;color:#172335;background:#f5f7fa}table{border-collapse:collapse;width:100%;background:white}td,th{padding:12px;text-align:left;border-bottom:1px solid #dce3ed}article{padding:20px;background:white;margin-top:16px;border-radius:12px}pre,code{white-space:pre-wrap;overflow-wrap:anywhere}.warning{color:#924d00}</style>
         <h1>KODA Swift 웹 정밀 점검</h1><p>\(escape(report.target))</p><p>실행 \(report.completed ? "완료" : "미완료 / 확인 필요") · 요청 \(report.metrics.requests)건 · \(String(format: "%.1f", report.metrics.elapsed))초</p>
-        <p>PASS는 선언한 시나리오 범위에서만 유효합니다. 미점검 항목은 안전 판정이 아닙니다.</p>
+        <p>PASS는 선언한 시나리오 범위에서만 유효합니다. NO_FINDING은 자동 검사 탐지 없음이며, 미점검 항목과 함께 안전 판정이 아닙니다.</p>
         <table><tr><th>점검 항목</th><th>판정</th><th>범위·근거</th></tr>\(rows)</table>\(details)<h2>실행 공백</h2><ul class="warning">\(report.warnings.map { "<li>\(escape($0))</li>" }.joined())</ul></html>
         """
         let destination = directory.appendingPathComponent("audit.html")
