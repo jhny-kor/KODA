@@ -2,6 +2,11 @@ name: KODA Release Provenance
 
 on:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Release tag or commit to attest
+        type: string
+        required: false
   release:
     types: [published]
 
@@ -14,22 +19,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
       - name: Build source release artifact
         run: |
-          mkdir -p dist
-          tar --exclude .git --exclude dist -czf dist/koda-source-release.tar.gz .
+          artifact_dir="$RUNNER_TEMP/koda-release-provenance"
+          mkdir -p "$artifact_dir"
+          git archive --format=tar.gz --output="$artifact_dir/koda-source-release.tar.gz" HEAD
+          git rev-parse HEAD > "$artifact_dir/source-commit.txt"
       - name: Generate checksums
-        run: sha256sum dist/* > dist/checksums.txt
+        working-directory: ${{ runner.temp }}/koda-release-provenance
+        run: sha256sum koda-source-release.tar.gz source-commit.txt > checksums.txt
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
       - name: Sign artifacts with Sigstore
+        working-directory: ${{ runner.temp }}/koda-release-provenance
         run: |
-          for artifact in dist/*; do
-            [ -f "$artifact" ] || continue
+          for artifact in koda-source-release.tar.gz checksums.txt; do
             cosign sign-blob "$artifact" --bundle "$artifact.sigstore.json" --yes
           done
       - name: Upload provenance material
         uses: actions/upload-artifact@v7
         with:
           name: koda-release-provenance
-          path: dist/
+          path: ${{ runner.temp }}/koda-release-provenance/
+          if-no-files-found: error
