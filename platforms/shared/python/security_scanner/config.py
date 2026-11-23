@@ -16,22 +16,22 @@ class ConfigError(ValueError):
     """Raised when scanner configuration is invalid."""
 
 
-def load_config(path: Path) -> ScannerConfig:
+def load_config(path: Path, *, local_targets: bool = False) -> ScannerConfig:
     config_path = path.expanduser().resolve()
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ConfigError(f"Invalid JSON config {config_path}: {exc}") from exc
-    return config_from_dict(raw, base_dir=config_path.parent)
+    return config_from_dict(raw, base_dir=config_path.parent, local_targets=local_targets)
 
 
-def config_from_dict(raw: dict[str, Any], base_dir: Path | None = None) -> ScannerConfig:
+def config_from_dict(raw: dict[str, Any], base_dir: Path | None = None, *, local_targets: bool = False) -> ScannerConfig:
     base = base_dir or Path.cwd()
     targets_raw = raw.get("targets")
     if not isinstance(targets_raw, list) or not targets_raw:
         raise ConfigError("Config must define a non-empty 'targets' list.")
 
-    targets = tuple(_target_from_dict(item, base) for item in targets_raw)
+    targets = tuple(_target_from_dict(item, base, local_only=local_targets) for item in targets_raw)
     report = _report_from_dict(raw.get("report", {}), base)
     enable_vuln_intel = bool(raw.get("enable_vuln_intel", False))
     enable_osv = bool(raw.get("enable_osv", False)) or enable_vuln_intel
@@ -82,7 +82,7 @@ def config_from_dict(raw: dict[str, Any], base_dir: Path | None = None) -> Scann
     )
 
 
-def _target_from_dict(raw: dict[str, Any], base_dir: Path) -> TargetConfig:
+def _target_from_dict(raw: dict[str, Any], base_dir: Path, *, local_only: bool = False) -> TargetConfig:
     if not isinstance(raw, dict):
         raise ConfigError("Each target must be an object.")
 
@@ -90,7 +90,7 @@ def _target_from_dict(raw: dict[str, Any], base_dir: Path) -> TargetConfig:
     if not isinstance(path_value, str) or not path_value.strip():
         raise ConfigError("Each target requires a non-empty string 'path'.")
 
-    target_path = expand_path(path_value, base_dir)
+    target_path = expand_path(path_value, base_dir, local_only=local_only)
     name = raw.get("name") or target_path.name or str(target_path)
     categories = _normalize_categories(raw.get("categories", DEFAULT_CATEGORIES))
     exclude_globs = tuple(str(item) for item in raw.get("exclude_globs", ()))
@@ -119,8 +119,8 @@ def _report_from_dict(raw: dict[str, Any], base_dir: Path) -> ReportConfig:
         raise ConfigError("'report' must be an object when present.")
 
     report_format = str(raw.get("format", "markdown")).lower()
-    if report_format not in {"markdown", "json", "html", "sarif", "cyclonedx", "spdx", "nis-sbom", "cyclonedx-vex"}:
-        raise ConfigError("report.format must be 'markdown', 'json', 'html', 'sarif', 'cyclonedx', 'spdx', 'nis-sbom', or 'cyclonedx-vex'.")
+    if report_format not in {"markdown", "json", "html", "hwpx", "sarif", "cyclonedx", "spdx", "nis-sbom", "cyclonedx-vex"}:
+        raise ConfigError("report.format must be 'markdown', 'json', 'html', 'hwpx', 'sarif', 'cyclonedx', 'spdx', 'nis-sbom', or 'cyclonedx-vex'.")
 
     min_severity = str(raw.get("min_severity", "low")).lower()
     if min_severity not in SEVERITIES:
@@ -151,9 +151,14 @@ def _normalize_categories(raw: Any) -> tuple[str, ...]:
     return normalized
 
 
-def expand_path(value: str, base_dir: Path) -> Path:
+def expand_path(value: str, base_dir: Path, *, local_only: bool = False) -> Path:
     expanded = os.path.expandvars(os.path.expanduser(_expand_env_defaults(value)))
     path = Path(expanded)
+    if local_only:
+        from .local_sast import require_local_path, resolve_local_path
+
+        path = require_local_path(path)
+        return resolve_local_path(path if path.is_absolute() else base_dir / path)
     if not path.is_absolute():
         path = base_dir / path
     return path.resolve()

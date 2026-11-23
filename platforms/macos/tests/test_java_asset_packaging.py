@@ -1,5 +1,7 @@
 """Check that staged Java assets match the actual app architecture."""
 
+import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -24,7 +26,7 @@ class JavaAssetPackagingTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.workspace.cleanup()
 
-    def stage(self, helper_architecture):
+    def stage(self, helper_architecture, *, app_store=False, desktop_dashboard=True):
         workspace = tempfile.TemporaryDirectory(dir=self.root)
         self.addCleanup(workspace.cleanup)
         root = Path(workspace.name)
@@ -43,16 +45,28 @@ class JavaAssetPackagingTests(unittest.TestCase):
         (assets / "resources/grype-db/incoming").mkdir(parents=True)
         (assets / "resources/vuln-data/nvd").mkdir(parents=True)
         (assets / "resources/vuln-data/known_exploited_vulnerabilities.json").write_text("{}")
-        (assets / "asset-manifest.json").write_text("{}")
+        (assets / "asset-manifest.json").write_text(json.dumps({"desktop_dashboard": desktop_dashboard}))
         (assets / "manifest.sha256").write_text("")
-        result = subprocess.run(["bash", str(STAGE), "--app", str(app), "--assets", str(assets)],
-                                capture_output=True, text=True, timeout=20)
+        result = subprocess.run(
+            ["bash", str(STAGE), "--app", str(app), "--assets", str(assets)],
+            env={**os.environ, "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "KODA_APP_STORE" if app_store else ""},
+            capture_output=True, text=True, timeout=20,
+        )
         return result, app
 
     def test_matching_native_assets_are_staged(self):
         result, app = self.stage("arm64")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((app / "Contents/Helpers/koda-java-scan-arm64.app/Contents/MacOS/koda-java-scan").is_file())
+        self.assertTrue((app / "Contents/Resources/koda-local").is_file())
+
+    def test_app_store_stages_only_its_helper_and_omits_the_desktop_launcher(self):
+        result, _ = self.stage("arm64", app_store=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Prepare App Store", result.stderr)
+        result, app = self.stage("arm64", app_store=True, desktop_dashboard=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((app / "Contents/Resources/koda-local").exists())
 
     def test_mislabeled_helper_is_rejected_before_staging(self):
         result, app = self.stage("x86_64")

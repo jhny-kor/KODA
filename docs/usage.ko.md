@@ -66,6 +66,22 @@ positive-only 가져오기를 구현합니다. KODA가 CodeQL을 직접 다운�
 [2026-10-11 검증 기록](verification-2026-10-11.ko.md)은 실제 실행한 OS와
 조건을 설명합니다. 구현 여부는 [OS별 기능표](platform-feature-matrix.ko.md)를 보세요.
 
+## 로컬 SpotBugs와 Semgrep CE
+
+소스 폴더 한 개를 선택해 설치된 SpotBugs와 Semgrep CE를 같이 실행하거나 각각 실행할 수 있습니다. 도구 설치는 별도로 진행합니다.
+
+- SpotBugs를 쓸 때는 `KODA_SPOTBUGS_JAR`에 배포판의 `lib/spotbugs.jar` 경로를 지정합니다. Java는 `KODA_JAVA_BIN`, `JAVA_HOME`, `PATH` 순으로 찾습니다. 점검에 빌드된 JAR, `.class` 또는 클래스 폴더를 사용합니다. Java 소스가 `src/main/java` 밖에 있으면 `--spotbugs-source-root`로 선택한 소스 폴더 안의 패키지 루트를 지정하세요.
+- Semgrep CE는 `PATH`에서 찾거나 `KODA_SEMGREP_BIN`에 실행 파일 경로를 지정합니다. 규칙 입력은 로컬 YAML 파일 한 개입니다. 검사 중 Semgrep 계정 설정을 읽지 않고 원격 규칙 조회와 메트릭을 사용하지 않는 실행 옵션을 적용합니다.
+- Windows PowerShell에서 환경 변수는 `$env:KODA_SPOTBUGS_JAR = 'C:\tools\spotbugs\lib\spotbugs.jar'`처럼 설정한 뒤 같은 터미널에서 KODA를 실행합니다. Mac에서는 `koda-local dashboard`를 도구 환경 변수를 설정한 터미널에서 시작할 수 있습니다.
+
+```bash
+python -m security_scanner scan --target ./project --spotbugs-input ./project/build/classes --semgrep-rules ./team-rules.yml --format json --output ./koda-report.json
+```
+
+도구 환경을 설정한 터미널에서 Mac의 `koda-local dashboard` 또는 Windows의 `KODA.exe`를 시작합니다. **SpotBugs · Semgrep CE**에 로컬 절대 경로를 입력하고 **보안 점검**을 누르면 같은 분석을 실행합니다. 두 분석기는 GitHub 연동 없이 동작합니다. 별도로 생성한 SARIF 2.1.0은 **외부 SARIF 파일** 또는 `--source-analyzer-sarif`로 열 수 있습니다. 한 회차에서 외부 SARIF 파일과 로컬 실행 중 하나를 선택합니다.
+
+SpotBugs의 Java null 역참조는 개발보안 49의 C-01 검토 후보로 표시합니다. 나머지 SpotBugs 발견과 Semgrep 로컬 규칙 발견은 **전체** 기준에서 검토할 수 있습니다. SpotBugs가 일부 클래스를 해석하지 못하면 분석 상태를 `PARTIAL`, SARIF에 실행 실패가 기록되어 있으면 `FAILED`로 표시합니다. 파일 위치가 선택한 소스 폴더에 속하는 발견을 반영하고, 빈 SARIF만으로는 전체 검사 범위나 통제 통과를 판정할 수 없습니다.
+
 ## 안전 경계
 
 일반 스캔과 `sbom-verify`는 읽기 전용입니다. `fix --apply`, 템플릿 생성,

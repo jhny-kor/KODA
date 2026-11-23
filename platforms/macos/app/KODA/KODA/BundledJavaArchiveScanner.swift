@@ -9,6 +9,31 @@ struct BundledJavaScanOutcome {
     let detail: String
 }
 
+#if !KODA_APP_STORE
+enum SharedSourceReportFormat: String, CaseIterable {
+    case json, sarif, hwpx, spdx
+    case nisSBOM = "nis-sbom"
+
+    var title: String {
+        switch self {
+        case .json: return "KODA JSON"
+        case .sarif: return "SARIF"
+        case .hwpx: return "한글 (HWPX)"
+        case .spdx: return "SPDX 2.3 JSON"
+        case .nisSBOM: return "NIS-SBOM CSV"
+        }
+    }
+
+    var filename: String {
+        switch self {
+        case .spdx: return "koda-source.spdx.json"
+        case .nisSBOM: return "koda-source.nis-sbom.csv"
+        default: return "koda-source.\(rawValue)"
+        }
+    }
+}
+#endif
+
 enum BundledJavaArchiveScanner {
     private static let archiveExtensions = Set(["jar", "war", "ear"])
 
@@ -56,6 +81,48 @@ enum BundledJavaArchiveScanner {
         )
     }
 
+    private static var scannerExecutable: URL {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/koda-java-scan-\(architecture).app/Contents/MacOS/koda-java-scan")
+    }
+
+    #if !KODA_APP_STORE
+    static func exportSourceReport(targets: [URL], destination: URL, format: SharedSourceReportFormat,
+                                   discover: Bool, sarif: URL?, baseline: URL?, failOn: String?) throws -> (gateFailed: Bool, detail: String) {
+        guard !targets.isEmpty else { throw CocoaError(.fileReadNoSuchFile) }
+        guard FileManager.default.isExecutableFile(atPath: scannerExecutable.path) else {
+            throw NSError(domain: "KODA.SourceScan", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "공통 검사 엔진이 누락되었습니다. / The bundled scanner is missing."
+            ])
+        }
+        let inputs = targets + [sarif, baseline].compactMap { $0 }
+        let scoped = (inputs + [destination]).filter { $0.startAccessingSecurityScopedResource() }
+        defer { scoped.forEach { $0.stopAccessingSecurityScopedResource() } }
+        let destinationPath = destination.resolvingSymlinksInPath().standardizedFileURL.path
+        guard !inputs.contains(where: { $0.resolvingSymlinksInPath().standardizedFileURL.path == destinationPath }) else {
+            throw CocoaError(.fileWriteFileExists)
+        }
+        let directory = try stagingDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let report = directory.appendingPathComponent(format.filename)
+        var arguments = ["scan", "--format", format.rawValue, "--output", report.path]
+        for target in targets { arguments += ["--target", target.path] }
+        if discover { arguments.append("--discover-projects") }
+        if let sarif { arguments += ["--source-analyzer-sarif", sarif.path] }
+        if let baseline { arguments += ["--baseline", baseline.path] }
+        if let failOn { arguments += ["--fail-on", failOn] }
+
+        let result = try run(executable: scannerExecutable, arguments: arguments, environment: [:])
+        let gateFailed = result.exitCode == 1 && failOn != nil
+        guard (result.exitCode == 0 || gateFailed), FileManager.default.fileExists(atPath: report.path) else {
+            throw NSError(domain: "KODA.SourceScan", code: Int(result.exitCode), userInfo: [
+                NSLocalizedDescriptionKey: result.stderr.isEmpty ? "Scanner exit \(result.exitCode)" : result.stderr
+            ])
+        }
+        try Data(contentsOf: report, options: .mappedIfSafe).write(to: destination, options: .atomic)
+        return (gateFailed, result.stderr)
+    }
+    #endif
+
     private static func paths() throws -> AssetPaths {
         let contents = Bundle.main.bundleURL.appendingPathComponent("Contents", isDirectory: true)
         let resources = contents.appendingPathComponent("Resources/java-scan", isDirectory: true)
@@ -66,7 +133,7 @@ enum BundledJavaArchiveScanner {
             throw JavaScanError.missingAsset(databaseDirectory.path)
         }
         let paths = AssetPaths(
-            scanner: helpers.appendingPathComponent("koda-java-scan-\(architecture).app/Contents/MacOS/koda-java-scan"),
+            scanner: scannerExecutable,
             syft: tools.appendingPathComponent("syft"),
             grype: tools.appendingPathComponent("grype"),
             databaseArchive: databaseArchive,

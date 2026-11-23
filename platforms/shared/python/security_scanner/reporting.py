@@ -1869,7 +1869,10 @@ def render_web_audit_markdown(result: dict[str, object], language: str = "ko") -
     korean = language == "ko"
     title = "웹취약점 21개 항목 자동 점검" if korean else "21-control web vulnerability audit"
     headers = "| ID | 항목 | 상태 | 실행 | 커버리지 | 사유 |\n|---|---|---|---:|---:|---|" if korean else "| ID | Control | Status | Executed | Coverage | Reason |\n|---|---|---|---:|---:|---|"
-    lines = [f"## {title}", "", f"- Overall: `{result.get('status', 'NOT_SCANNED')}`", "", headers]
+    lines = [f"## {title}", "", f"- Overall: `{result.get('status', 'NOT_SCANNED')}`", ""]
+    if any(isinstance(item, dict) and item.get("status") == "NO_FINDING" for item in controls):
+        lines.extend([_no_finding_description(language), ""])
+    lines.append(headers)
     for item in controls:
         if not isinstance(item, dict):
             continue
@@ -2570,6 +2573,12 @@ def render_hwpx(payload: dict[str, object], language: str = "ko") -> bytes:
     return buffer.getvalue()
 
 
+def _no_finding_description(language: str) -> str:
+    if language == "ko":
+        return "NO_FINDING은 사유에 표시된 자동 검사가 해당 응답에서 탐지한 내용이 없음을 뜻합니다. PASS는 선언한 시나리오의 기대 응답을 확인한 경우입니다."
+    return "NO_FINDING means the named check found no issue in the inspected responses. PASS requires a completed scenario with its declared expectations."
+
+
 def _web_audit_html(result: dict[str, object], language: str = "ko") -> str:
     controls = result.get("controls") if isinstance(result.get("controls"), list) else []
     rows: list[str] = []
@@ -2588,9 +2597,12 @@ def _web_audit_html(result: dict[str, object], language: str = "ko") -> str:
             "</tr>"
         )
     title = "웹취약점 21개 항목 자동 점검" if language == "ko" else "21-control web vulnerability audit"
+    note = ""
+    if any(isinstance(item, dict) and item.get("status") == "NO_FINDING" for item in controls):
+        note = f"<p>{html.escape(_no_finding_description(language))}</p>"
     return (
         '<section class="web-audit-results">'
-        f"<h2>{html.escape(title)}</h2>"
+        f"<h2>{html.escape(title)}</h2>{note}"
         f"<p>Overall: <strong>{html.escape(str(result.get('status', 'NOT_SCANNED')))}</strong></p>"
         '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Control</th><th>Status</th><th>Executed</th><th>Coverage</th><th>Reason</th></tr></thead>'
         f"<tbody>{''.join(rows)}</tbody></table></div></section>"
@@ -2602,6 +2614,11 @@ def render_html(
     target_names: tuple[str, ...] = (),
     language: str = "en",
     *,
+    local_desktop: bool = False,
+    local_only: bool = False,
+    source_only: bool = False,
+    har_review_available: bool = False,
+    desktop_os_tools: bool = False,
     target_paths: dict[str, str] | None = None,
     components: tuple[DependencyComponent, ...] = (),
     warnings: tuple[str, ...] = (),
@@ -2622,6 +2639,16 @@ def render_html(
         scanned_categories=scanned_categories,
         source_analysis=source_analysis,
     )
+    if local_desktop:
+        payload["local_desktop"] = True
+    if local_only:
+        payload["local_only"] = True
+    if source_only:
+        payload["source_only"] = True
+    if har_review_available:
+        payload["har_review_available"] = True
+    if desktop_os_tools:
+        payload["desktop_os_tools"] = True
     return _render_html_payload(payload, language)
 
 
@@ -2738,7 +2765,14 @@ def _render_html_payload(payload: dict[str, object], language: str, *, summary_h
     # Main and detail reports are independent artifacts.  Do not inject a
     # cross-page back link; the caller can open either file directly.
     replacements["__INITIAL_SUMMARY_LINK_HTML__"] = ""
-    replacements["__INITIAL_SSBOM_TRACKER_LINK_HTML__"] = _sbom_tracker_link_markup(language)
+    local_only = payload.get("local_only") is True
+    body_classes = []
+    if local_only:
+        body_classes.append("local-only")
+    if payload.get("source_only") is True:
+        body_classes.append("source-only")
+    replacements["__DASHBOARD_BODY_CLASS__"] = f' class="{" ".join(body_classes)}"' if body_classes else ""
+    replacements["__INITIAL_SSBOM_TRACKER_LINK_HTML__"] = "" if local_only else _sbom_tracker_link_markup(language)
     content = HTML_TEMPLATE
     for placeholder, value in replacements.items():
         content = content.replace(placeholder, value)
@@ -4759,9 +4793,10 @@ HTML_TEMPLATE = """<!doctype html>
       .metric { min-height: 84px; }
       .metric-value { font-size: 26px; }
     }
+    .local-only [data-live-scan], .source-only [data-live-web] { display: none; }
   </style>
 </head>
-<body>
+<body__DASHBOARD_BODY_CLASS__>
   <header>
     <div class="shell topbar">
       <div class="brand">
@@ -4807,13 +4842,49 @@ HTML_TEMPLATE = """<!doctype html>
           <button id="screen-quality-run" type="button">__INITIAL_SCREEN_QUALITY_RUN__</button>
         </div>
       </div>
+      <section id="desktop-tools" hidden>
+        <details id="project-panel">
+          <summary id="projects-title"></summary>
+          <div class="scan-run-row">
+            <button id="project-add" type="button"></button>
+            <button id="project-add-file" type="button"></button>
+            <button id="project-save" type="button"></button>
+            <select id="project-list"></select>
+            <button id="project-load" type="button"></button>
+            <button id="project-delete" type="button"></button>
+          </div>
+          <ul id="project-targets"></ul>
+          <p id="project-status" role="status"></p>
+          <h3 id="history-title"></h3>
+          <p id="history-delta"></p>
+          <ol id="history-list"></ol>
+          <a id="history-download" download="KODA-score-diff.md" hidden></a>
+          <button id="history-clear" type="button"></button>
+        </details>
+        <label id="sarif-label" for="sarif-path"></label>
+        <input id="sarif-path" type="text" autocomplete="off" spellcheck="false">
+        <details>
+          <summary id="local-sast-title"></summary>
+          <label id="spotbugs-input-label" for="spotbugs-input"></label>
+          <input id="spotbugs-input" type="text" autocomplete="off" spellcheck="false">
+          <label id="spotbugs-source-label" for="spotbugs-source-root"></label>
+          <input id="spotbugs-source-root" type="text" autocomplete="off" spellcheck="false">
+          <label id="semgrep-rules-label" for="semgrep-rules"></label>
+          <input id="semgrep-rules" type="text" autocomplete="off" spellcheck="false">
+          <p id="local-sast-note" class="scan-note"></p>
+        </details>
+        <a id="local-ai-open" href="/local-ai"></a>
+        <a id="har-review-open" href="/har-review" hidden></a>
+        <a id="local-listeners-open" href="/local-listeners" hidden></a>
+        <a id="crypto-review-open" href="/crypto-review" hidden></a>
+      </section>
       <div class="scan-web-form">
         <label id="upload-scan-title" class="scan-web-title" for="scan-upload">__INITIAL_UPLOAD_SCAN_TITLE__</label>
         <input id="scan-upload" type="file">
         <button id="scan-upload-run" type="button">__INITIAL_UPLOAD_SCAN_NOW__</button>
         <span id="upload-scan-note" class="scan-note">__INITIAL_UPLOAD_SCAN_NOTE__</span>
       </div>
-      <div class="scan-web-form">
+      <div class="scan-web-form" data-live-scan data-live-web>
         <span id="web-scan-title" class="scan-web-title">__INITIAL_WEB_SCAN_TITLE__</span>
         <input id="web-url" class="path-display" type="url" autocomplete="off" placeholder="__INITIAL_WEB_URL_PLACEHOLDER__">
         <details class="scan-web-options">
@@ -4862,7 +4933,7 @@ HTML_TEMPLATE = """<!doctype html>
         <button id="web-scan-run" type="button">__INITIAL_WEB_SCAN_NOW__</button>
         <span id="web-scan-note" class="scan-note"></span>
       </div>
-      <div class="scan-web-form">
+      <div class="scan-web-form" data-live-scan data-live-web>
         <span id="zap-scan-title" class="scan-web-title">__INITIAL_ZAP_SCAN_TITLE__</span>
         <input id="zap-url" class="path-display" type="url" autocomplete="off" placeholder="__INITIAL_WEB_URL_PLACEHOLDER__">
         <details class="scan-web-options">
@@ -4903,7 +4974,7 @@ HTML_TEMPLATE = """<!doctype html>
         </label>
       </div>
       <div class="scan-actions">
-        <label class="scan-option" title="">
+        <label class="scan-option" title="" data-live-scan>
           <input id="scan-osv" type="checkbox">
           <span id="scan-osv-label"></span>
         </label>
@@ -4920,7 +4991,7 @@ HTML_TEMPLATE = """<!doctype html>
           </select>
         </label>
         <button id="sbom-download" type="button"></button>
-        <span id="scan-osv-note" class="scan-note"></span>
+        <span id="scan-osv-note" class="scan-note" data-live-scan></span>
         <span id="scan-host-note" class="scan-note"></span>
       </div>
       <div class="report-download" id="report-download">
@@ -5069,6 +5140,111 @@ HTML_TEMPLATE = """<!doctype html>
       settingsRenderedKey: "",
       disabledRules: loadDisabledRules(),
     };
+
+    const localDesktop = payload.local_desktop === true;
+    const harReviewAvailable = payload.har_review_available === true;
+    let extraProjectPaths = [];
+    let savedProjects = { profiles: [], history: [] };
+
+    function projectText(ko, en) {
+      return state.language === "ko" ? ko : en;
+    }
+
+    function projectTargets() {
+      return [byId("scan-path").value, ...extraProjectPaths].filter(Boolean);
+    }
+
+    function renderDesktopProjects() {
+      if (!localDesktop) return;
+      byId("desktop-tools").hidden = false;
+      setText("projects-title", projectText("프로젝트 프로필과 점검 이력", "Project profiles and scan history"));
+      setText("project-add", projectText("점검 폴더 추가", "Add scan folder"));
+      setText("project-add-file", projectText("소스 파일 추가", "Add source file"));
+      setText("project-save", projectText("현재 대상 저장", "Save current targets"));
+      setText("project-load", projectText("불러오기", "Load"));
+      setText("project-delete", projectText("프로필 삭제", "Delete profile"));
+      setText("history-title", projectText("최근 점검 위험점수", "Recent scan scores"));
+      setText("history-clear", projectText("이력 지우기", "Clear history"));
+      setText("sarif-label", projectText("외부 SARIF 파일의 전체 경로 (선택)", "External SARIF file path (optional)"));
+      setText("local-sast-title", projectText("SpotBugs · Semgrep CE", "SpotBugs · Semgrep CE"));
+      setText("spotbugs-input-label", projectText("SpotBugs 빌드 결과 경로 (JAR·class·폴더)", "SpotBugs compiled input path (JAR, class, or directory)"));
+      setText("spotbugs-source-label", projectText("Java 패키지 루트 경로 (선택)", "Java package root path (optional)"));
+      setText("semgrep-rules-label", projectText("Semgrep CE 로컬 YAML 규칙 파일 경로", "Semgrep CE local YAML rules file path"));
+      setText("local-sast-note", projectText(
+        "설치한 도구로 소스 폴더 하나를 점검합니다. 전체 경로를 입력하세요. Semgrep 결과는 전체 기준으로 확인하세요.",
+        "Use installed tools with one source directory. Enter full paths. Select the Local baseline to view Semgrep findings."
+      ));
+      setText("local-ai-open", projectText("로컬 AI 수정 후보", "Local AI fix candidate"));
+      byId("har-review-open").hidden = !harReviewAvailable;
+      setText("har-review-open", projectText("HAR 기록 검토", "Review HAR recording"));
+      byId("local-listeners-open").hidden = payload.desktop_os_tools !== true;
+      setText("local-listeners-open", projectText("이 PC의 TCP 수신 포트", "Local TCP listeners"));
+      byId("crypto-review-open").hidden = payload.desktop_os_tools !== true;
+      setText("crypto-review-open", projectText("인증서와 JWT 키 길이 검토", "Review certificates and JWT key length"));
+      const targets = projectTargets();
+      byId("project-targets").replaceChildren(...targets.map(path => {
+        const item = document.createElement("li");
+        item.textContent = path;
+        return item;
+      }));
+      const select = byId("project-list");
+      const selected = select.value;
+      select.setAttribute("aria-label", projectText("저장한 프로젝트 프로필", "Saved project profiles"));
+      select.replaceChildren(...savedProjects.profiles.map(profile => new Option(profile.paths.join(" · "), profile.id)));
+      if (savedProjects.profiles.some(profile => String(profile.id) === selected)) select.value = selected;
+      byId("project-save").disabled = state.scanRunning || !targets.length;
+      byId("project-add-file").disabled = byId("project-add").disabled = state.scanRunning;
+      byId("project-load").disabled = byId("project-delete").disabled = state.scanRunning || !select.value;
+      const [latest, previous] = savedProjects.history;
+      const signed = delta => delta > 0 ? "+" + delta : String(delta);
+      let difference = latest ? "" : projectText("저장된 점검 이력이 없습니다.", "No scan history yet.");
+      const download = byId("history-download");
+      download.hidden = !previous;
+      if (previous) {
+        const diffs = severityOrder.map(level => level + " " + signed((latest.severity[level] || 0) - (previous.severity[level] || 0)));
+        const changes = [
+          projectText("위험점수", "Risk score") + " " + signed(latest.score - previous.score),
+          projectText("발견 건수", "Finding count") + " " + signed(latest.count - previous.count), ...diffs];
+        difference = [projectText("직전 회차 대비", "Change since previous scan"), ...changes].join(" · ");
+        const title = projectText("KODA 점검 변경 리포트", "KODA Scan Change Report");
+        const markdown = ["# " + title, "", previous.date + " → " + latest.date, "",
+          ...changes.map(change => "- " + change), ""].join("\\n");
+        download.href = "data:text/markdown;charset=utf-8," + encodeURIComponent(markdown);
+        download.textContent = projectText("변경 리포트 저장", "Download change report");
+      }
+      setText("history-delta", difference);
+      byId("history-list").replaceChildren(...savedProjects.history.map(entry => {
+        const item = document.createElement("li");
+        item.textContent = [new Date(entry.date).toLocaleString(state.language), entry.targets.join(", "),
+          labels().risk_score + " " + entry.score, labels().findings + " " + entry.count].join(" · ");
+        return item;
+      }));
+      byId("history-clear").disabled = !latest;
+    }
+
+    async function desktopProjectAction(action) {
+      try {
+        const response = await fetch("/api/desktop-projects", {
+          method: "POST", headers: await dashboardJsonHeaders(),
+          body: JSON.stringify({action, id: byId("project-list").value, paths: projectTargets()})
+        });
+        const result = await parseJsonResponse(response);
+        if (!response.ok) throw new Error(result.error || response.statusText);
+        if (action === "load") {
+          byId("scan-path").value = result.paths[0];
+          extraProjectPaths = result.paths.slice(1);
+          setText("project-status", projectText("프로필을 불러왔습니다.", "Loaded profile.") +
+            (result.missing ? " " + projectText("누락된 대상 수 ", "Missing targets: ") + result.missing : ""));
+        } else {
+          savedProjects = result;
+          if (action === "save") setText("project-status", projectText("프로필을 저장했습니다.", "Profile saved."));
+          if (action === "delete") setText("project-status", projectText("프로필을 삭제했습니다.", "Profile deleted."));
+        }
+        renderDesktopProjects();
+      } catch (error) {
+        setText("project-status", error.message);
+      }
+    }
 
     function byId(id) {
       return document.getElementById(id);
@@ -5981,6 +6157,7 @@ HTML_TEMPLATE = """<!doctype html>
 
     function render() {
       renderChrome();
+      renderDesktopProjects();
       renderScanStandards();
       renderView();
       if (state.view === "help") {
@@ -5996,6 +6173,12 @@ HTML_TEMPLATE = """<!doctype html>
     }
 
     function applyPayload(nextPayload) {
+      if (localDesktop && ["directory", "upload"].includes(nextPayload.scan?.kind)) {
+        if (nextPayload.scan.history_error) {
+          state.scanStatus += projectText(" · 이력 저장 실패", " · Could not save history");
+        }
+        if (byId("project-panel").open) desktopProjectAction("list");
+      }
       payload = nextPayload;
       summary = payload.summary;
       state.search = "";
@@ -6012,7 +6195,7 @@ HTML_TEMPLATE = """<!doctype html>
       render();
     }
 
-    async function chooseDirectory() {
+    async function chooseDirectory(append = false, kind = "directory") {
       const activeLabels = labels();
       state.scanStatus = "";
       state.scanStatusClass = "";
@@ -6022,7 +6205,7 @@ HTML_TEMPLATE = """<!doctype html>
         const response = await fetch(apiEndpoint("/api/select-directory"), {
           method: "POST",
           headers: await dashboardJsonHeaders(),
-          body: JSON.stringify({ current_path: byId("scan-path").value || "" }),
+          body: JSON.stringify({ current_path: byId("scan-path").value || "", kind }),
         });
         const result = await parseJsonResponse(response);
         if (!response.ok) {
@@ -6034,7 +6217,12 @@ HTML_TEMPLATE = """<!doctype html>
           render();
           return;
         }
-        byId("scan-path").value = result.path || "";
+        if (append && byId("scan-path").value) {
+          if (!projectTargets().includes(result.path)) extraProjectPaths.push(result.path);
+        } else {
+          extraProjectPaths = [];
+          byId("scan-path").value = result.path || "";
+        }
         state.scanStatus = `${activeLabels.folder_selected}: ${result.path || ""}`;
         state.scanStatusClass = "ok";
         render();
@@ -6060,12 +6248,22 @@ HTML_TEMPLATE = """<!doctype html>
       state.scanStatusClass = "";
       render();
 
+      const analyzerInputs = localDesktop ? {
+        source_analyzer_sarif: byId("sarif-path").value.trim(),
+        spotbugs_input: byId("spotbugs-input").value.trim(),
+        spotbugs_source_root: byId("spotbugs-source-root").value.trim(),
+        semgrep_rules: byId("semgrep-rules").value.trim(),
+      } : {};
       try {
         const response = await fetch(apiEndpoint("/api/scan"), {
           method: "POST",
           headers: await dashboardJsonHeaders(),
           body: JSON.stringify({
             path,
+            additional_paths: extraProjectPaths,
+            desktop_targets: localDesktop,
+            record_score: localDesktop,
+            ...analyzerInputs,
             language: state.language,
             discover_projects: true,
             standard: state.scanStandard,
@@ -6083,6 +6281,14 @@ HTML_TEMPLATE = """<!doctype html>
         state.scanRunning = false;
         state.scanStatus = `${labels().scan_status_done}: ${nextPayload.scan.path || path}`;
         state.scanStatusClass = "ok";
+        if (Object.values(analyzerInputs).some(Boolean)) {
+          const runs = (nextPayload.source_analysis?.analyzer_runs || []).filter(run => run.output_origin === "pre_generated");
+          const warnings = nextPayload.scan.warnings.filter(warning => String(warning).includes("sarif_"));
+          state.scanStatus += " · SARIF " + (runs.map(run => run.analyzer + " " + (run.failure_reason || run.status)).join(" · ")
+            || projectText("상태 미확인", "status unavailable"));
+          if (warnings.length) state.scanStatus += " · " + warnings.join(" · ");
+          if (!runs.length || runs.some(run => run.status !== "SUCCESS")) state.scanStatusClass = "error";
+        }
         applyPayload(nextPayload);
       } catch (error) {
         state.scanRunning = false;
@@ -6118,6 +6324,7 @@ HTML_TEMPLATE = """<!doctype html>
           standard: state.scanStandard,
           standard_category: state.scanStandardCategory,
           enable_osv: byId("scan-osv").checked ? "1" : "0",
+          record_score: localDesktop ? "1" : "0",
         });
         state.disabledRules.forEach((ruleId) => query.append("disabled_rule", ruleId));
         const response = await fetch(apiEndpoint(`/api/scan-upload?${query}`), {
@@ -6305,6 +6512,9 @@ HTML_TEMPLATE = """<!doctype html>
           headers: await dashboardJsonHeaders(),
           body: JSON.stringify({
             path,
+            additional_paths: extraProjectPaths,
+            desktop_targets: localDesktop,
+            record_score: localDesktop,
             language: state.language,
             discover_projects: true,
             categories: ["screen_quality"],
@@ -6452,6 +6662,17 @@ HTML_TEMPLATE = """<!doctype html>
       byId("location").value = "all";
       byId("result-standard").value = "all";
       render();
+    });
+    byId("project-panel").addEventListener("toggle", () => {
+      if (localDesktop && byId("project-panel").open) desktopProjectAction("list");
+    });
+    byId("project-add-file").addEventListener("click", () => chooseDirectory(true, "file"));
+    byId("project-add").addEventListener("click", () => chooseDirectory(true));
+    for (const action of ["save", "load", "delete"]) {
+      byId("project-" + action).addEventListener("click", () => desktopProjectAction(action));
+    }
+    byId("history-clear").addEventListener("click", () => {
+      if (window.confirm(projectText("전체 점검 이력을 지울까요?", "Clear all scan history?"))) desktopProjectAction("clear-history");
     });
     byId("scan-choose").addEventListener("click", () => {
       chooseDirectory();

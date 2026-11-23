@@ -17,6 +17,12 @@ struct ContentView: View {
     @State private var showThreatModelWizard = false
     @State private var showComplianceDashboard = false
     @State private var showNativeWebAudit = false
+    #if !KODA_APP_STORE
+    @State private var showSharedSourceScan = false
+    @State private var dashboardProcess: Process?
+    @State private var dashboardURL: URL?
+    @State private var dashboardError: String?
+    #endif
     @AppStorage("koda.dashboard.topFraction.v2") private var dashboardTopFraction = 0.25
 
     var body: some View {
@@ -76,6 +82,20 @@ struct ContentView: View {
                 showSettings = false
             }
         }
+        #if !KODA_APP_STORE
+        .sheet(isPresented: $showSharedSourceScan) {
+            SharedSourceScanSheet(language: language, targets: scanner.selectedTargets)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            stopBrowserDashboard()
+        }
+        .alert(language == .ko ? "브라우저 대시보드" : "Browser dashboard",
+               isPresented: Binding(get: { dashboardError != nil }, set: { if !$0 { dashboardError = nil } })) {
+            Button("OK") { dashboardError = nil }
+        } message: {
+            Text(dashboardError ?? "")
+        }
+        #endif
         .sheet(isPresented: $showNativeWebAudit) {
             NativeWebAuditView(language: language, onClose: { showNativeWebAudit = false })
         }
@@ -139,6 +159,63 @@ struct ContentView: View {
         }
     }
 
+    #if !KODA_APP_STORE
+    private func openBrowserDashboard() {
+        if dashboardProcess?.isRunning == true, let dashboardURL {
+            NSWorkspace.shared.open(dashboardURL)
+            return
+        }
+        let command = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/koda-local")
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = command
+        process.arguments = ["--app-child", "dashboard", "--no-browser", "--language", language == .ko ? "ko" : "en"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            dashboardError = error.localizedDescription
+            return
+        }
+        dashboardProcess = process
+        dashboardURL = nil
+        let reader = output.fileHandleForReading
+        Task { @MainActor in
+            let address = await Task.detached {
+                var line = Data()
+                for _ in 0..<256 {
+                    guard let byte = try? reader.read(upToCount: 1), !byte.isEmpty else { return nil as String? }
+                    if byte.first == 10 { return String(data: line, encoding: .utf8) }
+                    line.append(byte)
+                }
+                return nil
+            }.value
+            guard dashboardProcess === process else { return }
+            guard let address, let url = URL(string: address),
+                  url.scheme == "http", url.host == "127.0.0.1", url.port != nil,
+                  url.path == "/security-dashboard.html" else {
+                stopBrowserDashboard()
+                dashboardError = language == .ko
+                    ? "로컬 대시보드 서버를 시작하지 못했습니다."
+                    : "The local dashboard server could not start."
+                return
+            }
+            dashboardURL = url
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func stopBrowserDashboard() {
+        if let dashboardProcess, dashboardProcess.isRunning {
+            dashboardProcess.terminate()
+        }
+        dashboardProcess = nil
+        dashboardURL = nil
+    }
+    #endif
+
     private func homeView(size: CGSize) -> some View {
         let metrics = layoutMetrics(for: size)
 
@@ -174,6 +251,27 @@ struct ContentView: View {
             Spacer()
 
             Menu {
+                #if !KODA_APP_STORE
+                Button {
+                    showSharedSourceScan = true
+                } label: {
+                    Label(language == .ko ? "공통 소스 점검 및 내보내기…" : "Shared source scan and export…",
+                          systemImage: "doc.text.magnifyingglass")
+                }
+                .disabled(!scanner.hasSelection || scanner.isRunning)
+                Button {
+                    openBrowserDashboard()
+                } label: {
+                    Label(language == .ko ? "브라우저 대시보드 열기" : "Open browser dashboard",
+                          systemImage: "globe")
+                }
+                .disabled(dashboardProcess?.isRunning == true && dashboardURL == nil)
+                if dashboardProcess?.isRunning == true {
+                    Button(language == .ko ? "브라우저 대시보드 종료" : "Stop browser dashboard") {
+                        stopBrowserDashboard()
+                    }
+                }
+                #endif
                 Menu {
                     Button {
                         fixPlans = scanner.buildSecurityFixPlans(language: language)
@@ -667,6 +765,120 @@ struct ContentView: View {
         return min(140, max(72, size.height - reservedHeaderAndActions - metrics.outerPadding))
     }
 }
+
+#if !KODA_APP_STORE
+private struct SharedSourceScanSheet: View {
+    let language: AppLanguage
+    let targets: [URL]
+    @Environment(\.dismiss) private var dismiss
+    @State private var format: SharedSourceReportFormat = .json
+    @State private var discover = false
+    @State private var sarif: URL?
+    @State private var baseline: URL?
+    @State private var severity = ""
+    @State private var running = false
+    @State private var message = ""
+    @State private var saved: URL?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(local("공통 소스 점검", "Shared source scan")).font(.title2.bold())
+            Text(local("선택한 대상 \(targets.count)개 · Windows와 같은 로컬 소스 검사 엔진",
+                       "\(targets.count) selected target(s) · Same local source scanner as Windows"))
+            Form {
+                Picker(local("보고서 형식", "Report format"), selection: $format) {
+                    ForEach(SharedSourceReportFormat.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Toggle(local("하위 프로젝트 자동 탐색", "Discover subprojects"), isOn: $discover)
+                inputFile(local("외부 분석 결과 (SARIF)", "External analysis (SARIF)"), selection: $sarif)
+                Picker(local("실패 기준 심각도", "Fail at severity"), selection: $severity) {
+                    Text(local("사용 안 함", "Off")).tag("")
+                    ForEach(["info", "low", "medium", "high", "critical"], id: \.self) { Text($0).tag($0) }
+                }
+                if !severity.isEmpty {
+                    inputFile(local("신규 발견 비교 기준 (JSON)", "Baseline for new findings (JSON)"), selection: $baseline)
+                }
+            }
+            .disabled(running)
+            Text(local("공통 엔진 원본 보고서에는 로컬 경로와 점검 근거가 포함될 수 있습니다.",
+                       "Shared-engine reports may contain local paths and finding evidence."))
+                .font(.caption).foregroundStyle(.secondary)
+            if !message.isEmpty {
+                ScrollView { Text(message).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                    .frame(maxHeight: 100)
+            }
+            HStack {
+                Button(local("로컬 CLI 경로 복사", "Copy local CLI path")) {
+                    let cli = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/koda-local")
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(cli.path, forType: .string)
+                    message = local("복사한 CLI 경로", "Copied CLI path") + "\n" + cli.path
+                }
+                if running { ProgressView().controlSize(.small) }
+                if let saved {
+                    Button(local("Finder에서 보기", "Show in Finder")) {
+                        NSWorkspace.shared.activateFileViewerSelecting([saved])
+                    }
+                }
+                Spacer()
+                Button(local("닫기", "Close")) { dismiss() }
+                Button(local("점검 후 저장…", "Scan and save…")) { scan() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .disabled(running)
+        }
+        .padding(24)
+        .frame(width: 530)
+        .interactiveDismissDisabled(running)
+    }
+
+    private func inputFile(_ title: String, selection: Binding<URL?>) -> some View {
+        LabeledContent(title) {
+            HStack {
+                Button(selection.wrappedValue?.lastPathComponent ?? local("선택…", "Choose…")) {
+                    let panel = NSOpenPanel()
+                    panel.canChooseDirectories = false
+                    if panel.runModal() == .OK { selection.wrappedValue = panel.url }
+                }
+                if selection.wrappedValue != nil {
+                    Button(local("제거", "Remove")) { selection.wrappedValue = nil }
+                }
+            }
+        }
+    }
+
+    private func local(_ ko: String, _ en: String) -> String { language == .ko ? ko : en }
+
+    private func scan() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = format.filename
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        running = true
+        saved = nil
+        message = local("소스를 점검하고 있습니다.", "Scanning source files.")
+        let failOn = severity.isEmpty ? nil : severity
+        let reference = failOn == nil ? nil : baseline
+        Task {
+            defer { running = false }
+            do {
+                let outcome = try await Task.detached(priority: .userInitiated) { [targets, format, discover, sarif] in
+                    try BundledJavaArchiveScanner.exportSourceReport(
+                        targets: targets, destination: destination, format: format, discover: discover,
+                        sarif: sarif, baseline: reference, failOn: failOn
+                    )
+                }.value
+                saved = destination
+                message = (outcome.gateFailed
+                    ? local("심각도 실패 기준에 해당하는 발견이 있습니다.", "Findings met the failure threshold.")
+                    : local("점검 완료", "Scan complete")) + "\n" + outcome.detail
+            } catch {
+                message = local("점검 실패", "Scan failed") + "\n" + error.localizedDescription
+            }
+        }
+    }
+}
+#endif
 
 private struct DashboardSplitView<Top: View, Bottom: View>: View {
     @Binding var topFraction: Double

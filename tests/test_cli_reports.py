@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 from types import SimpleNamespace
 from contextlib import redirect_stderr, redirect_stdout
@@ -57,6 +58,32 @@ class CliReportTests(unittest.TestCase):
                 ])
             self.assertEqual(exit_code, 2)
             self.assertFalse(output.exists())
+
+    def test_hwpx_export_and_invalid_sarif_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "demo.py"
+            source.write_text("print(1)", encoding="utf-8")
+            output = root / "report.hwpx"
+            args = ["scan", "--target", str(source), "--category", "code", "--format", "hwpx"]
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(main(args), 2)
+                self.assertEqual(main([*args, "--output", str(output)]), 0)
+            with zipfile.ZipFile(output) as archive:
+                self.assertIn("Contents/section0.xml", archive.namelist())
+            before = output.read_bytes()
+            errors = io.StringIO()
+            with redirect_stderr(errors):
+                self.assertEqual(main([*args, "--output", str(output), "--source-analyzer-sarif", str(source)]), 2)
+            self.assertIn("sarif_invalid_json", errors.getvalue())
+            self.assertEqual(before, output.read_bytes())
+
+    def test_local_sast_rejects_a_network_target_before_resolving_it(self) -> None:
+        target = r"\\example.invalid\share\source"
+        errors = io.StringIO()
+        with redirect_stderr(errors), patch.object(type(Path()), "resolve", side_effect=AssertionError("filesystem probe")):
+            self.assertEqual(main(["scan", "--target", target, "--semgrep-rules", "rules.yml"]), 2)
+        self.assertIn("local drive", errors.getvalue())
 
     def test_existing_clean_target_still_passes_severity_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

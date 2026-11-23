@@ -1,0 +1,68 @@
+#!/bin/bash
+set -eu
+
+app_child=false
+if [[ "${1:-}" == --app-child ]]; then
+  app_child=true
+  shift
+fi
+
+usage() {
+  echo 'Usage: koda-local COMMAND [options]'
+  echo 'Local commands: dashboard, scan, discover, host-scan, local-listeners, jar-scan, cpe-scan, sbom-verify, diff-reports, correlate, manifest, har-review, approval-review, jwt-key-review, tls-cert-review'
+  echo 'Use COMMAND --help for inputs, output formats and exit codes.'
+}
+
+case "${1:-}" in
+  ""|-h|--help) usage; exit 0 ;;
+  dashboard|scan|discover|host-scan|local-listeners|jar-scan|cpe-scan|sbom-verify|diff-reports|correlate|manifest|har-review|approval-review|jwt-key-review|tls-cert-review) ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+contents="$(cd "$(dirname "$0")/.." && pwd)"
+case "$(uname -m)" in
+  arm64) architecture=arm64 ;;
+  x86_64) architecture=amd64 ;;
+  *) echo "Unsupported Mac architecture." >&2; exit 2 ;;
+esac
+scanner="$contents/Helpers/koda-java-scan-$architecture.app/Contents/MacOS/koda-java-scan"
+tools="$contents/Helpers/java-scan-tools/$architecture"
+if [[ "$app_child" == false && -x "$scanner-terminal" ]]; then
+  scanner="$scanner-terminal"
+  tools="$tools/terminal"
+fi
+if [[ ! -x "$scanner" ]]; then
+  echo "The bundled local scanner is missing for $architecture." >&2
+  exit 2
+fi
+resources="$contents/Resources/java-scan"
+export KODA_NVD_DATA="$resources/vuln-data/nvd"
+export KODA_CISA_KEV="$resources/vuln-data/known_exploited_vulnerabilities.json"
+export KODA_SYFT_BIN="$tools/syft" KODA_GRYPE_BIN="$tools/grype"
+export GRYPE_DB_CACHE_DIR="${GRYPE_DB_CACHE_DIR:-$HOME/Library/Application Support/com.jhnykor.koda/java-scan/grype-db}"
+export GRYPE_DB_AUTO_UPDATE=false GRYPE_DB_VALIDATE_AGE=false
+
+needs_db=false
+if [[ "$1" == jar-scan ]]; then
+  needs_db=true
+  for arg in "$@"; do
+    case "$arg" in --help|-h|--no-grype) needs_db=false ;; esac
+  done
+elif [[ "$1" == scan ]]; then
+  for arg in "$@"; do
+    [[ "$arg" != --offline-grype ]] || needs_db=true
+  done
+fi
+if [[ "$needs_db" == true ]]; then
+  for archive in "$resources"/grype-db/incoming/*.zst; do
+    [[ -f "$archive" ]] || { echo "Bundled Grype database is missing." >&2; exit 2; }
+    marker="$GRYPE_DB_CACHE_DIR/.koda-imported-${archive##*/}"
+    if [[ ! -f "$marker" ]]; then
+      mkdir -p "$GRYPE_DB_CACHE_DIR"
+      "$KODA_GRYPE_BIN" db import "$archive"
+      touch "$marker"
+    fi
+    break
+  done
+fi
+exec "$scanner" "$@"

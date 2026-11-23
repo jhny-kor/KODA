@@ -1,10 +1,10 @@
 # KODA Windows EXE installer build
 
-> As of **2026-10-11**, this guide describes the local working tree, including
-> uncommitted development changes. Windows-specific packaging/process regression
-> tests and PowerShell syntax checks passed on the Mac host; actual Windows EXE,
-> installer, WebView2, and native Syft execution were excluded at the user's request.
-> See the [verification summary](../../docs/verification-2026-10-11.md).
+> The Windows launcher passed Full and SourceOnly loopback dashboard tests and
+> both build scripts passed PowerShell syntax checks on Apple Silicon. Local
+> SpotBugs and Semgrep runs were verified on macOS. Native Windows installation,
+> WebView2, Syft, and analyzer execution still require Windows validation.
+> [Earlier verification record](../../docs/verification-2026-10-11.md)
 
 This folder contains the Inno Setup script used to build the direct-download
 KODA Windows installer.
@@ -12,6 +12,62 @@ KODA Windows installer.
 The native macOS App Store build is SwiftUI and cannot be compiled into a
 Windows executable on macOS. Build the Windows installer on a Windows PC so
 PyInstaller can produce a real Windows `.exe`.
+
+## HAR review and local TCP listeners
+
+Select **Review HAR recording** in the Full desktop dashboard to inspect
+recorded response headers and cookie attributes and save the review as JSON.
+The review counts recorded write requests that carried credential headers and
+identifies observations over plain HTTP by origin and entry number.
+
+Select **Local TCP listeners** in the dashboard or run
+`KODA-CLI.exe local-listeners --format markdown` to list this PC's listening
+addresses and ports. Run `KODA-CLI.exe approval-review --help` for options to
+verify an existing audit approval's signature, expiry and recorded local use.
+
+**Review certificates and JWT key length** checks the validity dates and
+SHA-256 fingerprint of a PEM or DER certificate and compares a known HMAC key
+length against the HS256, HS384 or HS512 minimum. The CLI provides the same
+checks through `KODA-CLI.exe tls-cert-review --certificate server.cer` and
+`KODA-CLI.exe jwt-key-review --algorithm HS256 --key-bits 256`.
+
+## Local SpotBugs and Semgrep CE
+
+Select **SpotBugs · Semgrep CE** in the local desktop dashboard and enter the
+full input paths for one source directory. Set the tool variables before
+starting KODA so the dashboard process inherits them. Keep the selected source,
+compiled input, and rules on this PC.
+
+- SpotBugs reads an existing Java JAR, `.class` file, or classes directory.
+  Set `KODA_SPOTBUGS_JAR` to the installed distribution's `lib\spotbugs.jar`.
+  KODA locates Java through `KODA_JAVA_BIN`, `JAVA_HOME`, then `PATH`. Use
+  `--spotbugs-source-root` to point to the Java package root inside the selected
+  source directory when it differs from the inferred root.
+- Semgrep CE uses a local YAML rules file. Put its native Windows launcher
+  `semgrep.exe` on `PATH` or set `KODA_SEMGREP_BIN` to its full path.
+  KODA uses local rules with metrics disabled.
+
+After installation, the same inputs can be passed to `koda scan`. For example,
+run this in PowerShell after setting the tool paths:
+
+```powershell
+koda scan --target .\project --spotbugs-input .\project\build\classes --semgrep-rules .\team-rules.yml --format json --output .\koda-report.json
+```
+
+SpotBugs Java null-dereference findings can appear as C-01 review candidates
+for SW49. Use the **Local baseline** to review other SpotBugs findings and
+Semgrep rule matches. Use the external SARIF file field or
+`--source-analyzer-sarif` in a separate scan to load previously generated
+results. CodeQL results enter through supported SARIF mappings, and an empty
+external report leaves control coverage unproven. [Analyzer setup and limits](../../docs/usage.md)
+
+## Local AI fix candidates
+
+Open **Local AI fix candidate** in the personal dashboard and choose an OpenAI-compatible server running on this PC. **List models** retrieves its available models. **Save connection** stores the endpoint and model as a user profile. Windows Credential Manager holds the optional API key.
+
+Select a UTF-8 Python, Java, XML, or JavaScript file of up to 12 KiB, then select a finding and generate a candidate. KODA checks syntax and interfaces and rescans the proposed source, allowing up to three attempts. Review the diff, proposed impact, and test plan. **Download candidate** saves the proposed source as a separate file.
+
+JavaScript validation requires Node.js. Java validation requires a source file that compiles on its own and JDK tools `javac` and `javap` on PATH.
 
 ## Result
 

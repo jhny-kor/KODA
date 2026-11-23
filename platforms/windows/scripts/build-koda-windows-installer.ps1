@@ -629,9 +629,8 @@ for candidate in browser_candidates:
         break
 '@
 
-if ($SourceOnly) {
-    $runtimeHookSource += "`r`nos.environ.setdefault('KODA_SOURCE_ONLY', '1')`r`n"
-}
+$sourceOnlyFlag = if ($SourceOnly) { "1" } else { "0" }
+$runtimeHookSource += "`r`nos.environ['KODA_SOURCE_ONLY'] = '$sourceOnlyFlag'`r`n"
 
 Write-Utf8NoBomFile `
     -Path $RuntimeHook `

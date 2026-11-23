@@ -233,6 +233,7 @@ cleanup을 함께 선언해야 합니다. 만료/재사용 시간 검사는 step
 | --- | --- |
 | `VULNERABLE` | 검증된 취약 응답, 상태 위반, callback 증거가 있음 |
 | `PASS` | 선언된 필수 전략·oracle·cleanup이 모두 완료되고 취약 증거가 없음 |
+| `NO_FINDING` | 실제 응답에서 보안 헤더·버전 노출·CORS 헤더 또는 수신한 쿠키 속성을 점검한 횟수와 범위에서 발견이 없음 |
 | `NEEDS_REVIEW` | oracle·OAST·cleanup·일부 표면이 완전하지 않음 |
 | `NOT_APPLICABLE` | 프로필이 사유와 함께 명시적으로 제외 |
 | `UNSUPPORTED` | 현재 배포판에 필요한 capability가 없음 |

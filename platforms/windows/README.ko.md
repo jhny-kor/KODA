@@ -8,6 +8,37 @@
 이 폴더는 Windows 직접 배포용 Inno Setup 설치본을 만드는 경로입니다.
 실제 `.exe`는 Windows PC에서 PyInstaller와 Inno Setup으로 빌드해야 합니다.
 
+## HAR 기록과 로컬 TCP 수신 포트
+
+Full 대시보드의 **HAR 기록 검토**에서 브라우저가 내보낸 HAR 파일을 읽고
+저장된 보안 응답 헤더와 쿠키 속성을 확인합니다. 인증 헤더가 기록된
+쓰기 요청과 평문 HTTP 요청을 집계해 JSON으로 저장할 수 있습니다.
+
+대시보드의 **이 PC의 TCP 수신 포트** 또는
+`KODA-CLI.exe local-listeners --format markdown`으로 수신 주소와 포트를
+확인합니다. `KODA-CLI.exe approval-review --help`는 기존 웹 점검 승인
+문서의 서명·만료와 이 PC에 기록된 사용 여부를 확인하는 옵션을 보여 줍니다.
+
+**인증서와 JWT 키 길이 검토**에서 PEM·DER 인증서 파일의 유효 기간과
+SHA-256 지문을 확인하고 HS256·HS384·HS512의 최소 키 길이를 대조합니다.
+명령줄에서도 `KODA-CLI.exe tls-cert-review --certificate server.cer`와
+`KODA-CLI.exe jwt-key-review --algorithm HS256 --key-bits 256`을 사용할 수
+있습니다.
+
+## 로컬 SpotBugs와 Semgrep CE
+
+대시보드의 **SpotBugs · Semgrep CE** 또는 `KODA-CLI.exe scan`에서 로컬 Java
+바이트코드와 소스를 검사할 수 있습니다. 각 분석기는 별도로 설치합니다.
+[도구 설정과 사용법](../../docs/usage.ko.md#로컬-spotbugs와-semgrep-ce)
+
+## 로컬 AI 수정 후보
+
+개인용 대시보드에서 **로컬 AI 수정 후보**를 열고 같은 PC의 OpenAI 호환 서버 주소와 모델을 선택합니다. **모델 목록**은 서버에 설치된 모델을 조회합니다. **연결 저장**은 서버·모델 조합을 사용자 프로필에 저장하고, 입력한 API 키는 Windows 자격 증명 관리자에 보관합니다.
+
+12 KiB 이하의 UTF-8 Python, Java, XML 또는 JavaScript 파일을 선택하면 KODA가 수정 가능한 점검 항목을 표시합니다. 항목을 선택해 후보 생성을 실행하면 구문·인터페이스와 해당 규칙을 다시 검사합니다. 최대 세 번 시도하며 통과한 후보의 차이, 변경 영향 초안, 테스트 계획을 보여 줍니다. **후보 파일 다운로드**는 변경본을 새 파일로 저장합니다.
+
+JavaScript 검증에는 Node.js가 필요합니다. Java 검증에는 PATH의 JDK 도구 `javac`·`javap`와 단일 파일로 컴파일할 수 있는 소스가 필요합니다.
+
 ## 결과물과 요구사항
 
 결과물은 `dist\\KODA\\KODA.exe`와 `dist\\Windows\\KODASetup.exe`입니다.

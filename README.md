@@ -16,7 +16,9 @@ Linux closed-network runtime, offline CPE/EPSS and Tracker SSVC: [운영 안내]
   <a href="docs/README.md">🇰🇷 한국어 문서</a>
 </p>
 
-KODA keeps scans local by default. The native macOS app has its own Swift scanner; Linux, Windows, CI, and server deployments use the shared Python engine in [`platforms/shared/python/`](platforms/shared/python/).
+KODA keeps scans local by default. The native macOS app has its own Swift scanner.
+The macOS direct-distribution dashboard, Windows desktop app, Linux, and CI use
+the shared Python engine in [`platforms/shared/python/`](platforms/shared/python/).
 
 ## Documentation status — 2026-10-11
 
@@ -50,21 +52,36 @@ offline package. Check the snapshot before using development-only commands.
 
 ## Platform support
 
-| Capability | macOS app | Windows installer | Linux host package | Linux Docker package |
+| Capability | macOS direct build | Windows Full installer | Linux host package | Linux Docker package |
 | --- | --- | --- | --- | --- |
 | Local source, configuration, dependency, and quality scan | Yes | Yes | Yes | Yes |
-| Dashboard | Native app | WebView2 desktop window | Authenticated `/koda/` portal | Authenticated `/koda/` portal behind the suite gateway |
+| Dashboard | Native app and loopback browser dashboard | WebView2 desktop window with browser fallback | Authenticated `/koda/` portal | Authenticated `/koda/` portal behind the suite gateway |
 | Offline JAR/WAR/EAR SBOM and vulnerability scan | Yes | Yes | Yes | Yes |
-| Baseline SBOM verification | No | Yes | Yes | Yes |
+| Baseline SBOM verification | Bundled CLI | Yes | Yes | Yes |
 | Host posture scan | Limited; App Sandbox reports system-only checks as Unverified | Yes | Yes | No |
 | Live web posture or ZAP baseline | Yes | Yes | Yes | No, by design |
-| Profile-driven 21-control web audit | No; use shared engine from source | Full build | Shared engine | No, by design |
-| NIS-SBOM 1.0 CSV export | No | Shared dashboard and CLI | Authenticated portal and CLI | Authenticated portal and CLI |
+| Profile-driven 21-control web audit | Shared engine from source | Full build | Shared engine | No, by design |
+| NIS-SBOM 1.0 CSV export | Shared scan/export and bundled CLI | Shared dashboard and CLI | Authenticated portal and CLI | Authenticated portal and CLI |
 
-The Python engine can run from source on any OS. The macOS column above refers only to the native app.
-The [detailed OS matrix (Korean)](docs/platform-feature-matrix.ko.md) separates
-native-app features, Windows Full/SourceOnly, and Linux host/Docker conditions.
-Implementation support and verified execution are different claims.
+The [detailed OS matrix (Korean)](docs/platform-feature-matrix.ko.md) covers the
+Mac App Store build, Windows Full and SourceOnly, and Linux host and Docker
+conditions.
+
+## Local desktop review
+
+The macOS direct build and Windows Full app share offline HAR review, local TCP
+listener inventory, PEM/DER certificate review, and JWT HMAC key-size checks.
+The CLI can also review a signed approval document and its recorded local use.
+On Mac, open **Prevention Kit → Open browser dashboard**. On Windows, use the
+installed desktop dashboard. [Mac packaging guide](platforms/macos/packaging/README.md) ·
+[Windows desktop guide](platforms/windows/README.md)
+
+Choose **SpotBugs · Semgrep CE** in either dashboard or use the `scan` command.
+Install SpotBugs and Java to analyze existing Java bytecode. Install Semgrep CE
+and supply a local YAML rule file for source analysis. KODA can also import
+SARIF 2.1.0, including supported CodeQL findings. Imported findings provide
+evidence for review, and an empty report leaves control coverage unproven.
+[Local analyzer setup and limits](docs/usage.md)
 
 ## Quick start
 
@@ -157,7 +174,7 @@ The [English documentation index](docs/README.en.md) is the complete map. The [K
 
 | Path | Purpose |
 | --- | --- |
-| `platforms/shared/python/` | Shared Python engine for Linux, Windows, CI, and server use. |
+| `platforms/shared/python/` | Shared Python engine for desktop, Linux, and CI use. |
 | `platforms/macos/` | Native Swift app, packaging, and macOS scripts. |
 | `platforms/linux/` | Offline host and Docker distributions. |
 | `platforms/windows/` | Windows packaging, scripts, and installer assets. |

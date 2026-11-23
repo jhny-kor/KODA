@@ -13,7 +13,7 @@ from typing import Callable, Iterable, Mapping
 from .config import ConfigError
 from .models import Finding
 
-ANALYZER_STATES = ("SUCCESS", "MISSING", "FAILED", "SKIPPED")
+ANALYZER_STATES = ("SUCCESS", "PARTIAL", "MISSING", "FAILED", "SKIPPED")
 STRATEGY_STATES = ("COMPLETE", "PARTIAL", "NOT_RUN", "NOT_APPLICABLE")
 MAX_MANIFEST_FILES = 100_000
 MAX_MANIFEST_TREE_ENTRIES = 400_000

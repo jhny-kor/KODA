@@ -7,6 +7,7 @@ PROJECT="$REPO_ROOT/platforms/macos/app/KODA/KODA.xcodeproj"
 SCHEME="KODA"
 CONFIGURATION="${CONFIGURATION:-Release}"
 MACOS_ARCHS="${KODA_MACOS_ARCHS:-arm64}"
+export KODA_MACOS_JAVA_ASSETS="${KODA_MACOS_JAVA_ASSETS:-$REPO_ROOT/.build/koda-macos-java-assets}"
 DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-$REPO_ROOT/.build/koda-xcode-derived}"
 DIST_DIR="$REPO_ROOT/dist/macos"
 APP_SOURCE="$DERIVED_DATA_PATH/Build/Products/$CONFIGURATION/KODA.app"
@@ -28,6 +29,8 @@ fi
   -configuration "$CONFIGURATION" \
   -derivedDataPath "$DERIVED_DATA_PATH" \
   ARCHS="$MACOS_ARCHS" \
+  KODA_MACOS_JAVA_ASSETS="$KODA_MACOS_JAVA_ASSETS" \
+  CODE_SIGN_ENTITLEMENTS="$REPO_ROOT/platforms/macos/packaging/KODA.direct.entitlements" \
   CODE_SIGNING_ALLOWED="${CODE_SIGNING_ALLOWED:-NO}" \
   build
 

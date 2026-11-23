@@ -123,6 +123,7 @@ def crawl_web(
     secondary_headers: Mapping[str, str] | None = None,
     scanned_pages: list[str] | None = None,
     page_results: list[dict[str, object]] | None = None,
+    passive_check_counts: dict[str, int] | None = None,
     allowed_origins: Sequence[str] = (),
     network_context: object | None = None,
 ) -> tuple[list[Finding], list[str], int]:
@@ -313,6 +314,12 @@ def crawl_web(
             ))
 
         collected.extend(analyze_response(final_url, header_items, set_cookies, target=target))
+        if passive_check_counts is not None:
+            checks = ["response_security_headers", "server_disclosure_headers", "cors_response_headers"]
+            if set_cookies:
+                checks.append("set_cookie_attributes")
+            for check in checks:
+                passive_check_counts[check] = passive_check_counts.get(check, 0) + 1
         if body:
             collected.extend(analyze_body(final_url, body, target=target))
             # Stored XSS: did a marker injected on an earlier page surface here?

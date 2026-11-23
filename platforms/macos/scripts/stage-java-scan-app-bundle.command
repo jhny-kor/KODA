@@ -35,6 +35,16 @@ for required in \
   fi
 done
 
+case " ${SWIFT_ACTIVE_COMPILATION_CONDITIONS:-} " in
+  *" KODA_APP_STORE "*)
+    profile="$(/usr/bin/plutil -extract desktop_dashboard raw -o - "$asset_dir/asset-manifest.json" 2>/dev/null || true)"
+    if [[ "$profile" != "false" ]]; then
+      echo "Prepare App Store Java scanner assets with KODA_MACOS_HELPER_APP_STORE=1." >&2
+      exit 2
+    fi
+    ;;
+esac
+
 main_executable="$app_bundle/Contents/MacOS/KODA"
 if [[ -x "$main_executable" ]]; then
   for app_architecture in $(lipo -archs "$main_executable"); do
@@ -73,9 +83,26 @@ ditto "$asset_dir/tools" "$helpers/java-scan-tools"
 ditto "$asset_dir/resources" "$resources"
 cp "$asset_dir/manifest.sha256" "$resources/manifest.sha256"
 cp "$asset_dir/asset-manifest.json" "$resources/asset-manifest.json"
+case " ${SWIFT_ACTIVE_COMPILATION_CONDITIONS:-} " in
+  *" KODA_APP_STORE "*) rm -f "$app_bundle/Contents/Resources/koda-local" ;;
+  *) install -m 0755 "$script_dir/koda-local" "$app_bundle/Contents/Resources/koda-local" ;;
+esac
 
 if [[ "$code_signing_allowed" == "YES" && -n "$identity" ]]; then
   helper_entitlements="$repo_root/platforms/macos/packaging/KODA.helper.entitlements"
+  if [[ " ${SWIFT_ACTIVE_COMPILATION_CONDITIONS:-} " != *" KODA_APP_STORE "* ]]; then
+    # The GUI's helper inherits its App Sandbox. Terminal uses a separately
+    # signed entry point with the same frozen runtime and local CLI commands.
+    for arch in arm64 amd64; do
+      executable="$helpers/koda-java-scan-$arch.app/Contents/MacOS/koda-java-scan"
+      if [[ -x "$executable" ]]; then
+        cp "$executable" "$executable-terminal"
+        tool_dir="$helpers/java-scan-tools/$arch"
+        mkdir -p "$tool_dir/terminal"
+        cp "$tool_dir/syft" "$tool_dir/grype" "$tool_dir/terminal/"
+      fi
+    done
+  fi
   while IFS= read -r -d '' binary; do
     codesign --force --options runtime --timestamp --sign "$identity" "$binary"
   done < <(find "$helpers" -type f -print0 | while IFS= read -r -d '' candidate; do file "$candidate" | grep -q 'Mach-O' && printf '%s\0' "$candidate"; done)

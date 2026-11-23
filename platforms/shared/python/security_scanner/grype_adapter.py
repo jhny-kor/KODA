@@ -9,6 +9,8 @@ from functools import wraps
 from dataclasses import dataclass
 from pathlib import Path
 
+from .models import Finding, SEVERITIES
+
 
 @dataclass(frozen=True, slots=True)
 class GrypeMatch:
@@ -31,6 +33,39 @@ class GrypeResult:
     database: dict[str, object]
     warning: str
     fatal: bool
+
+
+def dependency_findings(matches: tuple[GrypeMatch, ...], components) -> list[Finding]:
+    by_purl = {component.purl: component for component in components if component.purl}
+    findings: list[Finding] = []
+    seen: set[tuple[str, str]] = set()
+    for match in matches:
+        component = by_purl.get(match.purl) or next(
+            (item for item in components if item.name == match.package_name and item.version == match.installed_version),
+            None,
+        )
+        if component is None:
+            continue
+        identifiers = match.cve_ids or match.vulnerability_ids or (match.vulnerability_id,)
+        key = component.purl, ",".join(identifiers)
+        if key in seen:
+            continue
+        seen.add(key)
+        fixed = ", ".join(match.fixed_versions)
+        findings.append(Finding(
+            rule_id="dependency.osv-known-vulnerability",
+            category="dependencies",
+            severity=match.severity if match.severity in SEVERITIES else "high",
+            title=f"Known vulnerable dependency: {component.name}@{component.version}",
+            path=component.path,
+            target=component.target,
+            line=component.line,
+            evidence=f"{component.purl}: {', '.join(identifiers)}" + (f"; fixed in {fixed}" if fixed else ""),
+            description="The selected local Grype database reports a vulnerability for this exact dependency version.",
+            recommendation=f"Upgrade to {fixed}." if fixed else "Review the vulnerability identifiers and upgrade, patch, replace, or document a compensating control.",
+            issue_key=f"dependency.osv-known-vulnerability|{component.purl}|{','.join(sorted(identifiers))}",
+        ))
+    return findings
 
 
 def _with_approved_release(function):

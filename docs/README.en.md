@@ -4,6 +4,11 @@ This is the English documentation index. The [Korean index](README.md) contains
 the Korean guides. English counterparts are linked where available; Korean-only
 documents are labeled explicitly.
 
+## Desktop features added on 2026-11-24
+
+- Use installed SpotBugs and Semgrep CE to review local Java bytecode and source in one report. [Setup and usage](usage.md#local-spotbugs-and-semgrep-ce)
+- Find the personal dashboard and offline review workflows for each app edition. [macOS direct build](../platforms/macos/packaging/README.md) · [Windows desktop app](../platforms/windows/README.md) · [Verification scope](current-status.en.md#desktop-verification-on-2026-11-24)
+
 ## Documentation baseline — 2026-10-11
 
 The [current implementation and verification snapshot](current-status.en.md)

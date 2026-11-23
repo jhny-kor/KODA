@@ -14,17 +14,20 @@ the user is never left without the dashboard.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import sys
 import threading
+import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
 
-shared_engine = Path(__file__).resolve().parents[3] / "platforms" / "shared" / "python"
-if shared_engine.exists():
-    sys.path.insert(0, str(shared_engine))
+if not getattr(sys, "frozen", False):
+    shared_engine = Path(__file__).resolve().parents[3] / "platforms" / "shared" / "python"
+    if shared_engine.exists():
+        sys.path.insert(0, str(shared_engine))
 
 from security_scanner.app import _create_available_server
 from security_scanner.server import DEFAULT_HOST, DEFAULT_PORT, create_dashboard_server, dashboard_url
@@ -115,15 +118,42 @@ def _run_browser_mode(url: str) -> int:
 
 
 def _smoke_test_dashboard(language: str) -> int:
-    """Verify packaged imports and HTTP startup without opening a user window."""
+    """Verify packaged dashboard and local HAR capabilities without a user window."""
     with create_dashboard_server(DEFAULT_HOST, 0, language) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
             url = dashboard_url(DEFAULT_HOST, server.server_address[1])
+            origin = url.rsplit("/", 1)[0]
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             with opener.open(url, timeout=10) as response:
-                return 0 if response.status == 200 and b"KODA" in response.read() else 1
+                if response.status != 200 or b"KODA" not in response.read():
+                    return 1
+            if os.environ.get("KODA_SOURCE_ONLY") == "1":
+                try:
+                    with opener.open(f"{origin}/har-review", timeout=10):
+                        return 1
+                except urllib.error.HTTPError as exc:
+                    return 0 if exc.code == 404 else 1
+            with opener.open(f"{origin}/api/health", timeout=10) as response:
+                token = response.headers.get("X-KODA-Session")
+            if not token:
+                return 1
+            fixture = {
+                "log": {"entries": [{
+                    "request": {"method": "GET", "url": "https://fixture.invalid/"},
+                    "response": {"status": 200, "headers": [
+                        {"name": "Content-Type", "value": "text/html"}
+                    ]},
+                }]}
+            }
+            request = urllib.request.Request(
+                f"{origin}/api/har-review", json.dumps(fixture).encode("utf-8"),
+                {"Content-Type": "application/octet-stream", "Origin": origin, "X-KODA-Session": token},
+            )
+            with opener.open(request, timeout=10) as response:
+                payload = json.load(response)
+                return 0 if payload.get("status") == "REVIEWED" and payload.get("responses_reviewed") == 1 else 1
         finally:
             server.shutdown()
             thread.join(timeout=5)

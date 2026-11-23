@@ -5,20 +5,23 @@ import json
 import os
 import platform
 import secrets
+import sqlite3
 import subprocess
 import tempfile
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .archive_input import prepare_input_target
 from .config import expand_path
+from .desktop_projects import project_action, project_paths, record_score
 from .dependency_inventory import queryable_osv_components
-from .grype_adapter import GrypeMatch, inspect_grype, run_grype_purls
+from .grype_adapter import GrypeMatch, dependency_findings, inspect_grype, run_grype_purls
 from .models import CATEGORIES, DEFAULT_CATEGORIES, SCAN_SCOPE_CATEGORIES, SEVERITIES, Finding, ScannerConfig, TargetConfig
 from .reporting import (
     build_dashboard_payload,
@@ -50,14 +53,24 @@ LOCAL_CORS_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_UPLOAD_MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
 DEFAULT_UPLOAD_MAX_FILES = 400_000
+_DESKTOP_POST_PATHS = {
+    "/api/desktop-projects", "/api/local-ai", "/api/scan", "/api/scan-upload",
+    "/api/select-directory", "/api/prevention-kit", "/api/export",
+}
 
 
 class UploadTooLargeError(ValueError):
     pass
 
 
-def create_dashboard_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, language: str = "ko") -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), _handler(language))
+def create_dashboard_server(
+    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, language: str = "ko", *, local_only: bool = False,
+) -> ThreadingHTTPServer:
+    if local_only and host != DEFAULT_HOST:
+        raise ValueError("The local dashboard must bind to 127.0.0.1.")
+    server = ThreadingHTTPServer(
+        (host, port), _handler(language, local_desktop=host in LOCAL_CORS_HOSTS, local_only=local_only),
+    )
     server.daemon_threads = True
     server.koda_session_token = secrets.token_urlsafe(32)
     return server
@@ -68,21 +81,29 @@ def dashboard_url(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> str:
     return f"http://{display_host}:{port}/security-dashboard.html"
 
 
-def serve_dashboard(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, language: str = "ko") -> int:
-    server = create_dashboard_server(host, port, language)
-    url = dashboard_url(host, port)
-    print(f"Serving local security dashboard: {url}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopping local security dashboard.")
-    finally:
-        server.server_close()
+def serve_dashboard(
+    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, language: str = "ko", *,
+    local_only: bool = False, open_browser: bool = False,
+) -> int:
+    with create_dashboard_server(host, port, language, local_only=local_only) as server:
+        url = dashboard_url(host, server.server_port)
+        print(url if local_only else f"Serving local security dashboard: {url}", flush=True)
+        if open_browser:
+            import webbrowser
+
+            try:
+                webbrowser.open(url)
+            except (OSError, webbrowser.Error):
+                print("Open the dashboard URL in your browser.", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\nStopping local security dashboard.")
     return 0
 
 
 def scan_directory_payload(
-    path_value: str,
+    path_value: str | Path,
     *,
     language: str = "ko",
     min_severity: str = "low",
@@ -100,6 +121,8 @@ def scan_directory_payload(
     disabled_rules: tuple[str, ...] = (),
     allow_file: bool = False,
     display_path: str | None = None,
+    additional_paths: tuple[str, ...] = (),
+    source_analyzer_sarif: Path | None = None,
     scan_scope: str | None = None,
     cve_only: bool = False,
     file_selection: tuple[Path, ...] | None = None,
@@ -125,7 +148,7 @@ def scan_directory_payload(
     if max_file_size_bytes <= 0:
         raise ValueError("max_file_size_bytes must be positive")
 
-    target_path = expand_path(path_value, base_dir or Path.cwd())
+    target_path = path_value if isinstance(path_value, Path) else expand_path(path_value, base_dir or Path.cwd())
     if not target_path.exists():
         raise ValueError(f"Path does not exist: {target_path}")
     if not target_path.is_dir() and not (allow_file and target_path.is_file()):
@@ -139,9 +162,21 @@ def scan_directory_payload(
         discover_projects=discover_projects and target_path.is_dir(),
         discovery_depth=discovery_depth,
     )
+    targets = [target]
+    for item in additional_paths:
+        path = expand_path(item, base_dir or Path.cwd())
+        if not path.is_dir() and not (allow_file and path.is_file()):
+            raise ValueError(f"Invalid scan target: {path}")
+        if path not in (other.path for other in targets):
+            targets.append(replace(target, path=path, name=path.name or "scan-target",
+                                   discover_projects=discover_projects and path.is_dir()))
+    if len(targets) > 1:
+        # Full root names keep similarly named projects distinct in grouped reports.
+        targets = [replace(item, name=str(item.path)) for item in targets]
     source_only = standard_selection.standard == "sw-dev-security-49"
     config = ScannerConfig(
-        targets=(target,),
+        targets=tuple(targets),
+        source_analyzer_sarif=source_analyzer_sarif,
         enable_osv=enable_osv and not source_only,
         enable_vuln_intel=enable_osv and not source_only,
         standard=standard_selection.standard,
@@ -188,7 +223,7 @@ def scan_directory_payload(
             300.0,
         )
         grype_matches = tuple(match for match in grype.matches if not cve_only or match.cve_ids)
-        raw_findings.extend(_grype_findings(grype_matches, components))
+        raw_findings.extend(dependency_findings(grype_matches, components))
         library_vulnerabilities = _grype_vulnerability_payloads(grype_matches, components, binary)
         local_vulnerability["matched_vulnerabilities"] = len(grype_matches)
         from .data_release import managed_data_required
@@ -241,39 +276,6 @@ def scan_directory_payload(
 def _environment_path(name: str) -> Path | None:
     value = os.environ.get(name, "").strip()
     return Path(value).expanduser() if value else None
-
-
-def _grype_findings(matches: tuple[GrypeMatch, ...], components) -> list[Finding]:
-    by_purl = {component.purl: component for component in components if component.purl}
-    findings: list[Finding] = []
-    seen: set[tuple[str, str]] = set()
-    for match in matches:
-        component = by_purl.get(match.purl) or next(
-            (item for item in components if item.name == match.package_name and item.version == match.installed_version),
-            None,
-        )
-        if component is None:
-            continue
-        identifiers = match.cve_ids or match.vulnerability_ids or (match.vulnerability_id,)
-        key = component.purl, ",".join(identifiers)
-        if key in seen:
-            continue
-        seen.add(key)
-        fixed = ", ".join(match.fixed_versions)
-        findings.append(Finding(
-            rule_id="dependency.osv-known-vulnerability",
-            category="dependencies",
-            severity=match.severity if match.severity in SEVERITIES else "high",
-            title=f"Known vulnerable dependency: {component.name}@{component.version}",
-            path=component.path,
-            target=component.target,
-            line=component.line,
-            evidence=f"{component.purl}: {', '.join(identifiers)}" + (f"; fixed in {fixed}" if fixed else ""),
-            description="The selected local Grype database reports a vulnerability for this exact dependency version.",
-            recommendation=f"Upgrade to {fixed}." if fixed else "Review the vulnerability identifiers and upgrade, patch, replace, or document a compensating control.",
-            issue_key=f"dependency.osv-known-vulnerability|{component.purl}|{','.join(sorted(identifiers))}",
-        ))
-    return findings
 
 
 def _grype_vulnerability_payloads(matches: tuple[GrypeMatch, ...], components, grype_binary: Path | None = None) -> list[dict[str, object]]:
@@ -831,16 +833,47 @@ def prevention_kit_payload(
     }
 
 
-def _handler(language: str):
-    initial_html = render_html([], language=language)
+def _handler(language: str, *, local_desktop: bool = False, local_only: bool = False):
+    source_only = os.environ.get("KODA_SOURCE_ONLY") == "1"
+    har_review_available = local_desktop and not source_only
+    desktop_os_tools = local_desktop and platform.system() in {"Darwin", "Windows"}
+    initial_html = render_html(
+        [], language=language, local_desktop=local_desktop,
+        local_only=local_only, source_only=source_only,
+        har_review_available=har_review_available, desktop_os_tools=desktop_os_tools,
+    )
+    local_post_paths = _DESKTOP_POST_PATHS | ({"/api/har-review"} if har_review_available else set())
+    if desktop_os_tools:
+        local_post_paths.update(("/api/local-listeners", "/api/tls-cert-review"))
 
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "KODADashboard/0.1"
 
         def do_GET(self) -> None:
+            if local_only and not self._require_local_host():
+                return
             path = urlparse(self.path).path
             if path in {"/", "/security-dashboard.html"}:
                 self._send_html(initial_html)
+                return
+            if path == "/local-ai" and local_desktop:
+                from .ai.local_candidate_view import render
+                self._send_html(render(language, os.name == "nt"))
+                return
+            if path == "/har-review" and har_review_available:
+                from .har_review import render_review_page
+
+                self._send_html(render_review_page(language))
+                return
+            if path == "/local-listeners" and desktop_os_tools:
+                from .local_listeners import render_listeners_page
+
+                self._send_html(render_listeners_page(language))
+                return
+            if path == "/crypto-review" and desktop_os_tools:
+                from .crypto_review_view import render_crypto_review_page
+
+                self._send_html(render_crypto_review_page(language))
                 return
             if path == "/api/health":
                 self._send_json({"ok": True})
@@ -852,7 +885,14 @@ def _handler(language: str):
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_OPTIONS(self) -> None:
+            if local_only:
+                if self._require_local_host():
+                    self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
+                return
             path = urlparse(self.path).path
+            if source_only and path in {"/api/web-scan", "/api/zap-scan"}:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
             if path in {"/api/health", "/api/scan", "/api/scan-upload", "/api/web-scan", "/api/zap-scan", "/api/select-directory", "/api/prevention-kit", "/api/export", "/api/web-audit/plan", "/api/web-audit/approve", "/api/web-audit/run"}:
                 if path.startswith("/api/web-audit/") and not self._require_web_audit_access(options=True):
                     return
@@ -867,9 +907,93 @@ def _handler(language: str):
 
         def do_POST(self) -> None:
             path = urlparse(self.path).path
+            if local_only:
+                if not self._require_local_host():
+                    return
+                if path not in local_post_paths:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+            if path == "/api/har-review" and har_review_available:
+                if self._require_dashboard_access():
+                    from .har_review import HAR_MAX_BYTES, review_har
+
+                    self._handle_file_review(review_har, HAR_MAX_BYTES, "HAR")
+                return
+            if path == "/api/tls-cert-review" and desktop_os_tools:
+                if self._require_dashboard_access():
+                    from .certificate_review import MAX_CERTIFICATE_BYTES, review_certificate
+
+                    self._handle_file_review(review_certificate, MAX_CERTIFICATE_BYTES, "Certificate")
+                return
+            if path == "/api/local-listeners" and desktop_os_tools:
+                if self._require_dashboard_access():
+                    from .local_listeners import collect_local_listeners
+
+                    report = collect_local_listeners()
+                    if local_only and report["platform"] == "macos" and report["status"] == "unavailable":
+                        address, port = self.server.socket.getsockname()
+                        report["status"] = "partial"
+                        report["listeners"] = [
+                            {"address": address, "port": port, "family": "IPv4", "binding": "loopback"},
+                        ]
+                        report["warnings"] = [
+                            "시스템 전체 목록에 접근할 수 없어 대시보드의 수신 포트만 표시합니다. 터미널의 koda-local local-listeners로 전체 목록을 조회할 수 있습니다."
+                            if language == "ko" else
+                            "The dashboard can only show its own listener here. Run koda-local local-listeners in Terminal to see the OS inventory.",
+                        ]
+                    self._send_json(report)
+                return
+            if path == "/api/local-ai":
+                if not local_desktop:
+                    self.send_error(HTTPStatus.FORBIDDEN)
+                    return
+                if not self._require_dashboard_access():
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._send_json({"error": "application/json required"}, status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+                    return
+                from .ai.local_candidate import process
+                from .ai.local_profiles import with_profile
+                try:
+                    data = self._read_json(max_bytes=128 * 1024)
+                    result = with_profile(data)
+                    if result is None:
+                        result = process(data)
+                except (ValueError, RuntimeError, RecursionError, SyntaxError) as exc:
+                    self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                except (OSError, sqlite3.Error, subprocess.SubprocessError, TypeError, AttributeError):
+                    self._send_json({"error": "Local model, validator or profile store unavailable"},
+                                    status=HTTPStatus.BAD_GATEWAY)
+                    return
+                self._send_json(result)
+                return
+            if path == "/api/desktop-projects":
+                if not local_desktop:
+                    self.send_error(HTTPStatus.FORBIDDEN)
+                    return
+                if not self._require_dashboard_access():
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._send_json({"error": "application/json Content-Type is required"}, status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+                    return
+                try:
+                    result = project_action(self._read_json())
+                except (TypeError, ValueError) as exc:
+                    self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                except (OSError, sqlite3.Error):
+                    self._send_json({"error": "Local project storage unavailable"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
+                self._send_json(result)
+                return
             dashboard_paths = {"/api/scan", "/api/scan-upload", "/api/web-scan", "/api/zap-scan", "/api/select-directory", "/api/prevention-kit", "/api/export"}
             if path in dashboard_paths:
                 if not self._require_dashboard_access():
+                    return
+                if source_only and path in {"/api/web-scan", "/api/zap-scan"}:
+                    self._send_json({"error": "Live web scanning requires the Full desktop distribution."},
+                                    status=HTTPStatus.NOT_IMPLEMENTED)
                     return
                 if path != "/api/scan-upload" and self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                     self._send_json({"error": "application/json Content-Type is required"}, status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
@@ -908,30 +1032,71 @@ def _handler(language: str):
 
             try:
                 request = self._read_json()
-                payload = scan_directory_payload(
-                    _string_value(request, "path"),
-                    language=_choice_value(request, "language", {"en", "ko"}, language),
-                    min_severity=_choice_value(request, "min_severity", set(SEVERITIES), "low"),
-                    discover_projects=bool(request.get("discover_projects", True)),
-                    discovery_depth=None,
-                    categories=_categories_value(request),
-                    standard=_choice_value(
-                        request,
-                        "standard",
-                        set(SECURITY_STANDARD_IDS),
-                        DEFAULT_STANDARD,
-                    ),
-                    standard_category=_string_value(request, "standard_category", default=DEFAULT_STANDARD_CATEGORY),
-                    max_file_size_bytes=int(request.get("max_file_size_bytes", 524288)),
-                    enable_osv=bool(request.get("enable_osv", False)),
-                    include_host=bool(request.get("include_host", False)),
-                    disabled_rules=_disabled_rules_value(request),
+                primary = _string_value(request, "path")
+                additional = request.get("additional_paths", [])
+                if not isinstance(additional, list):
+                    raise ValueError("additional_paths must be a list")
+                raw_sast_inputs = tuple(
+                    option for option in ("spotbugs_input", "spotbugs_source_root", "semgrep_rules")
+                    if request.get(option, "") != ""
                 )
-            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                if raw_sast_inputs and (not local_desktop or additional or request.get("source_analyzer_sarif")):
+                    raise ValueError("Local SAST requires a local desktop scan of one directory without a separate SARIF file.")
+                paths = project_paths([primary, *additional]) if additional else [primary]
+                sarif_path = None
+                if request.get("source_analyzer_sarif"):
+                    if not local_desktop:
+                        raise ValueError("SARIF input is available on the local desktop only")
+                    sarif_path = Path(_string_value(request, "source_analyzer_sarif")).expanduser()
+                    if not sarif_path.is_absolute() or not sarif_path.is_file():
+                        raise ValueError("SARIF: enter the absolute path of an existing file")
+                scan_path_value: str | Path = primary
+                with (tempfile.TemporaryDirectory(prefix="koda-sast-") if raw_sast_inputs else nullcontext()) as work_dir:
+                    if work_dir:
+                        from .local_sast import prepare_local_sast, require_local_path, resolve_local_path
+
+                        source = require_local_path(Path(primary))
+                        sast_inputs = {option: require_local_path(Path(_string_value(request, option))) for option in raw_sast_inputs}
+                        if not all(item.is_absolute() for item in (source, *sast_inputs.values())):
+                            raise ValueError("Local SAST requires absolute paths for the source directory and analyzer inputs.")
+                        source = resolve_local_path(source)
+                        sarif_path = prepare_local_sast(source, Path(work_dir), **sast_inputs)
+                        scan_path_value = source
+                    payload = scan_directory_payload(
+                        scan_path_value,
+                        additional_paths=tuple(paths[1:]),
+                        allow_file=local_desktop and request.get("desktop_targets") is True,
+                        source_analyzer_sarif=sarif_path,
+                        language=_choice_value(request, "language", {"en", "ko"}, language),
+                        min_severity=_choice_value(request, "min_severity", set(SEVERITIES), "low"),
+                        discover_projects=bool(request.get("discover_projects", True)),
+                        discovery_depth=None,
+                        categories=_categories_value(request),
+                        standard=_choice_value(
+                            request,
+                            "standard",
+                            set(SECURITY_STANDARD_IDS),
+                            DEFAULT_STANDARD,
+                        ),
+                        standard_category=_string_value(request, "standard_category", default=DEFAULT_STANDARD_CATEGORY),
+                        max_file_size_bytes=int(request.get("max_file_size_bytes", 524288)),
+                        enable_osv=not local_only and bool(request.get("enable_osv", False)),
+                        include_host=bool(request.get("include_host", False)),
+                        disabled_rules=_disabled_rules_value(request),
+                    )
+            except (json.JSONDecodeError, OSError, RuntimeError, TypeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
 
+            if local_desktop and request.get("record_score") is True:
+                self._record_score(payload, paths)
             self._send_json(payload)
+
+        def _record_score(self, payload, targets):
+            try:
+                record_score(payload, targets)
+            except (OSError, sqlite3.Error):
+                payload["scan"]["history_error"] = True
 
         def _handle_scan_upload(self) -> None:
             if not self._require_upload_access():
@@ -964,7 +1129,7 @@ def _handler(language: str):
                         standard=_query_choice(query, "standard", set(SECURITY_STANDARD_IDS), DEFAULT_STANDARD),
                         standard_category=_query_text(query, "standard_category", DEFAULT_STANDARD_CATEGORY),
                         max_file_size_bytes=_environment_limit("KODA_UPLOAD_SCAN_MAX_FILE_BYTES", 10 * 1024 * 1024),
-                        enable_osv=_query_flag(query, "enable_osv"),
+                        enable_osv=not local_only and _query_flag(query, "enable_osv"),
                         include_host=False,
                         disabled_rules=tuple(query.get("disabled_rule", ())),
                         allow_file=True,
@@ -976,6 +1141,8 @@ def _handler(language: str):
             except (OSError, TypeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
+            if local_desktop and _query_flag(query, "record_score"):
+                self._record_score(payload, [filename])
             self._send_json(payload)
 
         def _handle_web_scan(self) -> None:
@@ -1157,7 +1324,14 @@ def _handler(language: str):
         def _handle_select_directory(self) -> None:
             try:
                 request = self._read_json(required=False)
-                selected = select_directory(str(request.get("current_path", "")))
+                current = str(request.get("current_path", ""))
+                if local_desktop and request.get("kind") == "file":
+                    if platform.system() == "Darwin":
+                        selected = _select_directory_macos(_initial_directory(current), file=True)
+                    else:
+                        selected = _select_directory_tk(_initial_directory(current), file=True)
+                else:
+                    selected = select_directory(current)
             except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -1167,7 +1341,47 @@ def _handler(language: str):
             self._send_json({"path": selected, "cancelled": False})
 
         def log_message(self, format: str, *args: object) -> None:
-            print(f"{self.address_string()} - {format % args}")
+            if not local_only:
+                print(f"{self.address_string()} - {format % args}")
+
+        def _handle_file_review(self, review: Callable[[bytes], dict[str, object]], max_bytes: int, label: str) -> None:
+            if self.headers.get_content_type() != "application/octet-stream":
+                self._send_json({"error": "application/octet-stream required"}, status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+                return
+            lengths = self.headers.get_all("Content-Length", [])
+            try:
+                if len(lengths) != 1 or self.headers.get("Transfer-Encoding") is not None:
+                    raise ValueError
+                length = int(lengths[0])
+                if length <= 0:
+                    raise ValueError
+            except ValueError:
+                self._send_json({"error": f"A nonempty {label} upload with a Content-Length is required"},
+                                status=HTTPStatus.BAD_REQUEST)
+                return
+            if length > max_bytes:
+                self._send_json({"error": f"{label} upload exceeds the size limit"}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                return
+            try:
+                contents = self.rfile.read(length)
+                if len(contents) != length:
+                    raise ValueError(f"{label} upload ended before Content-Length")
+                result = review(contents)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except (OSError, RuntimeError):
+                self._send_json({"error": f"{label} review is unavailable"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            self._send_json(result)
+
+        def _require_local_host(self) -> bool:
+            port = self.server.server_port
+            expected = DEFAULT_HOST if port == 80 else f"{DEFAULT_HOST}:{port}"
+            if self.headers.get_all("Host", []) != [expected]:
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return False
+            return True
 
         def _require_web_audit_access(self, *, options: bool = False) -> bool:
             bound_host = str(self.server.server_address[0])
@@ -1287,6 +1501,8 @@ def _handler(language: str):
             self.wfile.write(body)
 
         def _send_cors_headers(self) -> None:
+            if local_only:
+                return
             origin = allowed_cors_origin(self.headers.get("Origin"))
             if origin is None:
                 return
@@ -1295,6 +1511,17 @@ def _handler(language: str):
             self.send_header("Access-Control-Allow-Headers", "Content-Type, X-KODA-Session, X-KODA-Filename")
             self.send_header("Access-Control-Expose-Headers", "X-KODA-Session")
             self.send_header("Vary", "Origin")
+
+        def end_headers(self) -> None:
+            if local_only or getattr(self, "path", "").partition("?")[0] in {
+                "/har-review", "/api/har-review", "/local-listeners", "/api/local-listeners",
+                "/crypto-review", "/api/tls-cert-review",
+            }:
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+            super().end_headers()
 
     return DashboardHandler
 
@@ -1312,7 +1539,7 @@ def select_directory(current_path: str = "") -> str | None:
         raise RuntimeError("Folder picker is not available in this Python environment") from tk_error
 
 
-def _select_directory_tk(initial_dir: Path) -> str | None:
+def _select_directory_tk(initial_dir: Path, *, file: bool = False) -> str | None:
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -1326,6 +1553,14 @@ def _select_directory_tk(initial_dir: Path) -> str | None:
     try:
         root.withdraw()
         root.update()
+        if file:
+            selected = filedialog.askopenfilename(parent=root, initialdir=str(initial_dir), title="Select source file")
+            if not selected:
+                return None
+            path = Path(selected)
+            if not path.is_file():
+                raise ValueError(f"File does not exist: {path}")
+            return str(path.absolute())
         selected = filedialog.askdirectory(
             parent=root,
             initialdir=str(initial_dir),
@@ -1338,29 +1573,34 @@ def _select_directory_tk(initial_dir: Path) -> str | None:
     return _normalize_selected_directory(selected)
 
 
-def _select_directory_macos(initial_dir: Path) -> str | None:
-    result = _run_macos_folder_picker(initial_dir)
+def _select_directory_macos(initial_dir: Path, *, file: bool = False) -> str | None:
+    result = _run_macos_picker(initial_dir, file=file)
     if result.returncode != 0 and _should_retry_macos_picker_without_default(result):
-        result = _run_macos_folder_picker(None)
+        result = _run_macos_picker(None, file=file)
     if result.returncode != 0:
         message = (result.stderr or result.stdout or "").strip()
         if "User canceled" in message or "-128" in message:
             return None
-        raise RuntimeError(message or "macOS folder picker failed")
-    return _normalize_selected_directory(result.stdout.strip())
+        raise RuntimeError(message or "macOS source picker failed")
+    selected = result.stdout.strip()
+    if file and selected:
+        path = Path(selected).resolve()
+        if not path.is_file():
+            raise ValueError(f"File does not exist: {path}")
+        return str(path)
+    return _normalize_selected_directory(selected)
 
 
-def _run_macos_folder_picker(initial_dir: Path | None) -> subprocess.CompletedProcess[str]:
+def _run_macos_picker(initial_dir: Path | None, *, file: bool = False) -> subprocess.CompletedProcess[str]:
+    choose = ('choose file with prompt "Select source file"' if file
+              else 'choose folder with prompt "Select folder to scan"')
     if initial_dir is None:
-        script_lines = (
-            'set selectedFolder to choose folder with prompt "Select folder to scan"',
-            "POSIX path of selectedFolder",
-        )
+        script_lines = (f"set selectedItem to {choose}", "POSIX path of selectedItem")
     else:
         script_lines = (
             f'set initialFolder to POSIX file "{_applescript_string(str(initial_dir))}" as alias',
-            'set selectedFolder to choose folder with prompt "Select folder to scan" default location initialFolder',
-            "POSIX path of selectedFolder",
+            f"set selectedItem to {choose} default location initialFolder",
+            "POSIX path of selectedItem",
         )
     command = ["osascript"]
     for line in script_lines:
@@ -1368,7 +1608,7 @@ def _run_macos_folder_picker(initial_dir: Path | None) -> subprocess.CompletedPr
     try:
         return subprocess.run(command, capture_output=True, text=True, check=False)
     except FileNotFoundError as exc:  # pragma: no cover - macOS normally provides osascript
-        raise RuntimeError("macOS folder picker command was not found") from exc
+        raise RuntimeError("macOS source picker command was not found") from exc
 
 
 def _should_retry_macos_picker_without_default(result: subprocess.CompletedProcess[str]) -> bool:

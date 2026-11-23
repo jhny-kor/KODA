@@ -6,6 +6,14 @@ KODA를 처음 쓰는 사람은 이 페이지에서 목적에 맞는 경로를 �
 제품 개요와 플랫폼 선택은 [영문 루트 README](../README.md), 실제 명령 전체는
 [CLI 및 로컬 사용법](usage.ko.md)에 있습니다.
 
+## 2026-11-24 개인용 앱
+
+| 기능 | 시작 위치 |
+| --- | --- |
+| 로컬 소스·빌드된 Java 점검 | macOS 직접배포 `koda-local dashboard` 또는 Windows 대시보드의 **SpotBugs · Semgrep CE**. 설치한 분석기를 따로 또는 함께 실행합니다. [설정과 사용법](usage.ko.md#로컬-spotbugs와-semgrep-ce) |
+| 로컬 기록·파일 검토 | 프로젝트와 점검 이력, HAR 응답 기록, 인증서·JWT 키 길이, 이 PC의 TCP 수신 포트를 확인합니다. [macOS 직접배포](install/macos.ko.md#직접배포-앱의-로컬-대시보드) · [Windows Full](install/windows.ko.md#로컬-점검-도구) |
+| 소스 참조와 설치본 상태 | 앱 에디션별 기능과 실제 실행 환경을 확인합니다. [OS별 구현표](platform-feature-matrix.ko.md) · [검증 상태](current-status.ko.md#2026-11-24-개인용-앱-검증) |
+
 ## 2026-11-15~22 추가 기능
 
 | 제품 기능 | 사용 방법 |

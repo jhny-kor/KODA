@@ -8,7 +8,17 @@ scripts, and documentation. Java assets, app binaries, Docker images, and raw lo
 remain local.** Publishing source does not update an existing installation,
 App Store app, or production server, or provide the same vulnerability data.
 
-## Source and publication scope
+## Desktop verification on 2026-11-24
+
+| Route | Verification |
+| --- | --- |
+| Apple Silicon direct distribution | The loopback dashboard and packaged CLI ran SpotBugs 4.10.5 and Semgrep CE 1.186.0 and showed both analyzers' review findings in the same report. |
+| Windows Full and SourceOnly | Shared engine and packaging regression checks ran on macOS. The native EXE, Inno Setup, WebView2 and Windows analyzer runtime still need verification on Windows. |
+| macOS app opened from Finder | The direct-distribution app opens the browser dashboard. Start `koda-local dashboard` from a configured Terminal session to run the installed analyzers. Release signing and notarization require separate verification. |
+
+[Set up the analyzers](usage.md#local-spotbugs-and-semgrep-ce) · [OS feature matrix](platform-feature-matrix.ko.md)
+
+## Source and publication scope on 2026-10-11
 
 | Area | Observed state | Meaning |
 | --- | --- | --- |
@@ -56,7 +66,7 @@ numbers below do not include them.
 
 Behavior against real external services and production Suites remains as listed under [Unverified areas](#unverified-areas).
 
-## Latest verification
+## Verification on 2026-10-11
 
 The [2026-10-11 validation record](verification-2026-10-11.md) and
 [machine-readable summary](verification-2026-10-11.json) record conditions and

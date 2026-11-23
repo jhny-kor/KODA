@@ -33,6 +33,15 @@ Java 아카이브 메뉴는 앱에 포함된 오프라인 helper, Syft, Grype, N
 보고서는 현재 한국어로 생성됩니다. 영어 UI에서도 Java helper에는 지원되는
 `--language ko`를 전달하므로 보고서 언어는 UI 언어와 별개입니다.
 
+## 직접배포 앱의 로컬 대시보드
+
+직접배포 빌드의 **예방 키트 → 브라우저 대시보드 열기**에서 프로젝트와 점검 이력,
+파일 업로드, HAR 응답 기록, 인증서·JWT 키 길이 검토를 사용할 수 있습니다.
+터미널 전용 기능과 설치한 분석기를 사용하려면 도구 환경 변수를 설정한 터미널에서
+`dist/macos/KODA.app/Contents/Resources/koda-local dashboard`를 실행하세요.
+이 명령은 현재 Mac에서만 접근할 수 있는 대시보드를 엽니다.
+[SpotBugs·Semgrep CE 설정](../usage.ko.md#로컬-spotbugs와-semgrep-ce) · [에디션별 구현표](../platform-feature-matrix.ko.md)
+
 ## 2026-10-11 검증 범위
 
 현재 로컬 소스의 Java 포함 arm64+x86_64 universal Release 빌드와 Xcode 분석을

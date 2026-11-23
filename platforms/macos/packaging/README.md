@@ -1,18 +1,20 @@
-# KODA macOS App Store Packaging
+# KODA macOS packaging
 
-This folder contains the App Store packaging lane for the macOS app named `KODA`.
+This folder contains the direct-distribution and App Store packaging for KODA.
 
-As of **2026-10-11**, this guide describes the local working tree, including
-uncommitted development changes. Java-inclusive universal Release build and
-analysis passed; ARM app startup and offline Java scanning passed. Intel
-execution, distribution signing, notarization, and Store submission remain
-unverified. See the [verification summary](../../../docs/verification-2026-10-11.md).
+The October 11 validation covered a Java-inclusive universal Release build,
+Apple Silicon app startup, and offline Java scanning. Follow-up Apple Silicon
+checks covered the loopback dashboard and its bundled CLI helper. SpotBugs
+4.10.5 and Semgrep CE 1.186.0 ran on local fixtures through both paths. Intel
+execution, release signing and notarization, and Store submission remain
+unverified for these analyzer changes. [October 11 verification summary](../../../docs/verification-2026-10-11.md)
 
 ## What is included
 
 - `assets/KODA.icns`: app icon generated from the supplied KODA image.
 - `assets/KODA-AppStore-1024.png`: 1024 px App Store marketing icon source.
 - `KODA.entitlements`: App Sandbox entitlements required for Mac App Store distribution.
+- `KODA.direct.entitlements`: App Sandbox entitlements for the direct build and its loopback dashboard.
 - `../app/KODA/KODA.xcodeproj`: native SwiftUI macOS project for the App Store lane. The app supports folder selection, multiple file selection, and common archive inputs with a built-in Swift scanner.
 - `../scripts/build-koda-xcode-app.command`: builds the native Xcode app to `dist/macos/KODA.app`, including the offline Java scanner assets.
 - `../scripts/prepare-java-scan-assets.command`: builds the embedded Python scanner, downloads checksum-verified Syft/Grype release binaries, and stages the offline Grype/NVD/CISA data pack.
@@ -43,7 +45,9 @@ For local command-line verification without signing:
 platforms/macos/scripts/build-koda-xcode-app.command
 ```
 
-The Xcode app uses the native Swift scanner for its standard scan. Its Java archive scan menu uses an embedded Python helper plus bundled Syft, Grype, Grype DB, NVD, and CISA KEV data; the shipped app executes only its bundled scanner helper and tools, with no runtime scanner download. The local build output is:
+The Xcode app uses the native Swift scanner for its standard scan. The Java
+archive scan menu uses an embedded Python helper and bundled Syft, Grype,
+Grype DB, NVD, and CISA KEV data. The local build output is:
 
 ```text
 dist/macos/KODA.app
@@ -53,6 +57,39 @@ The App Store Java helper packages only the command-line scan path. Dashboard
 server and Tk folder-picker modules are explicitly excluded from this helper so
 Tcl/Tk is not shipped in the App Store bundle. This exclusion does not apply to
 the shared Python, Windows, Linux, or legacy macOS application lanes.
+
+### Direct-distribution dashboard
+
+Open **Prevention Kit → Open browser dashboard** in the direct build. The
+loopback dashboard supports local source scanning and reports, HAR review, TCP
+listener inventory, PEM/DER certificate review, and JWT HMAC key-size checks.
+The TCP list may be partial when the App Sandbox restricts access to the OS
+socket inventory. Run `koda-local local-listeners` from Terminal for the OS
+inventory, or `koda-local approval-review --help` for signed-document checks
+and locally recorded use.
+
+To start the dashboard from Terminal:
+
+```zsh
+dist/macos/KODA.app/Contents/Resources/koda-local dashboard
+```
+
+For **SpotBugs · Semgrep CE**, start the dashboard from the terminal where you
+configured the installed tools. Both analyzers are also available through
+`koda-local scan`.
+
+- Set `KODA_SPOTBUGS_JAR` to the SpotBugs distribution's `lib/spotbugs.jar`.
+  KODA locates Java through `KODA_JAVA_BIN`, `JAVA_HOME`, then `PATH`.
+  Select an existing Java JAR, `.class` file, or classes directory. Supply
+  `--spotbugs-source-root` if the Java package root inside the selected source
+  directory differs from the inferred root.
+- Put Semgrep CE on `PATH` or set `KODA_SEMGREP_BIN` to its full path.
+  Select one local YAML rule file and one source directory.
+
+Previously generated CodeQL results are available through supported SARIF
+2.1.0 mappings. SpotBugs can contribute a Java null-dereference review
+candidate for SW49 C-01. An empty external report leaves control coverage
+unproven. [Analyzer usage and evidence limits](../../../docs/usage.md)
 
 The release scripts default to `arm64`. Asset preparation builds one architecture
 per invocation: `KODA_MACOS_ARCH=arm64` or `KODA_MACOS_ARCH=x86_64`; Intel helper
@@ -144,7 +181,10 @@ lane is intentionally changed back to the Python bundle.
 
 ## Current limitation
 
-The Xcode app is the preferred App Store lane. The Java scan reads selected JAR/WAR/EAR files as data only; it never invokes Java or executes archive content. Before App Review submission, verify the signed archive with `codesign --verify --deep --strict --verbose=2`, inspect each helper entitlement, and run an offline JAR smoke test from the exported app.
+The Xcode app is the App Store build. Its Java archive inventory reads selected
+JAR/WAR/EAR files as data. Before App Review submission, verify the signed
+archive with `codesign --verify --deep --strict --verbose=2`, inspect each
+helper entitlement, and run an offline JAR smoke test from the exported app.
 
 Apple references:
 

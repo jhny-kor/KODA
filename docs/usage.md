@@ -159,6 +159,33 @@ execution scope and the [OS feature matrix](platform-feature-matrix.ko.md) for i
 
 `--reachability` labels dependency findings as `reachable`, `unreachable`, or `unknown` from local Python and JavaScript/TypeScript import analysis. It does not remove a finding. Add `--reachable-only` with `--fail-on` when an unreachable result should not fail a gate.
 
+## Local SpotBugs and Semgrep CE
+
+Install the analyzers separately. SpotBugs reads a built Java JAR, `.class` file,
+or class directory. Set `KODA_SPOTBUGS_JAR` to `lib/spotbugs.jar` from the
+installed distribution. KODA looks for Java in `KODA_JAVA_BIN`, `JAVA_HOME`, and
+then `PATH`. If your Java package root differs from `src/main/java`, set
+`--spotbugs-source-root` to the package root inside the selected project.
+
+KODA looks for Semgrep CE on `PATH` or at the absolute path in `KODA_SEMGREP_BIN`.
+On Windows use the native `.exe`. Pass one local YAML file with `--semgrep-rules`.
+KODA disables Semgrep metrics and version checks and uses the supplied local rules.
+
+```bash
+python3 -m security_scanner scan --target ./project --spotbugs-input ./project/build/classes --semgrep-rules ./team-rules.yaml --format json --output ./koda-report.json
+```
+
+Use one source directory and select either analyzer or both. For the dashboard,
+start `koda-local dashboard` on Mac or `KODA.exe` on Windows from the terminal
+with those settings. Open **SpotBugs · Semgrep CE** and enter absolute local
+paths. You can also import an existing supported SARIF 2.1.0 report with the
+dashboard's **External SARIF file** field or `--source-analyzer-sarif`.
+
+Use the **All** standard to review general SpotBugs and Semgrep findings. In the
+SW49 profile, a recognized Java null dereference can appear as a C-01 review
+candidate. KODA marks missing SpotBugs classes as `PARTIAL` and unsuccessful
+SARIF runs as `FAILED`. Empty results cannot certify coverage or a control pass.
+
 ## AI assists (opt-in)
 
 All AI assists are optional, default-off, and never change a finding's severity or

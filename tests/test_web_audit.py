@@ -27,11 +27,13 @@ from security_scanner.web_audit import (
     approve_request,
     build_approval_request,
     canonical_json,
+    consume_nonce,
     _finding_control,
     _finding_payload,
     _perform_authentication,
     _read_bounded,
     run_web_audit,
+    review_approval,
     validate_profile,
     verify_approval,
 )
@@ -665,6 +667,37 @@ class WebAuditTests(unittest.TestCase):
                 now=issued + timedelta(minutes=2),
             )
 
+    def test_offline_approval_review_reads_local_nonce_state_without_dns_or_writes(self) -> None:
+        origin = "http://127.0.0.1:8765"
+        profile = _profile(origin)
+        request = build_approval_request(profile)
+        approval = approve_request(request, "tester", key="test-key")
+        with TemporaryDirectory() as directory:
+            state_dir = Path(directory) / "state # local"
+            with patch("security_scanner.web_audit._current_resolution", side_effect=AssertionError("DNS")), \
+                 patch("security_scanner.web_audit.consume_nonce", side_effect=AssertionError("nonce")):
+                options = {"confirm_origin": origin, "state_dir": state_dir}
+                result = review_approval(profile, approval, key="test-key", **options)
+                self.assertEqual(result["document_status"], "VERIFIED")
+                self.assertFalse(result["dns_checked"])
+                self.assertEqual(result["nonce_state"], "UNAVAILABLE")
+                self.assertFalse(result["nonce_state_checked"])
+                self.assertNotIn("nonce", result)
+                self.assertFalse(state_dir.exists())
+
+                consume_nonce("other-nonce", state_dir=state_dir)
+                result = review_approval(profile, approval, key="test-key", **options)
+                self.assertEqual(result["nonce_state"], "NOT_RECORDED")
+                self.assertTrue(result["nonce_state_checked"])
+                consume_nonce(approval["nonce"], state_dir=state_dir)
+                database = state_dir / "web-audit-nonces.sqlite3"
+                original = database.read_bytes()
+                result = review_approval(profile, approval, key="test-key", **options)
+                self.assertEqual(result["nonce_state"], "CONSUMED")
+                self.assertEqual(database.read_bytes(), original)
+                with self.assertRaisesRegex(ApprovalError, "signature"):
+                    review_approval(profile, approval, key="different-key", **options)
+
     def test_pinned_opener_and_declared_oracle(self) -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _FixtureHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -699,6 +732,19 @@ class WebAuditTests(unittest.TestCase):
         controls = aggregate_results(profile, passive_completed=True)
         self.assertEqual(len(controls), 21)
         self.assertTrue(all(item["status"] == "NOT_SCANNED" for item in controls))
+
+    def test_completed_header_checks_are_distinct_from_unscanned_controls(self) -> None:
+        profile = validate_profile(_profile("https://example.test"))
+        counts = {"server_disclosure_headers": 2, "cors_response_headers": 2}
+        controls = {item["id"]: item for item in aggregate_results(
+            profile, passive_check_counts=counts,
+            findings=[{"rule_id": "web.cors-wildcard", "path": "/"}],
+        )}
+        info = controls["web.information-disclosure"]
+        self.assertEqual(info["status"], "NO_FINDING")
+        self.assertEqual(info["coverage"], {"required": 2, "completed": 2})
+        self.assertEqual(controls["web.authorization"]["status"], "VULNERABLE")
+        self.assertEqual(controls["web.session-management"]["status"], "NOT_SCANNED")
 
     def test_passive_strategy_without_oracle_is_not_pass(self) -> None:
         profile = validate_profile(_profile("https://example.test", scenarios=[{

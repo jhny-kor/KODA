@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 import os
 from dataclasses import replace
 from functools import partial
@@ -21,7 +20,7 @@ from .source_analysis import (
     MAX_MANIFEST_FILES, AnalyzerRun, SourceAnalysisSummary, SourceInventoryBudget,
     SourceManifest, is_source_file, iter_source_files, source_languages,
 )
-from .sarif_import import SarifImportError, import_sarif, load_sarif
+from .sarif_import import SarifImportError, import_sarif, load_sarif_with_digest
 from .osv_vulnerabilities import query_osv_findings
 
 
@@ -148,7 +147,7 @@ class SecurityScanner:
                 try:
                     from .standards import sw49_sarif_allowlist
 
-                    payload = load_sarif(self.config.source_analyzer_sarif)
+                    payload, digest = load_sarif_with_digest(self.config.source_analyzer_sarif)
                     imported, sarif_warnings = import_sarif(
                         payload,
                         manifest_root,
@@ -157,18 +156,22 @@ class SecurityScanner:
                     )
                     external.extend(imported)
                     self.warnings.extend(sarif_warnings)
-                    analyzer = imported[0].analyzer if imported else "sarif"
-                    version = imported[0].analyzer_version if imported else ""
-                    analyzer_runs.append(AnalyzerRun(
-                        analyzer,
-                        version=version,
-                        profile_id="codeql-java-none-2.26.1" if analyzer.lower() == "codeql" and version == "2.26.1" else "",
-                        output_origin="pre_generated",
-                        status="SUCCESS",
-                        target=str(manifest_root),
-                        manifest_digest=manifest.digest if manifest else "",
-                        sarif_digest=hashlib.sha256(self.config.source_analyzer_sarif.read_bytes()).hexdigest(),
-                    ))
+                    for run in payload["runs"]:
+                        driver = run["tool"]["driver"]
+                        analyzer = driver["name"].strip()[:128]
+                        version = str(driver.get("version") or driver.get("semanticVersion") or "")[:128]
+                        status, reason = self._sarif_run_status(run, analyzer)
+                        analyzer_runs.append(AnalyzerRun(
+                            analyzer,
+                            version=version,
+                            profile_id="codeql-java-none-2.26.1" if analyzer.lower() == "codeql" and version == "2.26.1" else "",
+                            output_origin="pre_generated",
+                            status=status,
+                            failure_reason=reason,
+                            target=str(manifest_root),
+                            manifest_digest=manifest.digest if manifest else "",
+                            sarif_digest=digest,
+                        ))
                 except SarifImportError as exc:
                     analyzer_runs.append(AnalyzerRun("sarif", output_origin="pre_generated", status="FAILED", target=str(manifest_root), manifest_digest=manifest.digest if manifest else "", failure_reason=exc.reason))
             elif self.config.source_analyzer == "codeql":
@@ -333,7 +336,10 @@ class SecurityScanner:
         return filtered, components
 
     def _source_manifest_inputs(self) -> tuple[Path, dict[Path, int]]:
-        targets = [(target, target.path.resolve()) for target in self.effective_targets if not target.path.is_symlink()]
+        # SARIF paths are rooted in the submitted inputs, including when
+        # discovery schedules the built-in checks against nested projects.
+        inputs = self.config.targets if self.config.source_analyzer_sarif else self.effective_targets
+        targets = [(target, target.path.resolve()) for target in inputs if not target.path.is_symlink()]
         if not targets:
             root = self.effective_targets[0].path.parent.resolve() if self.effective_targets else Path.cwd()
             return root, {}
@@ -359,6 +365,26 @@ class SecurityScanner:
                 if len(limits) > MAX_MANIFEST_FILES:
                     raise ConfigError(f"Source manifest file limit exceeded ({MAX_MANIFEST_FILES})")
         return Path(os.path.commonpath(roots)).resolve(), limits
+
+    def _sarif_run_status(self, run: dict, analyzer: str) -> tuple[str, str]:
+        invocations = run.get("invocations", [])
+        if not isinstance(invocations, list):
+            self.warnings.append("sarif_invocations_invalid")
+            return "FAILED", "sarif_invocations_invalid"
+        missing_classes = False
+        for invocation in invocations:
+            if not isinstance(invocation, dict):
+                self.warnings.append("sarif_invocations_invalid")
+                return "FAILED", "sarif_invocations_invalid"
+            if analyzer.lower() == "spotbugs" and invocation.get("exitCode") in (2, 3):
+                missing_classes = True
+            elif invocation.get("executionSuccessful") is False:
+                self.warnings.append(f"sarif_analyzer_execution_failed: {analyzer}")
+                return "FAILED", "sarif_analyzer_execution_failed"
+        if missing_classes:
+            self.warnings.append("sarif_spotbugs_missing_classes: SpotBugs reported incomplete class resolution.")
+            return "PARTIAL", "sarif_spotbugs_missing_classes"
+        return "SUCCESS", ""
 
     @staticmethod
     def _merge_findings(findings: tuple[Finding, ...]) -> tuple[Finding, ...]:

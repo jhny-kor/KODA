@@ -254,6 +254,28 @@ class SourceAnalysisTests(unittest.TestCase):
         self.assertFalse(warnings)
         self.assertEqual(len(findings), 1)
 
+    def test_sarif_import_keeps_active_findings_and_treats_review_as_unconfirmed(self):
+        document = load_sarif(SARIF / "c01_cross_file_positive.sarif")
+        run = document["runs"][0]
+        result = run["results"][0]
+        run["results"] = [
+            result,
+            {**result, "kind": "fail", "baselineState": "unchanged"},
+            {**result, "kind": "review", "level": "none"},
+            {**result, "kind": "fail", "baselineState": "absent"},
+            *({**result, "kind": kind, "level": "none"}
+              for kind in ("pass", "open", "notApplicable", "informational")),
+        ]
+        allowlist = {("codeql", "java/null-dereference"): {
+            "rule_id": "code.null-pointer-dereference",
+            "verification_status": "confirmed",
+        }}
+        findings, warnings = import_sarif(document, FIXTURES, allowlist)
+        self.assertFalse(warnings)
+        self.assertCountEqual(
+            [finding.verification_status for finding in findings], ["confirmed", "confirmed", "needs_review"],
+        )
+
     def test_c01_sarif_without_trace_is_review_only(self):
         document = copy.deepcopy(load_sarif(SARIF / "c01_cross_file_positive.sarif"))
         document["runs"][0]["results"][0].pop("codeFlows")

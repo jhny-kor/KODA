@@ -24,6 +24,21 @@ platforms/macos/scripts/build-koda-xcode-app.command
 Syft, Grype, Grype DB, NVD, CISA KEV를 사용하며 앱 실행 중 다운로드하지
 않습니다. 빌드에는 전체 Xcode와 대상 아키텍처를 지원하는 Python이 필요합니다.
 
+직접배포 앱의 예방 키트 메뉴에서 **브라우저 대시보드 열기**를 선택하면
+소스 점검, 프로젝트 프로필, 점검 이력, 보고서 내보내기와 HAR 기록 검토를
+브라우저에서 사용할 수 있습니다. 터미널에서
+`dist/macos/KODA.app/Contents/Resources/koda-local dashboard`를 실행하면
+이 Mac의 루프백 주소에서 대시보드를 열고, Ctrl+C를 누르면 종료합니다.
+**인증서와 JWT 키 길이 검토**에서는 PEM·DER 인증서를 열어 유효 기간과
+SHA-256 지문을 확인하고, HS256·HS384·HS512의 키 길이를 확인합니다.
+터미널 명령은 `tls-cert-review --certificate server.cer`와
+`jwt-key-review --algorithm HS256 --key-bits 256`입니다.
+
+로컬 SpotBugs와 Semgrep CE는 브라우저 대시보드의 **SpotBugs · Semgrep CE**
+또는 `koda-local scan`에서 선택합니다. 도구 경로를 설정한 터미널에서
+`koda-local dashboard`로 대시보드를 시작할 수 있습니다.
+[도구 설정과 사용법](../../../docs/usage.ko.md#로컬-spotbugs와-semgrep-ce)
+
 기본 앱 아키텍처는 arm64입니다. 자산은 `KODA_MACOS_ARCH=arm64` 또는
 `KODA_MACOS_ARCH=x86_64`로 한 번에 한 아키텍처씩 준비합니다. Intel helper는
 Intel Mac 또는 x86_64 Python을 제공하는 교차 빌드 환경에서 만들 수 있습니다.
@@ -44,9 +59,8 @@ Intel 전용 앱을 만듭니다. staging은 helper·Syft·Grype의 실제 Mach-
 1,800초를 적용하고 공유 Java CLI의 Syft·Grype 기본 제한 시간은 300초입니다.
 Java HTML·Markdown 보고서는 영어 UI에서도 현재 한국어로 생성됩니다.
 
-App Store용 Java helper에는 명령줄 스캔 경로만 포함하며 대시보드 서버와
-Tk 폴더 선택기 모듈은 제외합니다. 이 제외 설정은 공유 Python, Windows,
-Linux 및 레거시 macOS 앱 빌드에는 적용되지 않습니다.
+App Store 아카이브 스크립트는 대시보드 서버를 제외한 별도 Java helper
+자산을 준비합니다. 직접배포 helper는 macOS 파일 선택기를 사용합니다.
 
 App Store 제출은 다음 경로를 사용합니다.
 

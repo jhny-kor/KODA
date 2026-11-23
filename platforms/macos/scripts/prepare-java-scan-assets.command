@@ -111,6 +111,12 @@ if [[ ! -x "$builder_venv/bin/python" ]]; then
   "$python_bin" -m venv "$builder_venv"
 fi
 "$builder_venv/bin/python" -m pip install --quiet --upgrade pyinstaller
+helper_excludes=(--exclude-module security_scanner.app --exclude-module tkinter --exclude-module _tkinter)
+desktop_dashboard=true
+if [[ "${KODA_MACOS_HELPER_APP_STORE:-0}" == "1" ]]; then
+  helper_excludes+=(--exclude-module security_scanner.server)
+  desktop_dashboard=false
+fi
 "$builder_venv/bin/python" -m PyInstaller \
   --noconfirm \
   --clean \
@@ -125,10 +131,7 @@ fi
   --collect-submodules security_scanner \
   --add-data "$repo_root/platforms/shared/python/security_scanner/resources:security_scanner/resources" \
   --add-data "$repo_root/platforms/shared/python/security_scanner/assets:security_scanner/assets" \
-  --exclude-module security_scanner.server \
-  --exclude-module security_scanner.app \
-  --exclude-module tkinter \
-  --exclude-module _tkinter \
+  "${helper_excludes[@]}" \
   "$repo_root/platforms/macos/packaging/java-scan-entry.py"
 
 lipo -verify_arch "$target_arch" "$asset_dir/helpers/$architecture/koda-java-scan.app/Contents/MacOS/koda-java-scan"
@@ -142,6 +145,7 @@ cat > "$asset_dir/asset-manifest.json" <<EOF
   "syft_version": "$syft_version",
   "grype_version": "$grype_version",
   "offline_data_source": "${source_assets#$repo_root/}",
+  "desktop_dashboard": $desktop_dashboard,
   "network_at_runtime": false
 }
 EOF

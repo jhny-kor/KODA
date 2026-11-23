@@ -8,6 +8,7 @@ import sys
 import tempfile
 import urllib.parse
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from .archive_input import prepare_input_target
@@ -36,6 +37,87 @@ def main(argv: list[str] | None = None) -> int:
         for category in CATEGORIES:
             print(category)
         return 0
+
+    if args.command == "har-review":
+        from .har_review import HAR_MAX_BYTES, review_har
+
+        if os.environ.get("KODA_SOURCE_ONLY") == "1":
+            print("HAR review requires the Full desktop distribution.", file=sys.stderr)
+            return 2
+        try:
+            source = args.har.expanduser().resolve()
+            output = args.output.expanduser().resolve() if args.output else None
+            if output == source or (output and output.exists() and output.samefile(source)):
+                raise ValueError("The output file must differ from the HAR input.")
+            if not source.is_file():
+                raise ValueError("Choose a regular HAR file.")
+            with source.open("rb") as stream:
+                result = review_har(stream.read(HAR_MAX_BYTES + 1))
+            write_report(json_dumps(result) + "\n", output)
+        except (OSError, ValueError) as exc:
+            print(f"HAR review: {exc}", file=sys.stderr)
+            return 2
+        return 0
+
+    if args.command == "approval-review":
+        from .web_audit import ApprovalError, ProfileError, review_approval
+
+        try:
+            result = review_approval(args.profile, args.approval, confirm_origin=args.confirm_origin,
+                                     key=os.environ.get(args.key_env, ""), state_dir=args.state_dir)
+        except (ApprovalError, ProfileError, ValueError) as exc:
+            print(f"Approval review: {exc}", file=sys.stderr)
+            return 2
+        print(json_dumps(result))
+        return 0
+
+    if args.command == "jwt-key-review":
+        from .jwt_key_review import key_bit_length, review_jwt_key
+
+        try:
+            if args.key_env:
+                value = os.environ.get(args.key_env)
+                if value is None:
+                    raise ValueError("The selected environment variable is unset.")
+                bits = key_bit_length(value, args.key_encoding or "utf8")
+            else:
+                if args.key_encoding:
+                    raise ValueError("--key-encoding requires --key-env.")
+                bits = args.key_bits
+            result = review_jwt_key(args.algorithm, bits)
+        except ValueError as exc:
+            print(f"JWT key length review: {exc}", file=sys.stderr)
+            return 2
+        print(json_dumps(result))
+        return 0 if result["status"] == "MEETS_MINIMUM_LENGTH" else 1
+
+    if args.command == "tls-cert-review":
+        from .certificate_review import MAX_CERTIFICATE_BYTES, review_certificate
+
+        try:
+            source = args.certificate.expanduser()
+            if not source.is_file():
+                raise ValueError("Choose a regular certificate file.")
+            with source.open("rb") as stream:
+                result = review_certificate(stream.read(MAX_CERTIFICATE_BYTES + 1))
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"TLS certificate review: {exc}", file=sys.stderr)
+            return 2
+        print(json_dumps(result))
+        return 0 if result["validity"] == "VALID" and not result["weak_signature"] else 1
+
+    if args.command == "local-listeners":
+        from .local_listeners import collect_local_listeners, render_local_listeners_markdown
+
+        report = collect_local_listeners()
+        content = (json_dumps(report) + "\n" if args.format == "json"
+                   else render_local_listeners_markdown(report, language=args.language))
+        try:
+            write_report(content, args.output.expanduser() if args.output else None)
+        except OSError as exc:
+            print(f"Local listener inventory: {exc}", file=sys.stderr)
+            return 2
+        return 0 if report["status"] == "completed" else 2
 
     if args.command == "cpe-scan":
         from .cpe_lookup import query_offline_cpe_vulnerabilities
@@ -204,6 +286,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.healthcheck:
             worker_args.append("--healthcheck")
         return portal_worker_main(worker_args)
+
+    if args.command == "dashboard":
+        try:
+            from .server import serve_dashboard
+
+            return serve_dashboard(port=args.port, language=args.language, local_only=True, open_browser=not args.no_browser)
+        except (ImportError, OSError, OverflowError) as exc:
+            print(f"Could not start the local dashboard: {exc}", file=sys.stderr)
+            return 2
 
     if args.command == "serve":
         # Linux is the portal deployment; desktop/local app keeps the legacy dashboard.
@@ -852,10 +943,38 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in {None, "scan"}:
         try:
             with _build_scan_config_context(args) as config:
+                if config.report.format == "hwpx" and config.report.output is None:
+                    raise ConfigError("HWPX export requires an output file (--output).")
                 scanner = SecurityScanner(config)
                 scan_result = scanner.scan()
                 findings = list(scan_result.findings)
                 source_analysis = scan_result.source_analysis
+                if config.source_analyzer_sarif is not None:
+                    for run in source_analysis.analyzer_runs:
+                        if run.output_origin == "pre_generated" and run.status == "FAILED":
+                            raise ConfigError(f"SARIF import failed: {run.failure_reason}")
+                if args.offline_grype:
+                    from .dependency_inventory import queryable_osv_components
+                    from .grype_adapter import dependency_findings, inspect_grype, run_grype_purls
+
+                    if config.standard == "sw-dev-security-49":
+                        raise ConfigError("Offline dependency comparison requires a dependency scan.")
+                    components = queryable_osv_components(scanner.components)
+                    binary = Path(os.environ["KODA_GRYPE_BIN"]) if os.environ.get("KODA_GRYPE_BIN") else None
+                    status = inspect_grype(binary)
+                    if not status["available"]:
+                        raise ConfigError(str(status["warning"]) or "Offline Grype database unavailable.")
+                    result = run_grype_purls(tuple(item.purl for item in components if item.purl), binary, 300.0)
+                    if result.fatal:
+                        raise ConfigError(result.warning or "Offline Grype comparison failed.")
+                    if result.warning:
+                        scanner.warnings.append(result.warning)
+                    findings.extend(dependency_findings(result.matches, components))
+                if args.ai_map:
+                    from .ai.assist import suggest_mappings
+
+                    findings, warnings = suggest_mappings(findings, timeout_seconds=args.llm_timeout)
+                    scanner.warnings.extend(warnings)
                 standard_selection = resolve_standard_selection(
                     config.standard,
                     config.standard_category,
@@ -893,6 +1012,21 @@ def main(argv: list[str] | None = None) -> int:
                     write_report(main_html, output)
                     write_report(detail_html, detail_path)
                     print(f"HTML reports: {output} (main), {detail_path} (detail)", file=sys.stderr)
+                elif config.report.format == "hwpx":
+                    from .reporting import build_dashboard_payload, render_hwpx
+
+                    payload = build_dashboard_payload(
+                        filtered_findings, target_names, config.report.language,
+                        target_paths=target_paths, components=scanner.components,
+                        warnings=tuple(scanner.warnings), kind="source",
+                        standard=standard_selection.standard,
+                        standard_category=standard_selection.category,
+                        scanned_categories=standard_selection.scanner_categories,
+                        source_analysis=source_analysis,
+                    )
+                    output = config.report.output
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    output.write_bytes(render_hwpx(payload, config.report.language))
                 else:
                     content = render_report(
                         filtered_findings,
@@ -931,7 +1065,7 @@ def main(argv: list[str] | None = None) -> int:
                     gate_findings = _new_findings(gate_findings, args.baseline)
                 if args.fail_on and _has_failure(gate_findings, args.fail_on):
                     return 1
-        except (ConfigError, ValueError) as exc:
+        except (ConfigError, OSError, RuntimeError, ValueError) as exc:
             print(f"Config error: {exc}", file=sys.stderr)
             return 2
         return 0
@@ -1007,7 +1141,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--standard-category",
         help="optional category within --standard (for example sw-dev-security-49/input-validation-expression)",
     )
-    scan.add_argument("--format", choices=("markdown", "json", "html", "sarif", "cyclonedx", "spdx", "nis-sbom", "cyclonedx-vex"), help="report format")
+    scan.add_argument("--offline-grype", action="store_true", help="compare dependency versions with the local Grype database (KODA_GRYPE_BIN)")
+    scan.add_argument("--ai-map", action="store_true", help="suggest CWE/OWASP mappings for unmapped findings using the configured model")
+    scan.add_argument("--source-analyzer-sarif", type=Path, metavar="FILE", help="import a pre-generated local SARIF 2.1.0 result")
+    scan.add_argument("--spotbugs-input", type=Path, metavar="PATH", help="analyze a compiled Java .jar, .class or class directory")
+    scan.add_argument("--spotbugs-source-root", type=Path, metavar="DIR", help="Java package root inside the selected source directory")
+    scan.add_argument("--semgrep-rules", type=Path, metavar="FILE", help="run Semgrep CE using a local YAML rule file")
+    scan.add_argument("--format", choices=("markdown", "json", "html", "hwpx", "sarif", "cyclonedx", "spdx", "nis-sbom", "cyclonedx-vex"), help="report format")
     scan.add_argument("--output", type=Path, help="report output path")
     scan.add_argument("--language", choices=("ko",), default="ko", help="report language (Korean only)")
     scan.add_argument("--min-severity", choices=SEVERITIES, help="minimum severity to include")
@@ -1306,6 +1446,11 @@ def build_parser() -> argparse.ArgumentParser:
     discover = subparsers.add_parser("discover", help="list project roots under a folder")
     discover.add_argument("--target", default=".", help="folder to inspect")
 
+    dashboard = subparsers.add_parser("dashboard", help="open the desktop dashboard for local files and reports")
+    dashboard.add_argument("--port", type=int, default=0, help="loopback port (default: choose an available port)")
+    dashboard.add_argument("--language", choices=("en", "ko"), default="ko", help="initial dashboard language")
+    dashboard.add_argument("--no-browser", action="store_true", help="print the URL without opening it")
+
     serve = subparsers.add_parser("serve", help="run the local dashboard server")
     serve.add_argument("--host", default="127.0.0.1", help="host interface to bind")
     serve.add_argument("--port", type=int, default=8765, help="port to bind")
@@ -1448,6 +1593,33 @@ def build_parser() -> argparse.ArgumentParser:
     release_package.add_argument("--language", choices=("en", "ko"), default="ko", help="package language")
     release_package.add_argument("--enable-vuln-intel", action="store_true", help="query OSV/CVE and KEV/EPSS while building package")
 
+    har_review = subparsers.add_parser("har-review", help="review recorded response headers and cookies offline")
+    har_review.add_argument("--har", required=True, type=Path, help="input HAR file")
+    har_review.add_argument("--output", type=Path, help="save JSON to this path, or print to stdout")
+
+    approval_review = subparsers.add_parser("approval-review", help="verify a signed web audit document offline")
+    approval_review.add_argument("--profile", required=True, type=Path)
+    approval_review.add_argument("--approval", required=True, type=Path)
+    approval_review.add_argument("--confirm-origin", required=True)
+    approval_review.add_argument("--key-env", default="KODA_APPROVAL_KEY")
+    approval_review.add_argument("--state-dir", type=Path, help="read the local nonce database from this directory (default: ~/.koda)")
+
+    jwt_key_review = subparsers.add_parser("jwt-key-review", help="check a configured JWS HMAC key's size offline")
+    jwt_key_review.add_argument("--algorithm", required=True, choices=("HS256", "HS384", "HS512"))
+    key_input = jwt_key_review.add_mutually_exclusive_group(required=True)
+    key_input.add_argument("--key-env", help="environment variable containing the configured key")
+    key_input.add_argument("--key-bits", type=int, help="known key length in bits")
+    jwt_key_review.add_argument("--key-encoding", choices=("utf8", "base64", "base64url"),
+                                help="how the application interprets the environment variable (default: utf8)")
+
+    tls_cert_review = subparsers.add_parser("tls-cert-review", help="review a local PEM or DER certificate offline")
+    tls_cert_review.add_argument("--certificate", required=True, type=Path)
+
+    local_listeners = subparsers.add_parser("local-listeners", help="list this computer's TCP listeners from the OS inventory")
+    local_listeners.add_argument("--format", choices=("json", "markdown"), default="json")
+    local_listeners.add_argument("--language", choices=("ko", "en"), default="ko")
+    local_listeners.add_argument("--output", type=Path)
+
     subparsers.add_parser("list-categories", help="show available check categories")
     return parser
 
@@ -1455,25 +1627,42 @@ def build_parser() -> argparse.ArgumentParser:
 @contextmanager
 def _build_scan_config_context(args: argparse.Namespace):
     with tempfile.TemporaryDirectory(prefix="koda-inputs-") as temp_dir:
-        yield _build_scan_config(args, archive_extract_root=Path(temp_dir))
+        work_dir = Path(temp_dir)
+        options = {name: getattr(args, name, None) for name in ("spotbugs_input", "spotbugs_source_root", "semgrep_rules")}
+        local_sast_requested = any(value is not None for value in options.values())
+        config = _build_scan_config(args, archive_extract_root=work_dir, local_targets=local_sast_requested)
+        if local_sast_requested:
+            from .local_sast import prepare_local_sast
+
+            if len(config.targets) != 1 or config.changed_only:
+                raise ConfigError("Local SAST requires a full scan of one source directory.")
+            if config.source_analyzer or config.source_analyzer_sarif:
+                raise ConfigError("Choose local SAST execution or an existing SARIF file for this scan.")
+            sarif = prepare_local_sast(config.targets[0].path, work_dir, **options)
+            config = replace(config, source_analyzer_sarif=sarif)
+        yield config
 
 
-def _build_scan_config(args: argparse.Namespace, *, archive_extract_root: Path | None = None) -> ScannerConfig:
+def _build_scan_config(
+    args: argparse.Namespace, *, archive_extract_root: Path | None = None, local_targets: bool = False,
+) -> ScannerConfig:
     if args.config:
-        config = load_config(args.config)
+        config = load_config(args.config, local_targets=local_targets)
     elif args.target:
-        config = _config_from_cli(args, archive_extract_root=archive_extract_root)
+        config = _config_from_cli(args, archive_extract_root=archive_extract_root, local_targets=local_targets)
     elif Path("scanner_config.json").exists():
-        config = load_config(Path("scanner_config.json"))
+        config = load_config(Path("scanner_config.json"), local_targets=local_targets)
     elif Path("scanner_config.example.json").exists():
-        config = load_config(Path("scanner_config.example.json"))
+        config = load_config(Path("scanner_config.example.json"), local_targets=local_targets)
     else:
-        config = _config_from_cli(args, archive_extract_root=archive_extract_root)
+        config = _config_from_cli(args, archive_extract_root=archive_extract_root, local_targets=local_targets)
 
-    return _apply_overrides(config, args, archive_extract_root=archive_extract_root)
+    return _apply_overrides(config, args, archive_extract_root=archive_extract_root, local_targets=local_targets)
 
 
-def _config_from_cli(args: argparse.Namespace, *, archive_extract_root: Path | None = None) -> ScannerConfig:
+def _config_from_cli(
+    args: argparse.Namespace, *, archive_extract_root: Path | None = None, local_targets: bool = False,
+) -> ScannerConfig:
     target_values = args.target or ["."]
     explicit_categories = tuple(args.category) if args.category else None
     standard = getattr(args, "standard", None) or DEFAULT_STANDARD
@@ -1490,7 +1679,8 @@ def _config_from_cli(args: argparse.Namespace, *, archive_extract_root: Path | N
     targets = tuple(
         TargetConfig(
             name=Path(target).expanduser().name or target,
-            path=prepare_input_target(expand_path(target, base_dir), archive_extract_root),
+            path=prepare_input_target(expand_path(target, base_dir), archive_extract_root)
+            if not local_targets else expand_path(target, base_dir, local_only=True),
             categories=categories,
             max_file_size_bytes=args.max_file_size or 524288,
             discover_projects=bool(args.discover_projects),
@@ -1527,6 +1717,7 @@ def _apply_overrides(
     args: argparse.Namespace,
     *,
     archive_extract_root: Path | None = None,
+    local_targets: bool = False,
 ) -> ScannerConfig:
     targets = config.targets
     selected_standard = config.standard
@@ -1556,7 +1747,7 @@ def _apply_overrides(
                 for target in config.targets
             )
     if args.target:
-        cli_config = _config_from_cli(args, archive_extract_root=archive_extract_root)
+        cli_config = _config_from_cli(args, archive_extract_root=archive_extract_root, local_targets=local_targets)
         targets = cli_config.targets
     elif args.category or args.max_file_size or args.discover_projects:
         targets = tuple(
@@ -1578,6 +1769,9 @@ def _apply_overrides(
         min_severity=args.min_severity or config.report.min_severity,
         language=args.language or config.report.language,
     )
+    sarif = getattr(args, "source_analyzer_sarif", None)
+    if sarif is not None and config.source_analyzer:
+        raise ConfigError("--source-analyzer-sarif conflicts with the configured source_analyzer.")
     enable_vuln_intel = bool(getattr(args, "enable_vuln_intel", False)) or config.enable_vuln_intel
     return ScannerConfig(
         targets=targets,
@@ -1596,7 +1790,7 @@ def _apply_overrides(
         source_analyzer=config.source_analyzer,
         source_analyzer_binary=config.source_analyzer_binary,
         source_analyzer_timeout=config.source_analyzer_timeout,
-        source_analyzer_sarif=config.source_analyzer_sarif,
+        source_analyzer_sarif=sarif.expanduser().resolve() if sarif is not None else config.source_analyzer_sarif,
         source_analyzer_license_attested=config.source_analyzer_license_attested,
         source_analyzer_sandbox_wrapper=config.source_analyzer_sandbox_wrapper,
         source_analyzer_sandbox_config=config.source_analyzer_sandbox_config,

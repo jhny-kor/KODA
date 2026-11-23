@@ -19,6 +19,16 @@ Full 설치본은 Syft·Grype·Grype DB와 Chromium을 포함합니다. `-Source
 완성 `KODA.exe`는 빌드 중 `--smoke-test`로 대시보드 시작을 확인합니다.
 이 사전 검사가 통과해도 Windows 실기·WebView2 검증 완료를 뜻하지 않습니다.
 
+## 로컬 점검 도구
+
+Full 대시보드에서는 파일 검사, 프로젝트·점검 이력, HAR 응답 기록, 인증서·JWT 키
+길이와 이 PC의 TCP 수신 포트를 확인할 수 있습니다. SourceOnly 화면에는 HAR와 웹·ZAP
+점검이 표시되지 않습니다.
+
+SpotBugs와 Semgrep CE는 별도로 설치한 다음, 도구 환경 변수를 설정한 PowerShell에서
+`KODA.exe`를 시작하거나 `koda scan`을 실행합니다. 대시보드에서는 **SpotBugs · Semgrep CE**를
+열고 로컬 절대 경로를 입력합니다. [도구 설정과 사용법](../usage.ko.md#로컬-spotbugs와-semgrep-ce)
+
 설치 후 `koda-vuln-data-<date>.zip`을 별도로 반입해 NVD·CISA KEV 자료를
 현행화할 수 있습니다. 애플리케이션을 다시 빌드하지 않고 데이터 패키지만
 교체할 수 있습니다.

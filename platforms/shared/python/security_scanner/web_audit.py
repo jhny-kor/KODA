@@ -32,6 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ SCHEMA_VERSION = 1
 STATUS_VALUES = (
     "VULNERABLE",
     "PASS",
+    "NO_FINDING",
     "NEEDS_REVIEW",
     "UNSUPPORTED",
     "NOT_APPLICABLE",
@@ -1020,14 +1022,18 @@ def _current_resolution(origin_entry: Mapping[str, object]) -> list[str]:
         return _resolve_host(host, port)
 
 
+def _nonce_database(state_dir: Path | None) -> Path:
+    return (state_dir or Path.home() / ".koda").expanduser() / "web-audit-nonces.sqlite3"
+
+
 def consume_nonce(nonce: str, *, state_dir: Path | None = None, consumed_at: datetime | None = None) -> None:
-    state = state_dir or Path.home() / ".koda"
+    database = _nonce_database(state_dir)
+    state = database.parent
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         state.chmod(0o700)
     except OSError:
         pass
-    database = state / "web-audit-nonces.sqlite3"
     connection = sqlite3.connect(database)
     try:
         connection.execute("CREATE TABLE IF NOT EXISTS used_nonces (nonce TEXT PRIMARY KEY, consumed_at TEXT NOT NULL)")
@@ -1050,6 +1056,65 @@ def verify_approval(
     now: datetime | None = None,
     consume: bool = True,
 ) -> dict[str, object]:
+    current = _utc(now)
+    reviewed = _verify_approval_document(profile, approval, confirm_origin=confirm_origin, key=key, now=current)
+    for item in reviewed["origins"]:
+        if not isinstance(item, dict):
+            raise ApprovalError("approval origin entry is invalid")
+        old_ips = sorted(str(value) for value in item.get("resolved_ips", []))
+        current_ips = sorted(_current_resolution(item))
+        if old_ips != current_ips:
+            raise ApprovalError(f"target DNS/IP changed for {item.get('origin')}")
+    if consume:
+        consume_nonce(str(reviewed["nonce"]), state_dir=state_dir, consumed_at=current)
+    return reviewed
+
+
+def review_approval(
+    profile: Mapping[str, object] | str | Path,
+    approval: Mapping[str, object] | str | Path,
+    *,
+    confirm_origin: str,
+    key: str | bytes | None = None,
+    state_dir: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Check document integrity and read local replay state without changing it."""
+    reviewed = _verify_approval_document(profile, approval, confirm_origin=confirm_origin, key=key, now=_utc(now))
+    nonce_state = _review_nonce_state(str(reviewed["nonce"]), state_dir=state_dir)
+    return {
+        "kind": "koda.web-audit.approval-review",
+        "schema_version": SCHEMA_VERSION,
+        "document_status": "VERIFIED",
+        "profile_sha256": reviewed["profile_sha256"],
+        "expires_at": reviewed["expires_at"],
+        "dns_checked": False,
+        "nonce_state_checked": nonce_state in {"CONSUMED", "NOT_RECORDED"},
+        "nonce_state": nonce_state,
+    }
+
+
+def _review_nonce_state(nonce: str, *, state_dir: Path | None) -> str:
+    database = _nonce_database(state_dir)
+    try:
+        if not database.is_file():
+            return "UNAVAILABLE"
+        uri = database.absolute().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as connection:
+            used = connection.execute("SELECT 1 FROM used_nonces WHERE nonce = ?", (nonce,)).fetchone()
+    except (OSError, sqlite3.Error):
+        return "UNAVAILABLE"
+    return "CONSUMED" if used else "NOT_RECORDED"
+
+
+def _verify_approval_document(
+    profile: Mapping[str, object] | str | Path,
+    approval: Mapping[str, object] | str | Path,
+    *,
+    confirm_origin: str,
+    key: str | bytes | None,
+    now: datetime,
+) -> dict[str, object]:
     normalized = load_profile(profile)
     if isinstance(approval, (str, Path)):
         try:
@@ -1070,7 +1135,6 @@ def verify_approval(
     expected = hmac.new(_key_bytes(key), canonical_json(_approval_signing_payload(request, approver, approved_at)), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, str(approval_value.get("signature", ""))):
         raise ApprovalError("approval signature is invalid")
-    current = _utc(now)
     request_expires = _parse_time(request.get("expires_at"))
     expires = _parse_time(approval_value.get("expires_at"))
     if expires != request_expires:
@@ -1079,7 +1143,7 @@ def verify_approval(
     issued_at_time = _parse_time(request.get("issued_at"))
     if approved_at_time < issued_at_time or approved_at_time > expires:
         raise ApprovalError("approval timestamp is outside the signed request window")
-    if expires <= current:
+    if expires <= now:
         raise ApprovalError("approval has expired")
     if expires - issued_at_time > timedelta(hours=24):
         raise ApprovalError("approval exceeds the 24-hour window")
@@ -1087,15 +1151,6 @@ def verify_approval(
     approved_origins = {str(item.get("origin")) for item in request.get("origins", []) if isinstance(item, dict)}
     if exact_origin not in approved_origins:
         raise ApprovalError("--confirm-origin is not present in the approval")
-    for item in request.get("origins", []):
-        if not isinstance(item, dict):
-            raise ApprovalError("approval origin entry is invalid")
-        old_ips = sorted(str(value) for value in item.get("resolved_ips", []))
-        current_ips = sorted(_current_resolution(item))
-        if old_ips != current_ips:
-            raise ApprovalError(f"target DNS/IP changed for {item.get('origin')}")
-    if consume:
-        consume_nonce(str(request.get("nonce", "")), state_dir=state_dir, consumed_at=current)
     return {
         "request_id": str(request["request_id"]),
         "nonce": str(request["nonce"]),
@@ -2927,6 +2982,7 @@ def aggregate_results(
     findings: Sequence[Mapping[str, object]] = (),
     capabilities: Mapping[str, object] | None = None,
     passive_completed: bool = False,
+    passive_check_counts: Mapping[str, int] | None = None,
 ) -> list[dict[str, object]]:
     normalized = load_profile(profile)
     results = {control_id: _control_result(control_id) for control_id in CONTROL_IDS}
@@ -2977,6 +3033,20 @@ def aggregate_results(
             entry.update({"status": "NOT_SCANNED", "reason_code": str(not_scanned.get("reason_code", "scenario_not_scanned"))})
         elif completed == len(required_definitions):
             entry.update({"status": "PASS", "reason_code": "declared_oracle_passed"})
+    # Count only completed rule groups on inspected responses. A declared
+    # scenario keeps its own verdict, including missing or incomplete evidence.
+    declared_controls = {item["control_id"] for item in normalized["scenarios"]}
+    for check, control_id in (
+        ("response_security_headers", "web.plaintext-transmission"),
+        ("server_disclosure_headers", "web.information-disclosure"),
+        ("cors_response_headers", "web.authorization"),
+        ("set_cookie_attributes", "web.session-management"),
+    ):
+        count = (passive_check_counts or {}).get(check, 0)
+        entry = results[control_id]
+        if count > 0 and control_id not in declared_controls and entry["status"] == "NOT_SCANNED":
+            entry.update(status="NO_FINDING", executed=True, reason_code=check,
+                         coverage={"required": count, "completed": count})
     for finding in findings:
         control_id = str(finding.get("control_id", "")) or _finding_control(str(finding.get("rule_id", "")))
         if not control_id or control_id not in results or results[control_id]["status"] == "NOT_APPLICABLE":
@@ -3233,6 +3303,7 @@ def run_web_audit(
     warnings: list[str] = []
     pages = 0
     passive_completed = False
+    passive_check_counts: dict[str, int] = {}
     scopes = set(normalized["target"]["scopes"])
     opener = network.build_opener()
     auth_config = normalized.get("auth") if isinstance(normalized.get("auth"), dict) else {}
@@ -3276,6 +3347,7 @@ def run_web_audit(
                 probe_paths="active" in scopes,
                 allowed_origins=tuple(str(item) for item in normalized["target"]["origins"]),
                 network_context=network,
+                passive_check_counts=passive_check_counts,
             )
             findings.extend(crawl_findings)
             warnings.extend(crawl_warnings)
@@ -3360,9 +3432,10 @@ def run_web_audit(
         findings=[_finding_payload(item) for item in [*findings, *zap_findings]],
         capabilities=capabilities,
         passive_completed=passive_completed,
+        passive_check_counts=passive_check_counts if passive_completed else None,
     )
     vulnerable = any(item["status"] == "VULNERABLE" for item in control_results)
-    unresolved = any(item["status"] in {"NEEDS_REVIEW", "NOT_SCANNED"} for item in control_results)
+    unresolved = any(item["status"] in {"NEEDS_REVIEW", "NOT_SCANNED", "NO_FINDING"} for item in control_results)
     unsupported = any(item["status"] == "UNSUPPORTED" for item in control_results)
     result_status = "VULNERABLE" if vulnerable else ("NEEDS_REVIEW" if unresolved else ("UNSUPPORTED" if unsupported else "PASS"))
     result: dict[str, object] = {
