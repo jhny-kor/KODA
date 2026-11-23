@@ -614,8 +614,8 @@ final class ScannerBridge: ObservableObject {
     }
 
     func runZAPBaseline(language: AppLanguage) {
-        #if KODA_APP_STORE
-        setStatus(ko: "App Store판에서는 ZAP/능동 점검을 지원하지 않습니다.", en: "ZAP and active scanning are unavailable in the App Store build.")
+        #if KODA_APP_STORE || KODA_READ_ONLY_WEB
+        setStatus(ko: "이 배포판은 읽기 전용 웹 점검을 지원합니다.", en: "This distribution supports read-only web checks.")
         statusColor = .orange
         return
         #endif
@@ -4322,10 +4322,10 @@ private enum NativeWebScanner {
         var compareUnauth = false    // access-control: compare authed vs unauthenticated
         var secondaryHeaders: [String: String] = [:]  // access-control: second account
 
-        #if KODA_APP_STORE
-        static let appStoreReadOnly = true
+        #if KODA_APP_STORE || KODA_READ_ONLY_WEB
+        static let readOnlyDistribution = true
         #else
-        static let appStoreReadOnly = false
+        static let readOnlyDistribution = false
         #endif
 
         static let singlePage = Options()
@@ -4371,9 +4371,9 @@ private enum NativeWebScanner {
 
         let jar = CookieJar()
         var warnings: [String] = []
-        let appStoreReadOnly = Options.appStoreReadOnly
+        let appStoreReadOnly = Options.readOnlyDistribution
         if appStoreReadOnly {
-            warnings.append("App Store판은 GET/HEAD 기반 native read-only 점검만 실행합니다.")
+            warnings.append("이 배포판은 GET/HEAD 기반 읽기 전용 웹 점검을 실행합니다.")
         }
 
         if !options.loginURL.isEmpty && !appStoreReadOnly {
@@ -4415,7 +4415,7 @@ private enum NativeWebScanner {
                 if let u = URL(string: url) { enqueue(u, depth: 0) }
             }
         }
-        if options.probePaths {
+        if options.probePaths && !appStoreReadOnly {
             collected.append(contentsOf: await probeSensitivePaths(seed: seed, session: session, options: options, jar: jar, timeout: timeout))
             if !appStoreReadOnly {
                 collected.append(contentsOf: await probeGraphQL(seed: seed, session: session, options: options, jar: jar, timeout: timeout))
@@ -4456,7 +4456,7 @@ private enum NativeWebScanner {
                     activeTargetsProbed += 1
                     collected.append(contentsOf: await activeProbe(url: page.finalURL, session: session, options: options, jar: jar, timeout: timeout))
                 }
-                if (options.compareUnauth || !options.secondaryHeaders.isEmpty), !isStaticAsset(page.finalURL.absoluteString) {
+                if !appStoreReadOnly, (options.compareUnauth || !options.secondaryHeaders.isEmpty), !isStaticAsset(page.finalURL.absoluteString) {
                     collected.append(contentsOf: await accessControlCheck(url: page.finalURL, session: session, options: options, jar: jar, timeout: timeout))
                 }
                 if current.scheme?.lowercased() == "http", page.finalURL.scheme?.lowercased() != "https" {
@@ -4474,16 +4474,14 @@ private enum NativeWebScanner {
                         version: delegate.negotiatedTLSVersion
                     ))
                 }
-                if let host = page.finalURL.host, !hostProbed.contains(host), !isStaticAsset(page.finalURL.absoluteString) {
+                if !appStoreReadOnly, let host = page.finalURL.host, !hostProbed.contains(host), !isStaticAsset(page.finalURL.absoluteString) {
                     // Per-host active probes (once each): dynamic CORS (origin reflection /
                     // 'null') and advertised HTTP methods (TRACE / write). Host-header
                     // injection isn't reliably testable via URLSession (it reserves the
                     // Host header) — that check lives in the Python engine and ZAP.
                     hostProbed.insert(host)
                     collected.append(contentsOf: await corsReflectionProbe(url: page.finalURL, session: session, timeout: timeout))
-                    if !appStoreReadOnly {
-                        collected.append(contentsOf: await httpMethodsProbe(url: page.finalURL, session: session, timeout: timeout))
-                    }
+                    collected.append(contentsOf: await httpMethodsProbe(url: page.finalURL, session: session, timeout: timeout))
                 }
                 if options.crawl {
                     var links = extractLinks(base: page.finalURL, body: page.body)

@@ -112,6 +112,9 @@ if [[ ! -x "$builder_venv/bin/python" ]]; then
 fi
 "$builder_venv/bin/python" -m pip install --quiet --upgrade pyinstaller
 helper_excludes=(--exclude-module security_scanner.app --exclude-module tkinter --exclude-module _tkinter)
+if [[ "${KODA_MACOS_HELPER_LOCAL_DESKTOP_ONLY:-0}" == "1" ]]; then
+  helper_excludes+=(--exclude-module security_scanner.web --exclude-module security_scanner.dast --exclude-module security_scanner.netprobe)
+fi
 desktop_dashboard=true
 if [[ "${KODA_MACOS_HELPER_APP_STORE:-0}" == "1" ]]; then
   helper_excludes+=(--exclude-module security_scanner.server)

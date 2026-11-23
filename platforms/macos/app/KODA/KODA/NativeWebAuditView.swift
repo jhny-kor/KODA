@@ -24,7 +24,7 @@ final class NativeWebAuditViewModel: ObservableObject {
     private var accessedURLs: [URL] = []
 
     var readOnlyDistribution: Bool {
-        #if KODA_APP_STORE
+        #if KODA_APP_STORE || KODA_READ_ONLY_WEB
         true
         #else
         false

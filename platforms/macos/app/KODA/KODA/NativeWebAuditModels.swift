@@ -74,7 +74,7 @@ struct WebAuditProfile: Codable, Sendable {
     var allowStateChanges = false
     var includePaths = ["/"]
     var excludePaths = ["/logout", "/signout"]
-    #if KODA_APP_STORE
+    #if KODA_APP_STORE || KODA_READ_ONLY_WEB
     var allowedMethods = ["GET", "HEAD"]
     #else
     var allowedMethods = ["GET", "HEAD", "OPTIONS"]

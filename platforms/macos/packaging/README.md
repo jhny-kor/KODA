@@ -60,6 +60,10 @@ the shared Python, Windows, Linux, or legacy macOS application lanes.
 
 ### Direct-distribution dashboard
 
+The `macOS-1.2` GitHub prerelease includes the local desktop dashboard, local
+source and Java checks, and read-only website checks. SpotBugs and Semgrep CE
+are installed separately.
+
 Open **Prevention Kit → Open browser dashboard** in the direct build. The
 loopback dashboard supports local source scanning and reports, HAR review, TCP
 listener inventory, PEM/DER certificate review, and JWT HMAC key-size checks.

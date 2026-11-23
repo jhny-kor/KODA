@@ -39,6 +39,10 @@ SHA-256 지문을 확인하고, HS256·HS384·HS512의 키 길이를 확인합�
 `koda-local dashboard`로 대시보드를 시작할 수 있습니다.
 [도구 설정과 사용법](../../../docs/usage.ko.md#로컬-spotbugs와-semgrep-ce)
 
+GitHub `macOS-1.2` 사전 릴리즈의 직접배포 빌드는 로컬 소스·파일·Java 점검과
+읽기 전용 웹 응답 점검을 제공합니다. 로컬 대시보드와 `koda-local`은
+앱에 포함되며 SpotBugs·Semgrep CE는 별도로 설치합니다.
+
 기본 앱 아키텍처는 arm64입니다. 자산은 `KODA_MACOS_ARCH=arm64` 또는
 `KODA_MACOS_ARCH=x86_64`로 한 번에 한 아키텍처씩 준비합니다. Intel helper는
 Intel Mac 또는 x86_64 Python을 제공하는 교차 빌드 환경에서 만들 수 있습니다.

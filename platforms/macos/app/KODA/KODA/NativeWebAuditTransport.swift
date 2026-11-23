@@ -37,10 +37,10 @@ actor WebAuditTransport {
               let target = URL(string: profile.target), !Self.origin(target).isEmpty,
               target.user == nil, target.password == nil, target.fragment == nil,
               !profile.includePaths.isEmpty else { throw WebAuditError.invalidProfile("authorized HTTP target required") }
-        #if KODA_APP_STORE
+        #if KODA_APP_STORE || KODA_READ_ONLY_WEB
         guard !profile.active, !profile.allowStateChanges,
               profile.allowedMethods.allSatisfy({ ["GET", "HEAD"].contains($0) }) else {
-            throw WebAuditError.invalidProfile("App Store distribution permits read-only profiles")
+            throw WebAuditError.invalidProfile("This distribution permits read-only profiles")
         }
         #endif
         let l = profile.limits
@@ -161,7 +161,7 @@ actor WebAuditTransport {
         guard profile.includePaths.contains(where: { Self.contains($0, path) }),
               !profile.excludePaths.contains(where: { Self.contains($0, path) }) else { throw WebAuditError.blocked("path outside profile") }
         let method = input.method
-        #if KODA_APP_STORE
+        #if KODA_APP_STORE || KODA_READ_ONLY_WEB
         guard ["GET", "HEAD"].contains(method) else { throw WebAuditError.blocked("read-only distribution") }
         #endif
         guard profile.allowedMethods.contains(method),
